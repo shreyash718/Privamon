@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Privacy Agent Test Page</title>
+<style>
+  body { font-family: sans-serif; max-width: 420px; margin: 60px auto; }
+  label { display: block; margin-top: 14px; font-size: 14px; color: #333; }
+  input, textarea, select { width: 100%; padding: 8px; margin-top: 4px; box-sizing: border-box; }
+  button { margin-top: 20px; padding: 10px 16px; }
+  .bio { margin-top: 14px; padding: 10px; background: #f4f4f4; border-radius: 6px; font-size: 14px; }
+  img { margin-top: 14px; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<h2>Sign Up</h2>
+<form id="signupForm">
+
+  <label for="fullName">Full Name</label>
+  <input type="text" id="fullName" name="fullName" placeholder="e.g. Rohan Sharma" value="Rohan Sharma">
+
+  <label for="email">Email</label>
+  <input type="email" id="email" name="email" placeholder="you@example.com" value="rohan.sharma@example.com">
+
+  <label for="phone">Phone Number</label>
+  <input type="tel" id="phone" name="phone" placeholder="10-digit number" value="9876543210">
+
+  <label for="cardNumber">Card Number</label>
+  <input type="text" id="cardNumber" name="cardNumber" autocomplete="cc-number" placeholder="1234 5678 9012 3456" value="4111111111111111">
+
+  <label for="password">Password</label>
+  <input type="password" id="password" name="password" placeholder="Enter password" value="SuperSecret123">
+
+  <label for="notes">Notes</label>
+  <textarea id="notes" name="notes" rows="3">Contact me at rohan.sharma@example.com or 9876543210 if there's an issue.</textarea>
+
+  <div class="bio">
+    <strong>Profile Bio (contains photo — for visual PII testing):</strong>
+    <img src="test-face.png" alt="profile photo" width="120" height="120">
+  </div>
+
+  <button type="submit" id="submitBtn">Create Account</button>
+
+</form>
+
+<script>
+  // Prevent actual navigation/submission during testing
+  document.getElementById('signupForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    console.log('Form submit intercepted (test page — no real submission).');
+  });
+</script>
+
+</body>
+</html>

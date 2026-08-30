@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Privamon</title>
+<style>
+  body {
+    width: 280px;
+    font-family: sans-serif;
+    padding: 14px;
+    margin: 0;
+  }
+  h3 { margin: 0 0 10px 0; font-size: 15px; }
+  textarea {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 8px;
+    font-size: 13px;
+    resize: vertical;
+    min-height: 50px;
+  }
+  button {
+    margin-top: 10px;
+    width: 100%;
+    padding: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  #status {
+    margin-top: 10px;
+    font-size: 12px;
+    color: #555;
+    white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+  <h3>Privamon</h3>
+  <label for="actionInput">What do you want done on this page?</label>
+  <textarea id="actionInput" placeholder="e.g. Fill out and submit this signup form"></textarea>
+  <button id="captureBtn">Capture &amp; Sanitize</button>
+  <div id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

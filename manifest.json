@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Privamon - Privacy Vision Agent",
+  "version": "0.2.0",
+  "description": "Local-first privacy-preserving screen agent (SIH 2026 prototype).",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["dist/content.bundle.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["models/*"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ]
+}
+
