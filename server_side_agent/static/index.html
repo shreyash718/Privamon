@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dummy Frontend - Vision Agent Server Test</title>
+    <style>
+        body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: auto; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; }
+        input[type="text"], textarea { width: 100%; padding: 8px; box-sizing: border-box; }
+        textarea { height: 100px; font-family: monospace; }
+        button { padding: 10px 15px; font-size: 16px; cursor: pointer; }
+        #responseArea { margin-top: 20px; padding: 10px; background: #f4f4f4; border: 1px solid #ddd; white-space: pre-wrap; font-family: monospace; min-height: 100px; }
+        #preview { max-width: 100%; max-height: 300px; margin-top: 10px; display: none; }
+    </style>
+</head>
+<body>
+
+    <h2>Test Endpoint: POST /interpret</h2>
+
+    <div class="form-group">
+        <label>Upload Image:</label>
+        <input type="file" id="imageInput" accept="image/*">
+        <img id="preview" src="" alt="Image Preview">
+    </div>
+
+    <div class="form-group">
+        <label>Task Prompt:</label>
+        <input type="text" id="taskInput" value="Describe what you see in this image.">
+    </div>
+
+    <div class="form-group">
+        <label>Redacted Regions (JSON List):</label>
+        <textarea id="regionsInput">[
+  {
+    "bbox": [100, 100, 200, 200],
+    "reason": "username"
+  }
+]</textarea>
+    </div>
+
+    <div class="form-group">
+        <label>Sanitized DOM Context:</label>
+        <textarea id="domInput">&lt;input type="text" aria-label="Search" class="gLFyf" name="q" title="Search"&gt;</textarea>
+    </div>
+
+    <button id="sendBtn">Send Request</button>
+
+    <h3>Server Response:</h3>
+    <div id="responseArea">Waiting for request...</div>
+
+    <script>
+        let base64Image = "";
+
+        // Preview image and convert to base64
+        document.getElementById("imageInput").addEventListener("change", function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const dataUrl = event.target.result;
+                document.getElementById("preview").src = dataUrl;
+                document.getElementById("preview").style.display = "block";
+                
+                // Extract base64 without prefix
+                base64Image = dataUrl.split(",")[1];
+            };
+            reader.readAsDataURL(file);
+        });
+
+        // Send request
+        document.getElementById("sendBtn").addEventListener("click", async function() {
+            if (!base64Image) {
+                alert("Please select an image first!");
+                return;
+            }
+
+            const task = document.getElementById("taskInput").value;
+            const sanitizedDom = document.getElementById("domInput").value;
+            let redactedRegions = [];
+            try {
+                redactedRegions = JSON.parse(document.getElementById("regionsInput").value);
+            } catch (e) {
+                alert("Invalid JSON for Redacted Regions!");
+                return;
+            }
+
+            const payload = {
+                image_b64: base64Image,
+                task: task,
+                redacted_regions: redactedRegions,
+                sanitized_dom: sanitizedDom
+            };
+
+            const responseArea = document.getElementById("responseArea");
+            responseArea.innerText = "Sending request to /interpret...\nCheck your uvicorn terminal for thinking logs!";
+
+            try {
+                const response = await fetch("/interpret", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    responseArea.innerText = JSON.stringify(data, null, 2);
+                } else {
+                    const error = await response.json();
+                    responseArea.innerText = "HTTP " + response.status + ":\n" + JSON.stringify(error, null, 2);
+                }
+            } catch (err) {
+                responseArea.innerText = "Network Error: " + err.message;
+            }
+        });
+    </script>
+</body>
+</html>
