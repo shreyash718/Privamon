@@ -8,7 +8,7 @@ Create a virtual env in python install packages of requiremets.txt and run the u
 
 Go to static routing site at your localhost (e.g., [http://localhost:9998/static/](http://localhost:9998/static/)) which will open simple html page just to check server side is doing its task.(Or whatever port it runs on default is 8000 mine was busy)
 
-Use `test_small.png` as image here are dummy inputs to check server side.
+Use `test_redacted.png` as image here are dummy inputs to check server side.
 
 **Task Prompt:**
 ```text
