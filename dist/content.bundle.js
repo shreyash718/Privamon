@@ -875,16 +875,16 @@
     "node_modules/tesseract.js/src/worker/browser/spawnWorker.js"(exports, module2) {
       "use strict";
       module2.exports = ({ workerPath, workerBlobURL }) => {
-        let worker2;
+        let worker;
         if (Blob && URL && workerBlobURL) {
           const blob = new Blob([`importScripts("${workerPath}");`], {
             type: "application/javascript"
           });
-          worker2 = new Worker(URL.createObjectURL(blob));
+          worker = new Worker(URL.createObjectURL(blob));
         } else {
-          worker2 = new Worker(workerPath);
+          worker = new Worker(workerPath);
         }
-        return worker2;
+        return worker;
       };
     }
   });
@@ -893,8 +893,8 @@
   var require_terminateWorker = __commonJS({
     "node_modules/tesseract.js/src/worker/browser/terminateWorker.js"(exports, module2) {
       "use strict";
-      module2.exports = (worker2) => {
-        worker2.terminate();
+      module2.exports = (worker) => {
+        worker.terminate();
       };
     }
   });
@@ -903,8 +903,8 @@
   var require_onMessage = __commonJS({
     "node_modules/tesseract.js/src/worker/browser/onMessage.js"(exports, module2) {
       "use strict";
-      module2.exports = (worker2, handler) => {
-        worker2.onmessage = ({ data }) => {
+      module2.exports = (worker, handler) => {
+        worker.onmessage = ({ data }) => {
           handler(data);
         };
       };
@@ -915,8 +915,8 @@
   var require_send = __commonJS({
     "node_modules/tesseract.js/src/worker/browser/send.js"(exports, module2) {
       "use strict";
-      module2.exports = async (worker2, packet) => {
-        worker2.postMessage(packet);
+      module2.exports = async (worker, packet) => {
+        worker.postMessage(packet);
       };
     }
   });
@@ -1037,14 +1037,14 @@
         const workerError = (event) => {
           workerResReject(event.message);
         };
-        let worker2 = spawnWorker(options);
-        worker2.onerror = workerError;
+        let worker = spawnWorker(options);
+        worker.onerror = workerError;
         workerCounter += 1;
         const startJob = ({ id: jobId, action, payload }) => new Promise((resolve, reject) => {
           log(`[${id2}]: Start ${jobId}, action=${action}`);
           const promiseId = `${action}-${jobId}`;
           promises[promiseId] = { resolve, reject };
-          send(worker2, {
+          send(worker, {
             workerId: id2,
             jobId,
             action,
@@ -1132,13 +1132,13 @@
           }));
         };
         const terminate = async () => {
-          if (worker2 !== null) {
-            terminateWorker(worker2);
-            worker2 = null;
+          if (worker !== null) {
+            terminateWorker(worker);
+            worker = null;
           }
           return Promise.resolve();
         };
-        onMessage(worker2, ({
+        onMessage(worker, ({
           workerId,
           jobId,
           status,
@@ -1165,7 +1165,7 @@
         });
         const resolveObj = {
           id: id2,
-          worker: worker2,
+          worker,
           load,
           writeText,
           readText,
@@ -1190,15 +1190,15 @@
       "use strict";
       var createWorker2 = require_createWorker();
       var recognize = async (image, langs, options) => {
-        const worker2 = await createWorker2(langs, 1, options);
-        return worker2.recognize(image).finally(async () => {
-          await worker2.terminate();
+        const worker = await createWorker2(langs, 1, options);
+        return worker.recognize(image).finally(async () => {
+          await worker.terminate();
         });
       };
       var detect = async (image, options) => {
-        const worker2 = await createWorker2("osd", 0, options);
-        return worker2.detect(image).finally(async () => {
-          await worker2.terminate();
+        const worker = await createWorker2("osd", 0, options);
+        return worker.detect(image).finally(async () => {
+          await worker.terminate();
         });
       };
       module2.exports = {
@@ -19623,17 +19623,6 @@
 
   // src/visionOCR.js
   var import_tesseract = __toESM(require_src());
-  var worker = null;
-  async function initOCR() {
-    if (worker) return worker;
-    worker = await (0, import_tesseract.createWorker)("eng");
-    return worker;
-  }
-  async function extractTextFromImage(imgEl) {
-    if (!worker) await initOCR();
-    const { data } = await worker.recognize(imgEl.src);
-    return data.text || "";
-  }
 
   // src/redact.js
   async function redactImageRegions(imgEl, regions) {
@@ -19691,7 +19680,6 @@
       attempted++;
       try {
         const faceBoxes = await detectFacesInElement(imgEl);
-        const ocrText = await extractTextFromImage(imgEl).catch(() => "");
         let redactedDataUrl = null;
         if (faceBoxes.length > 0) {
           redactedDataUrl = await redactImageRegions(imgEl, faceBoxes);
@@ -19700,8 +19688,13 @@
           selector: el2.selector,
           facesDetected: faceBoxes.length,
           faceBoxes,
-          ocrTextFound: ocrText.trim().length > 0,
-          redactedImage: redactedDataUrl
+          // ocrTextFound: ocrText.trim().length > 0,
+          redactedImage: redactedDataUrl,
+          // Needed later to convert face boxes (natural-pixel space) into
+          // viewport coordinates for redacting the full-page screenshot.
+          viewportRect: el2.rect,
+          naturalWidth: imgEl.naturalWidth,
+          naturalHeight: imgEl.naturalHeight
         });
       } catch (err) {
         console.warn("[Privamon] Vision processing failed for", el2.selector, err);
@@ -19712,24 +19705,53 @@
   function findBySrc(src) {
     return Array.from(document.images).find((i2) => i2.src === src) || null;
   }
+  function collectRedactionRegions(sanitizedElements, imageFindings) {
+    const regions = [];
+    for (const el2 of sanitizedElements) {
+      if (el2.piiDetected && el2.piiDetected.length > 0 && el2.rect) {
+        regions.push({ ...el2.rect, reason: "field:" + el2.piiDetected.join(",") });
+      }
+    }
+    for (const img of imageFindings) {
+      if (!img.faceBoxes || img.faceBoxes.length === 0) continue;
+      const { viewportRect: vr2, naturalWidth: nw, naturalHeight: nh2 } = img;
+      if (!vr2 || !nw || !nh2) continue;
+      const scaleX = vr2.w / nw;
+      const scaleY = vr2.h / nh2;
+      for (const box of img.faceBoxes) {
+        regions.push({
+          x: vr2.x + box.x * scaleX,
+          y: vr2.y + box.y * scaleY,
+          w: box.w * scaleX,
+          h: box.h * scaleY,
+          reason: "face"
+        });
+      }
+    }
+    return regions;
+  }
   async function runPipeline(userAction) {
     console.time("[Privamon] full pipeline");
     console.time("[Privamon] dom capture");
     const rawElements = captureDomElements();
     console.timeEnd("[Privamon] dom capture");
-    console.time("[Privamon] text sanitize");
+    console.time("[Privamon] text sanitize (regex/attribute)");
     const sanitizedElements = sanitizeDomElements(rawElements);
-    console.timeEnd("[Privamon] text sanitize");
+    console.timeEnd("[Privamon] text sanitize (regex/attribute)");
     console.time("[Privamon] vision pipeline");
     const imageFindings = await processImages(rawElements);
     console.timeEnd("[Privamon] vision pipeline");
+    const redactionRegions = collectRedactionRegions(sanitizedElements, imageFindings);
     const payload = {
       url: location.href,
       timestamp: Date.now(),
       userAction: userAction || null,
       // what the user wants done — goes to the server alongside sanitized context
       elements: sanitizedElements,
-      imageFindings
+      imageFindings,
+      redactionRegions,
+      // viewport-space boxes the popup will black out on the screenshot
+      devicePixelRatio: window.devicePixelRatio || 1
     };
     console.timeEnd("[Privamon] full pipeline");
     console.log("[Privamon] SANITIZED PAYLOAD:", payload);
@@ -19740,11 +19762,7 @@
     if (message.type !== "PRIVAMON_CAPTURE") return false;
     runPipeline(message.action).then(async (payload) => {
       await chrome.storage.local.set({ privamon_last_capture: payload });
-      sendResponse({
-        ok: true,
-        elementCount: payload.elements.length,
-        imageCount: payload.imageFindings.length
-      });
+      sendResponse({ ok: true, payload });
     }).catch((err) => {
       console.error("[Privamon] Pipeline failed:", err);
       sendResponse({ ok: false, error: err.message });

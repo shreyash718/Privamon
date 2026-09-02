@@ -10,8 +10,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "esbuild": "^0.28.2",
     "face-api.js": "^0.22.2",
+    "onnxruntime-web": "^1.29.0",
     "tesseract.js": "^7.0.0"
   }
 }

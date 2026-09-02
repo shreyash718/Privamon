@@ -20,6 +20,7 @@ window.addEventListener('unhandledrejection', (event) => {
 
 import { captureDomElements } from './domCapture.js';
 import { sanitizeDomElements } from './piiText.js';
+// import { detectAndRedactBatch } from './textPII.js';
 import { loadFaceModel, detectFacesInElement } from './visionFaces.js';
 import { extractTextFromImage } from './visionOCR.js';
 import { redactImageRegions } from './redact.js';
@@ -80,7 +81,7 @@ async function processImages(domElements) {
 
     try {
       const faceBoxes = await detectFacesInElement(imgEl);
-      const ocrText = await extractTextFromImage(imgEl).catch(() => '');
+      // const ocrText = await extractTextFromImage(imgEl).catch(() => '');
 
       let redactedDataUrl = null;
       if (faceBoxes.length > 0) {
@@ -91,8 +92,13 @@ async function processImages(domElements) {
         selector: el.selector,
         facesDetected: faceBoxes.length,
         faceBoxes,
-        ocrTextFound: ocrText.trim().length > 0,
+        // ocrTextFound: ocrText.trim().length > 0,
         redactedImage: redactedDataUrl,
+        // Needed later to convert face boxes (natural-pixel space) into
+        // viewport coordinates for redacting the full-page screenshot.
+        viewportRect: el.rect,
+        naturalWidth: imgEl.naturalWidth,
+        naturalHeight: imgEl.naturalHeight,
       });
     } catch (err) {
       console.warn('[Privamon] Vision processing failed for', el.selector, err);
@@ -106,6 +112,53 @@ function findBySrc(src) {
   return Array.from(document.images).find((i) => i.src === src) || null;
 }
 
+/**
+ * Builds a list of viewport-relative (x, y, w, h) boxes to black out on the
+ * full-page screenshot — one per sensitive DOM field and one per detected face.
+ * Coordinates are in CSS pixels; the popup scales them by devicePixelRatio
+ * when drawing onto the (device-pixel-resolution) captured screenshot.
+ */
+function collectRedactionRegions(sanitizedElements, imageFindings) {
+  const regions = [];
+
+  // Sensitive form fields — anything our text/attribute sanitizer flagged.
+  for (const el of sanitizedElements) {
+    if (el.piiDetected && el.piiDetected.length > 0 && el.rect) {
+      regions.push({ ...el.rect, reason: 'field:' + el.piiDetected.join(',') });
+    }
+  }
+
+  // Detected faces — convert from natural-image-pixel space to viewport space.
+  for (const img of imageFindings) {
+    if (!img.faceBoxes || img.faceBoxes.length === 0) continue;
+    const { viewportRect: vr, naturalWidth: nw, naturalHeight: nh } = img;
+    if (!vr || !nw || !nh) continue;
+
+    const scaleX = vr.w / nw;
+    const scaleY = vr.h / nh;
+
+    for (const box of img.faceBoxes) {
+      regions.push({
+        x: vr.x + box.x * scaleX,
+        y: vr.y + box.y * scaleY,
+        w: box.w * scaleX,
+        h: box.h * scaleY,
+        reason: 'face',
+      });
+    }
+  }
+
+  return regions;
+}
+
+/**
+ * Second-pass redaction using the NER model — catches PII that regex
+ * structurally cannot (names, addresses, etc.). Skips fields already fully
+ * replaced by the attribute-based pass (e.g. exactly "[REDACTED]" — nothing
+ * left there to improve on). Batches all fields into one inference call.
+ */
+
+
 async function runPipeline(userAction) {
   console.time('[Privamon] full pipeline');
 
@@ -113,13 +166,16 @@ async function runPipeline(userAction) {
   const rawElements = captureDomElements();
   console.timeEnd('[Privamon] dom capture');
 
-  console.time('[Privamon] text sanitize');
+  console.time('[Privamon] text sanitize (regex/attribute)');
   const sanitizedElements = sanitizeDomElements(rawElements);
-  console.timeEnd('[Privamon] text sanitize');
+  console.timeEnd('[Privamon] text sanitize (regex/attribute)');
+
 
   console.time('[Privamon] vision pipeline');
   const imageFindings = await processImages(rawElements);
   console.timeEnd('[Privamon] vision pipeline');
+
+  const redactionRegions = collectRedactionRegions(sanitizedElements, imageFindings);
 
   const payload = {
     url: location.href,
@@ -127,6 +183,8 @@ async function runPipeline(userAction) {
     userAction: userAction || null, // what the user wants done — goes to the server alongside sanitized context
     elements: sanitizedElements,
     imageFindings,
+    redactionRegions, // viewport-space boxes the popup will black out on the screenshot
+    devicePixelRatio: window.devicePixelRatio || 1,
   };
 
   console.timeEnd('[Privamon] full pipeline');
@@ -147,11 +205,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .then(async (payload) => {
       // Store locally for now — this is what a later step will POST to the server.
       await chrome.storage.local.set({ privamon_last_capture: payload });
-      sendResponse({
-        ok: true,
-        elementCount: payload.elements.length,
-        imageCount: payload.imageFindings.length,
-      });
+      // Send the full payload back — the popup needs redactionRegions and
+      // devicePixelRatio to redact the screenshot it's about to capture.
+      sendResponse({ ok: true, payload });
     })
     .catch((err) => {
       console.error('[Privamon] Pipeline failed:', err);

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Privamon — Last Capture</title>
+<style>
+  body { font-family: sans-serif; max-width: 900px; margin: 30px auto; padding: 0 20px; }
+  h2 { margin-top: 30px; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; font-size: 13px; text-align: left; vertical-align: top; }
+  th { background: #f4f4f4; }
+  .redacted { color: #b00; font-weight: bold; }
+  .meta { color: #555; font-size: 13px; }
+  img#screenshot { max-width: 100%; border: 2px solid #333; margin-top: 10px; }
+  .empty { color: #888; font-style: italic; }
+</style>
+</head>
+<body>
+  <h1>Privamon — Last Capture</h1>
+  <div id="meta" class="meta"></div>
+
+  <h2>Redacted Screenshot</h2>
+  <div id="screenshotWrap"><p class="empty">No screenshot in this capture.</p></div>
+
+  <h2>Captured DOM Elements (sanitized)</h2>
+  <table id="elementsTable">
+    <thead><tr><th>Tag</th><th>Type</th><th>Value</th><th>Text</th><th>PII Flags</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Image Findings</h2>
+  <table id="imagesTable">
+    <thead><tr><th>Selector</th><th>Faces Detected</th><th>OCR Text Found</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <h2>Redaction Regions (screenshot boxes)</h2>
+  <table id="regionsTable">
+    <thead><tr><th>x</th><th>y</th><th>w</th><th>h</th><th>Reason</th></tr></thead>
+    <tbody></tbody>
+  </table>
+
+  <script src="results.js"></script>
+</body>
+</html>
