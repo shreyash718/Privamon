@@ -1,0 +1,14 @@
+{
+  "name": "privamon",
+  "version": "0.1.0",
+  "description": "Privacy-Preserving Browser Agent — Local Sanitization Pipeline",
+  "private": true,
+  "scripts": {
+    "setup": "node scripts/copy-libs.js",
+    "postinstall": "node scripts/copy-libs.js"
+  },
+  "dependencies": {
+    "tesseract.js": "^5.1.1",
+    "onnxruntime-web": "^1.21.0"
+  }
+}
