@@ -157,6 +157,7 @@ Privamon.PIIFusion = (() => {
       confidence: detection.confidence || 0.5,
       elementId: detection.elementId || null,
       reason: detection.reason || null,
+      coordinateSpace: detection.coordinateSpace || null,
     };
   }
 

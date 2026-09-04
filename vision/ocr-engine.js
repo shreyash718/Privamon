@@ -26,6 +26,7 @@ Privamon.OCREngine = (() => {
   let worker = null;
   let isInitialized = false;
   let initPromise = null;
+  let isProcessing = false; // Mutex to prevent overlapping OCR pipeline executions
 
   // ── Selectivity Heuristics ──
 
@@ -34,14 +35,18 @@ Privamon.OCREngine = (() => {
   const MIN_OCR_HEIGHT = 20;
 
   // Maximum fraction of viewport a single region can be to still qualify
-  // (very large regions are likely hero images, not documents)
-  const MAX_VIEWPORT_FRACTION = 0.8;
+  // Set to 1.0 to allow full-screen images (like documents opened directly in the browser)
+  const MAX_VIEWPORT_FRACTION = 1.0;
+
+  // Maximum absolute area for OCR (Tesseract is slow on huge images, but we need to support full-page documents)
+  // Increased from 400k to 5 million (e.g., 2000x2500)
+  const MAX_OCR_AREA = 5000000; 
 
   // Keywords in alt/src that suggest the image may contain text
   const TEXT_HINT_KEYWORDS = [
     'document', 'receipt', 'invoice', 'bill', 'statement', 'certificate',
     'license', 'passport', 'id', 'card', 'form', 'scan', 'screenshot',
-    'cheque', 'check', 'letter', 'report', 'aadhaar', 'pan',
+    'cheque', 'check', 'letter', 'report', 'aadhaar', 'pan', 'text', 'doc'
   ];
 
   /**
@@ -62,8 +67,8 @@ Privamon.OCREngine = (() => {
         return false;
       }
 
-      // 2. Skip enormous decorative regions (hero images)
-      if (area > viewportArea * MAX_VIEWPORT_FRACTION) {
+      // 2. Skip absolutely massive images that will crash WASM memory (e.g., > 5MP)
+      if (area > MAX_OCR_AREA) {
         return false;
       }
 
@@ -84,26 +89,23 @@ Privamon.OCREngine = (() => {
         const altLower = (alt || '').toLowerCase();
         const srcLower = (src || '').toLowerCase();
 
-        // Data URIs or blob URIs suggest generated/dynamic content — prioritize
-        if (srcLower.startsWith('data:') || srcLower.startsWith('blob:')) {
-          return true;
-        }
-
-        // Check for text-hint keywords
+        // Check for text-hint keywords using exact word matching to avoid false positives 
+        // (e.g., 'id' matching inside 'width' or 'pan' inside 'company')
+        const words = [...altLower.split(/[^a-z0-9]+/), ...srcLower.split(/[^a-z0-9]+/)];
         for (const keyword of TEXT_HINT_KEYWORDS) {
-          if (altLower.includes(keyword) || srcLower.includes(keyword)) {
+          if (words.includes(keyword)) {
             return true;
           }
         }
 
-        // Medium-sized images (between icon and hero) in reasonable aspect ratio
-        // could be documents or screenshots
-        const aspectRatio = bbox.width / bbox.height;
-        if (aspectRatio > 0.5 && aspectRatio < 3.0 && area > 10000) {
-          return true;
+        // Data URIs or blob URIs suggest generated/dynamic content
+        // BUT they can also be massive photos. Only accept if relatively small.
+        if (srcLower.startsWith('data:') || srcLower.startsWith('blob:')) {
+          if (area < 150000) return true;
         }
 
-        // Default: skip small/decorative images
+        // Default: skip small/decorative images and arbitrary generic photos
+        // (Tesseract is too slow on complex scenery/people photos)
         return false;
       }
 
@@ -128,20 +130,29 @@ Privamon.OCREngine = (() => {
           return;
         }
 
-        worker = await Tesseract.createWorker('eng', 1, {
+        const tStart = performance.now();
+        
+        // Add a timeout for initialization to prevent indefinite buffering if traineddata is missing or stalled
+        const initTimeout = new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Tesseract initialization timeout')), 15000)
+        );
+
+        const workerPromise = Tesseract.createWorker('eng', 1, {
           workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
           corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-simd.wasm.js'),
           langPath: chrome.runtime.getURL('lib/tesseract/'),
           workerBlobURL: false,
-          // Disable logger in production to avoid noise
-          // logger: (m) => console.log('[OCR]', m),
         });
 
+        worker = await Promise.race([workerPromise, initTimeout]);
+
         isInitialized = true;
-        console.log('[OCREngine] Initialized successfully');
+        console.log(`[OCREngine] Initialized successfully in ${Math.round(performance.now() - tStart)}ms`);
       } catch (err) {
         console.error('[OCREngine] Initialization failed:', err);
         worker = null;
+        isInitialized = false;
+        initPromise = null;
       }
     })();
 
@@ -162,13 +173,21 @@ Privamon.OCREngine = (() => {
     }
 
     try {
-      const result = await worker.recognize(regionDataUrl);
+      // Add a generous timeout (25s) for full-page dense images
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('OCR Timeout')), 25000)
+      );
+      
+      const result = await Promise.race([
+        worker.recognize(regionDataUrl),
+        timeoutPromise
+      ]);
 
       if (!result || !result.data || !result.data.words) return [];
 
       // Map Tesseract word bboxes back to screenshot coordinates
       return result.data.words
-        .filter(w => w.confidence > 30) // Filter low-confidence noise
+        .filter(w => w.confidence > 5 && w.text.trim()) // Lowered to 5 to avoid discarding valid text. Regex handles false positives.
         .map(w => ({
           text: w.text,
           confidence: w.confidence / 100, // Normalize to 0–1
@@ -183,7 +202,11 @@ Privamon.OCREngine = (() => {
           source: 'ocr',
         }));
     } catch (err) {
-      console.error('[OCREngine] Recognition failed:', err);
+      console.error('[OCREngine] Recognition failed or timed out:', err);
+      // If we hit a timeout or serious error, kill the worker to prevent it from hanging future jobs
+      if (err.message === 'OCR Timeout' || err.message.includes('Timeout')) {
+         terminate(); // Do NOT await terminate, as a deadlocked worker will hang the promise forever!
+      }
       return [];
     }
   }
@@ -199,59 +222,127 @@ Privamon.OCREngine = (() => {
   async function processRegions(screenshotDataUrl, regions, mapper) {
     if (regions.length === 0) return [];
 
-    await initialize();
-    if (!worker) return [];
+    // Simple queue/mutex
+    while (isProcessing) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    isProcessing = true;
 
-    const allOcrDetections = [];
+    try {
+      await initialize();
+      if (!worker) return [];
 
-    for (const region of regions) {
-      // Map the region's CSS bbox to screenshot pixels
-      const screenshotBbox = mapper.mapBbox(region.bbox);
+      const allOcrDetections = [];
+      console.log(`[OCR] Starting processing for ${regions.length} selected regions`);
 
-      // Skip if region is too small after mapping
-      if (screenshotBbox.width < 20 || screenshotBbox.height < 10) continue;
+      for (let i = 0; i < regions.length; i++) {
+        const region = regions[i];
+        console.log(`[OCR] region detected`);
+        
+        // Map the region's CSS bbox to screenshot pixels
+        const screenshotBbox = mapper.mapBbox(region.bbox);
 
-      // Extract the region from the screenshot
-      const regionDataUrl = await Privamon.Redactor.extractRegion(
-        screenshotDataUrl,
-        screenshotBbox
-      );
+        // Skip if region is too small after mapping
+        if (screenshotBbox.width < 20 || screenshotBbox.height < 10) {
+            console.log(`[OCR] skipped (too small after mapping)`);
+            continue;
+        }
 
-      // Run OCR
-      const ocrResults = await recognizeRegion(regionDataUrl, screenshotBbox);
+        console.log(`[OCR] screenshot crop dimensions: ${screenshotBbox.width}x${screenshotBbox.height}`);
 
-      // Combine OCR text for this region and run PII detection
-      const regionText = ocrResults.map(r => r.text).join(' ');
-      if (regionText.trim()) {
-        const piiDetections = Privamon.PIIDetector.detectInText(regionText, 'ocr', '');
+        const tStartExtract = performance.now();
+        console.log(`[OCR] extractRegion START`);
+        // Extract the region from the screenshot
+        const regionDataUrl = await Privamon.Redactor.extractRegion(
+          screenshotDataUrl,
+          screenshotBbox
+        );
+        const tExtract = Math.round(performance.now() - tStartExtract);
+        console.log(`[OCR] extractRegion END: ${tExtract} ms`);
 
-        for (const pii of piiDetections) {
-          // Find the OCR word(s) that matched this PII
-          const matchingWords = ocrResults.filter(w =>
-            regionText.indexOf(pii.text) !== -1 // simplified match
-          );
+        // We can't directly measure the OCR input dimensions here easily without loading the image again, 
+        // but it's identical to the crop dimensions because extractRegion draws it 1:1.
+        console.log(`[OCR] OCR input dimensions: ${screenshotBbox.width}x${screenshotBbox.height}`);
 
-          if (matchingWords.length > 0) {
-            // Use the bbox of the first matching word
-            allOcrDetections.push({
-              ...pii,
-              source: 'ocr',
-              bbox: matchingWords[0].bbox,
-            });
+        const tStartRecognize = performance.now();
+        console.log(`[OCR] worker.recognize START`);
+        // Run OCR
+        const ocrResults = await recognizeRegion(regionDataUrl, screenshotBbox);
+        const tRecognize = Math.round(performance.now() - tStartRecognize);
+        console.log(`[OCR] worker.recognize END: ${tRecognize} ms`);
+        console.log(`[OCR] OCR words: ${ocrResults.length}`);
+
+        const tStartPii = performance.now();
+        console.log(`[OCR] PII detection START`);
+        
+        // Combine OCR text for this region and run PII detection
+        const regionText = ocrResults.map(r => r.text).join(' ');
+        let tPiiEnd = tStartPii;
+        
+        if (regionText.trim()) {
+          const piiDetections = Privamon.PIIDetector.detectInText(regionText, 'ocr', '');
+          tPiiEnd = performance.now();
+          console.log(`[OCR] PII detection END: ${Math.round(tPiiEnd - tStartPii)} ms`);
+          
+          console.log(`[OCR] PII matching START`);
+          const tStartMatching = performance.now();
+
+          for (const pii of piiDetections) {
+            if (!pii.span) continue;
+
+            let currentIdx = 0;
+            let matchStartIndex = -1;
+            let matchEndIndex = -1;
+
+            for (let i = 0; i < ocrResults.length; i++) {
+              const wordStart = currentIdx;
+              const wordEnd = currentIdx + ocrResults[i].text.length;
+
+              // If the word overlaps with the PII character span
+              if (wordEnd > pii.span.start && wordStart < pii.span.end) {
+                if (matchStartIndex === -1) matchStartIndex = i;
+                matchEndIndex = i;
+              }
+
+              // +1 for the space added by join(' ')
+              currentIdx = wordEnd + 1;
+            }
+
+            if (matchStartIndex !== -1) {
+              const x1 = Math.min(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.x));
+              const y1 = Math.min(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.y));
+              const x2 = Math.max(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.x + w.bbox.width));
+              const y2 = Math.max(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.y + w.bbox.height));
+
+              allOcrDetections.push({
+                ...pii,
+                source: 'ocr',
+                bbox: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
+                coordinateSpace: 'screenshot' // ALREADY IN SCREENSHOT COORDINATES!
+              });
+            }
           }
+          console.log(`[OCR] PII matching END: ${Math.round(performance.now() - tStartMatching)} ms`);
+        } else {
+            console.log(`[OCR] PII detection END: 0 ms`);
+            console.log(`[OCR] PII matching START`);
+            console.log(`[OCR] PII matching END: 0 ms`);
         }
       }
-    }
 
-    return allOcrDetections;
+      return allOcrDetections;
+    } finally {
+      isProcessing = false;
+    }
   }
 
   /**
    * Cleanup the worker when done.
    */
-  async function terminate() {
+  function terminate() {
     if (worker) {
-      await worker.terminate();
+      // Fire and forget termination - don't await because a stuck worker hangs the Promise forever
+      worker.terminate().catch(err => console.warn('Worker terminate error:', err));
       worker = null;
       isInitialized = false;
       initPromise = null;

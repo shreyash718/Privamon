@@ -21,62 +21,113 @@ Privamon.PIIDetector = (() => {
   const PATTERNS = [
     {
       name: 'email',
-      regex: /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g,
+      // OCR might inject spaces around @ or .
+      regex: /\b[a-zA-Z0-9._%+\-]+[\s]*@[\s]*[a-zA-Z0-9.\-]+[\s]*\.[\s]*[a-zA-Z]{2,}\b/g,
       type: 'email',
       baseConfidence: 0.92,
     },
     {
       name: 'phone_indian',
-      regex: /(?:\+91[\s\-]?)?(?:\(?0?\)?[\s\-]?)?[6-9]\d{4}[\s\-]?\d{5}/g,
+      // Added word boundaries \b to prevent matching inside longer random numbers
+      regex: /\b(?:\+91[\s\-]?)?(?:\(?0?\)?[\s\-]?)?[6-9](?:\d[\s\-]?){9}\b/g,
       type: 'phone',
       baseConfidence: 0.80,
     },
     {
       name: 'phone_intl',
-      regex: /\+?\d{1,3}[\s.\-]?\(?\d{1,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{4}/g,
+      // Stricter international phone number, must have \b
+      regex: /\b(?:\+\d{1,3}[\s.\-]?)?\(?\d{3,4}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b/g,
       type: 'phone',
       baseConfidence: 0.70,
     },
     {
       name: 'credit_card',
-      regex: /\b(?:\d{4}[\s\-]?){3}\d{4}\b/g,
+      // OCR might space digits differently
+      regex: /\b(?:\d[\s\-]?){13,19}\b/g,
       type: 'creditCard',
       baseConfidence: 0.75,
       validator: luhnCheck,
     },
     {
       name: 'aadhaar',
-      regex: /\b\d{4}[\s\-]?\d{4}[\s\-]?\d{4}\b/g,
+      // OCR might space digits differently, but it must be 12 digits
+      regex: /\b(?:\d[\s\-]?){12}\b/g,
       type: 'aadhaar',
       baseConfidence: 0.70,
       validator: aadhaarCheck,
     },
     {
       name: 'pan',
-      regex: /\b[A-Z]{5}\d{4}[A-Z]\b/g,
+      // OCR might inject spaces
+      regex: /\b(?:[A-Z][\s\-]*){5}(?:\d[\s\-]*){4}[A-Z]\b/gi,
       type: 'pan',
       baseConfidence: 0.85,
       // PAN format: AAAAA9999A — 4th char indicates entity type
       validator: (text) => {
-        const fourthChar = text[3];
+        const clean = text.replace(/[\s\-]/g, '').toUpperCase();
+        if (clean.length !== 10) return false;
+        const fourthChar = clean[3];
         return 'ABCFGHLJPT'.includes(fourthChar);
       },
     },
     {
       name: 'ip_address',
-      regex: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
+      regex: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)[\s]*\.[\s]*){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
       type: 'ip',
       baseConfidence: 0.60,
     },
     {
+      name: 'passport_indian',
+      // Indian Passport: 1 letter (except Q, X, Z), 7 digits (first digit non-zero)
+      regex: /\b[A-PR-WYa-pr-wy][1-9]\d{6}\b/gi,
+      type: 'passport',
+      baseConfidence: 0.85,
+    },
+    {
+      name: 'ifsc_code',
+      // Indian Bank IFSC Code: 4 letters, '0', 6 alphanumeric
+      regex: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi,
+      type: 'financial',
+      baseConfidence: 0.85,
+    },
+    {
+      name: 'jwt_token',
+      // JSON Web Token
+      regex: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
+      type: 'apiToken',
+      baseConfidence: 0.95,
+    },
+    {
+      name: 'api_key',
+      // Generic high-entropy API keys (Stripe, etc.)
+      regex: /\b(?:sk_live|pk_live|bearer|api_key)_[a-zA-Z0-9]+\b/gi,
+      type: 'apiToken',
+      baseConfidence: 0.95,
+    },
+    {
+      name: 'otp',
+      // 4 to 8 digit numbers (Needs VERY high context boost)
+      regex: /\b\d{4,8}\b/g,
+      type: 'otp',
+      baseConfidence: 0.10, // Basically 0 unless boosted by context
+    },
+    {
+      name: 'coordinates',
+      // Lat/Long coordinates
+      regex: /\b[-+]?(?:90(?:\.0{1,6})?|[1-8]?\d(?:\.\d{1,6})?)[,\s]+[-+]?(?:180(?:\.0{1,6})?|(?:1[0-7]\d|[1-9]?\d)(?:\.\d{1,6})?)\b/g,
+      type: 'location',
+      baseConfidence: 0.85,
+    },
+    {
       name: 'dob',
-      regex: /\b\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}\b/g,
+      // DD/MM/YYYY or DD-MM-YYYY
+      regex: /\b(?:0?[1-9]|[12]\d|3[01])[\/\-\.](?:0?[1-9]|1[0-2])[\/\-\.](?:19|20)\d{2}\b/g,
       type: 'dob',
       baseConfidence: 0.40, // Low base — needs context boost
     },
   ];
 
-  // ── Context Keywords ──
+  // Context Keywords ──
   // Words near a match that boost confidence
   const CONTEXT_KEYWORDS = {
     email:      ['email', 'e-mail', 'mail', 'contact', 'send', 'reach'],
@@ -84,16 +135,20 @@ Privamon.PIIDetector = (() => {
     creditCard: ['card', 'credit', 'debit', 'visa', 'master', 'amex', 'payment', 'cc'],
     aadhaar:    ['aadhaar', 'aadhar', 'uid', 'uidai', 'identity', 'verification'],
     pan:        ['pan', 'permanent account', 'income tax', 'tax', 'itr'],
+    passport:   ['passport', 'travel document', 'nationality', 'visa'],
+    financial:  ['ifsc', 'account', 'bank', 'routing', 'branch', 'swift'],
     ip:         ['ip', 'address', 'server', 'host', 'network'],
     dob:        ['birth', 'dob', 'born', 'birthday', 'age', 'date of birth'],
     name:       ['name', 'first name', 'last name', 'full name', 'fname', 'lname'],
-    password:   ['password', 'passwd', 'pwd', 'secret', 'pin', 'otp'],
-    account:    ['account', 'acct', 'bank', 'routing', 'ifsc', 'branch'],
+    password:   ['password', 'passwd', 'pwd', 'secret'],
+    otp:        ['otp', 'code', 'pin', 'verification code', 'one time password', 'auth code'],
+    apiToken:   ['token', 'api key', 'bearer', 'auth token', 'session', 'jwt'],
+    location:   ['lat', 'long', 'latitude', 'longitude', 'coordinates', 'location', 'gps'],
     address:    ['address', 'addr', 'street', 'city', 'state', 'zip', 'postal', 'pin code', 'pincode'],
   };
 
   // Context boost amount
-  const CONTEXT_BOOST = 0.2;
+  const CONTEXT_BOOST = 0.35; // Increased to ensure context-dependent items (OTPs) cross the threshold
 
   // ── Luhn Check for Credit Cards ──
   function luhnCheck(text) {
@@ -247,6 +302,8 @@ Privamon.PIIDetector = (() => {
           'name': 'name', 'given-name': 'name', 'family-name': 'name',
           'bday': 'dob', 'bday-day': 'dob', 'bday-month': 'dob', 'bday-year': 'dob',
           'address-line1': 'address', 'address-line2': 'address',
+          'postal-code': 'address', 'country': 'address',
+          'one-time-code': 'otp'
         };
         detections.push({
           type: acMap[element.autocomplete] || 'other',

@@ -96,6 +96,10 @@ Privamon.SanitizePipeline = (() => {
     progress('vision', visionDetections.length > 0 ? 'done' : 'skipped');
     console.log(`[Pipeline] Vision: ${visionDetections.length} detections in ${timings.vision}ms`);
 
+    // Tag with coordinate space before fusion
+    domDetections.forEach(d => d.coordinateSpace = 'css-viewport');
+    visionDetections.forEach(d => d.coordinateSpace = 'screenshot');
+
     // ── Stage 5: PII Fusion ──
     progress('fusion', 'active', 'Merging detections...');
     const t5 = performance.now();

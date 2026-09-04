@@ -137,12 +137,21 @@ Privamon.CoordinateMapper = (() => {
   function mapAllDetections(detections, scaleX, scaleY, screenshotDims) {
     return detections.map(d => {
       if (!d.bbox) return d;
+      if (d.coordinateSpace === 'screenshot') {
+        return {
+          ...d,
+          cssBbox: null, // Did not originate from CSS viewport
+          bbox: { ...d.bbox }, // Keep exactly as is
+        };
+      }
+
       return {
         ...d,
         // Keep original CSS bbox for reference
         cssBbox: { ...d.bbox },
         // Add mapped screenshot bbox
         bbox: mapBbox(d.bbox, scaleX, scaleY, screenshotDims),
+        coordinateSpace: 'screenshot'
       };
     });
   }
