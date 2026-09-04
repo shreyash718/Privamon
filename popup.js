@@ -29,8 +29,12 @@ captureBtn.addEventListener('click', async () => {
       statusEl.textContent = 'Something went wrong: ' + (response?.error || 'unknown error');
       return;
     }
-
     const payload = response.payload;
+
+    // Re-measure regions live, right before the screenshot — closes the gap
+    // between when the DOM was originally captured and now, so zoom/scroll
+    // changes in between don't cause misaligned redaction boxes.
+    const fresh = await chrome.tabs.sendMessage(tab.id, { type: 'PRIVAMON_REMEASURE' });
 
     statusEl.textContent = 'Capturing screenshot...';
     const screenshotDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
@@ -43,10 +47,10 @@ captureBtn.addEventListener('click', async () => {
     // screenshot's own pixel space (no scaling needed) — redactScreenshot
     // below applies dpr only to the first set.
     statusEl.textContent = 'Redacting screenshot...';
-    const redactedScreenshot = await redactScreenshot(
+        const redactedScreenshot = await redactScreenshot(
       screenshotDataUrl,
-      payload.redactionRegions,
-      payload.devicePixelRatio,
+      fresh.redactionRegions,
+      fresh.devicePixelRatio,
       modelRegions
     );
 

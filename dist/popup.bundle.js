@@ -2756,6 +2756,7 @@
         return;
       }
       const payload = response.payload;
+      const fresh = await chrome.tabs.sendMessage(tab.id, { type: "PRIVAMON_REMEASURE" });
       statusEl.textContent = "Capturing screenshot...";
       const screenshotDataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
       statusEl.textContent = "Scanning screenshot for on-screen PII...";
@@ -2763,8 +2764,8 @@
       statusEl.textContent = "Redacting screenshot...";
       const redactedScreenshot = await redactScreenshot(
         screenshotDataUrl,
-        payload.redactionRegions,
-        payload.devicePixelRatio,
+        fresh.redactionRegions,
+        fresh.devicePixelRatio,
         modelRegions
       );
       const finalPayload = {

@@ -26,6 +26,10 @@ import { extractTextFromImage } from './visionOCR.js';
 import { redactImageRegions } from './redact.js';
 
 const PII_TEXT_PATTERNS_MODULE = './piiText.js';
+// Kept so we can re-measure element positions live, right before the
+// screenshot is taken — avoids using stale rects from earlier in the run.
+let lastSanitizedElements = null;
+let lastImageFindings = null;
 
 // Images below this size are almost always icons/emoji/UI chrome, not photos of people.
 const MIN_IMAGE_DIMENSION = 60;
@@ -150,6 +154,35 @@ function collectRedactionRegions(sanitizedElements, imageFindings) {
 
   return regions;
 }
+/**
+ * Re-measures redaction regions live, using the ELEMENT SELECTORS from the
+ * last capture — not the cached rects. Call this immediately before taking
+ * the screenshot, since zoom/scroll/layout can change between the original
+ * DOM capture and the screenshot moment, making old rects wrong.
+ */
+function reMeasureRedactionRegions() {
+  if (!lastSanitizedElements) return { redactionRegions: [], devicePixelRatio: window.devicePixelRatio || 1 };
+
+  const freshElements = lastSanitizedElements.map((el) => {
+    if (!el.piiDetected || el.piiDetected.length === 0) return el;
+    const liveEl = document.querySelector(el.selector);
+    if (!liveEl) return el;
+    const rect = liveEl.getBoundingClientRect();
+    return { ...el, rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+  });
+
+  const freshImageFindings = (lastImageFindings || []).map((img) => {
+    const liveEl = document.querySelector(img.selector);
+    if (!liveEl) return img;
+    const rect = liveEl.getBoundingClientRect();
+    return { ...img, viewportRect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+  });
+
+  return {
+    redactionRegions: collectRedactionRegions(freshElements, freshImageFindings),
+    devicePixelRatio: window.devicePixelRatio || 1,
+  };
+}
 
 /**
  * Second-pass redaction using the NER model — catches PII that regex
@@ -175,6 +208,8 @@ async function runPipeline(userAction) {
   const imageFindings = await processImages(rawElements);
   console.timeEnd('[Privamon] vision pipeline');
 
+  lastSanitizedElements = sanitizedElements;
+  lastImageFindings = imageFindings;
   const redactionRegions = collectRedactionRegions(sanitizedElements, imageFindings);
 
   const payload = {
@@ -199,14 +234,16 @@ window.__privamonRun = runPipeline;
 // this replaces the old auto-run-on-load behavior, since a one-time capture
 // on page load can't reflect values the user later types into the form.
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'PRIVAMON_REMEASURE') {
+    sendResponse(reMeasureRedactionRegions());
+    return false; // synchronous response, no need to keep channel open
+  }
+
   if (message.type !== 'PRIVAMON_CAPTURE') return false; // not for us
 
   runPipeline(message.action)
     .then(async (payload) => {
-      // Store locally for now — this is what a later step will POST to the server.
       await chrome.storage.local.set({ privamon_last_capture: payload });
-      // Send the full payload back — the popup needs redactionRegions and
-      // devicePixelRatio to redact the screenshot it's about to capture.
       sendResponse({ ok: true, payload });
     })
     .catch((err) => {
@@ -214,6 +251,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, error: err.message });
     });
 
-  return true; // keep the message channel open for the async sendResponse above
+  return true;
 });
 

@@ -19647,6 +19647,8 @@
       event.preventDefault();
     }
   });
+  var lastSanitizedElements = null;
+  var lastImageFindings = null;
   var MIN_IMAGE_DIMENSION = 60;
   var MAX_IMAGES_PER_RUN = 15;
   function isSameOrigin(src) {
@@ -19730,6 +19732,26 @@
     }
     return regions;
   }
+  function reMeasureRedactionRegions() {
+    if (!lastSanitizedElements) return { redactionRegions: [], devicePixelRatio: window.devicePixelRatio || 1 };
+    const freshElements = lastSanitizedElements.map((el2) => {
+      if (!el2.piiDetected || el2.piiDetected.length === 0) return el2;
+      const liveEl = document.querySelector(el2.selector);
+      if (!liveEl) return el2;
+      const rect = liveEl.getBoundingClientRect();
+      return { ...el2, rect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+    });
+    const freshImageFindings = (lastImageFindings || []).map((img) => {
+      const liveEl = document.querySelector(img.selector);
+      if (!liveEl) return img;
+      const rect = liveEl.getBoundingClientRect();
+      return { ...img, viewportRect: { x: rect.x, y: rect.y, w: rect.width, h: rect.height } };
+    });
+    return {
+      redactionRegions: collectRedactionRegions(freshElements, freshImageFindings),
+      devicePixelRatio: window.devicePixelRatio || 1
+    };
+  }
   async function runPipeline(userAction) {
     console.time("[Privamon] full pipeline");
     console.time("[Privamon] dom capture");
@@ -19741,6 +19763,8 @@
     console.time("[Privamon] vision pipeline");
     const imageFindings = await processImages(rawElements);
     console.timeEnd("[Privamon] vision pipeline");
+    lastSanitizedElements = sanitizedElements;
+    lastImageFindings = imageFindings;
     const redactionRegions = collectRedactionRegions(sanitizedElements, imageFindings);
     const payload = {
       url: location.href,
@@ -19759,6 +19783,10 @@
   }
   window.__privamonRun = runPipeline;
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.type === "PRIVAMON_REMEASURE") {
+      sendResponse(reMeasureRedactionRegions());
+      return false;
+    }
     if (message.type !== "PRIVAMON_CAPTURE") return false;
     runPipeline(message.action).then(async (payload) => {
       await chrome.storage.local.set({ privamon_last_capture: payload });
