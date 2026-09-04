@@ -37,8 +37,10 @@
       <!-- Screenshot Panel -->
       <section class="screenshot-panel" id="screenshotPanel">
         <div class="screenshot-container" id="screenshotContainer">
-          <canvas id="screenshotCanvas"></canvas>
-          <div class="detection-overlays" id="detectionOverlays"></div>
+          <div class="canvas-wrapper">
+            <canvas id="screenshotCanvas"></canvas>
+            <div class="detection-overlays" id="detectionOverlays"></div>
+          </div>
           <div class="loading-state" id="loadingState">
             <div class="spinner-lg"></div>
             <p>Loading sanitized screenshot...</p>

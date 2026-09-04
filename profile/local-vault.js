@@ -121,6 +121,6 @@ Privamon.LocalVault = class LocalVault {
    */
   async clear() {
     this._store = {};
-    await save();
+    await this.save();
   }
 };

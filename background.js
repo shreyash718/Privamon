@@ -46,7 +46,7 @@ async function ensureOffscreenDocument() {
   try {
     await chrome.offscreen.createDocument({
       url: 'offscreen/offscreen.html',
-      reasons: [chrome.offscreen.Reason.CANVAS],
+      reasons: [chrome.offscreen.Reason.WORKERS, chrome.offscreen.Reason.BLOBS],
       justification: 'Image processing for PII redaction (Canvas), OCR (Workers)',
     });
     offscreenReady = true;

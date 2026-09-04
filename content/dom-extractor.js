@@ -60,11 +60,20 @@
   ];
 
   // ── Viewport Info ──
-  const viewportWidth = window.innerWidth;
-  const viewportHeight = window.innerHeight;
+  let viewportWidth = window.innerWidth;
+  let viewportHeight = window.innerHeight;
   const dpr = window.devicePixelRatio || 1;
   const scrollX = window.scrollX || window.pageXOffset || 0;
   const scrollY = window.scrollY || window.pageYOffset || 0;
+  let offsetLeft = 0;
+  let offsetTop = 0;
+
+  if (window.visualViewport) {
+    viewportWidth = window.visualViewport.width;
+    viewportHeight = window.visualViewport.height;
+    offsetLeft = window.visualViewport.offsetLeft;
+    offsetTop = window.visualViewport.offsetTop;
+  }
 
   // Zoom detection heuristic: outerWidth/innerWidth gives zoom factor
   // on some browsers, but it's not reliable everywhere.
@@ -248,8 +257,8 @@
     const entry = {
       tag: tag.toLowerCase(),
       bbox: {
-        x: Math.round(rect.left),
-        y: Math.round(rect.top),
+        x: Math.round(rect.left - offsetLeft),
+        y: Math.round(rect.top - offsetTop),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
       },

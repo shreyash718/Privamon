@@ -244,10 +244,10 @@
   // ── Zoom ──
   function setZoom(level) {
     currentZoom = Math.max(0.25, Math.min(4, level));
-    screenshotCanvas.style.transform = `scale(${currentZoom})`;
-    screenshotCanvas.style.transformOrigin = 'top left';
-    detectionOverlays.style.transform = `scale(${currentZoom})`;
-    detectionOverlays.style.transformOrigin = 'top left';
+    const wrapper = document.querySelector('.canvas-wrapper');
+    if (wrapper) {
+      wrapper.style.transform = `scale(${currentZoom})`;
+    }
     zoomLevelEl.textContent = `${Math.round(currentZoom * 100)}%`;
   }
 
