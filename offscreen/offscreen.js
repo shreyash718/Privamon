@@ -13,6 +13,9 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action !== 'runPipeline') return;
 
+    // Acknowledge receipt immediately so message channel closes cleanly
+    sendResponse({ status: 'started' });
+
     // Run the pipeline asynchronously
     handlePipeline(message)
       .then(result => {
@@ -29,10 +32,6 @@
           error: err.message || 'Pipeline failed',
         });
       });
-
-    // Return true to indicate we will respond asynchronously via sendMessage
-    // (we don't use sendResponse because the pipeline is long-running)
-    return true;
   });
 
   /**

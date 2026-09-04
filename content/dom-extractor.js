@@ -233,7 +233,9 @@
 
         // Track pixel-based regions separately
         if (entry.isPixelContent) {
+          const regionId = `region_${pixelRegions.length + 1}`;
           pixelRegions.push({
+            regionId,
             index: elements.length - 1,
             tag: entry.tag,
             src: entry.src || null,
@@ -267,8 +269,16 @@
 
     // Text content (only for text-bearing elements)
     if (!isPixel) {
-      const text = getDirectText(el);
-      if (text) entry.text = text;
+      if (typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper) {
+        const res = Privamon.DOMRangeMapper.extractTextAndTokens(el, offsetLeft, offsetTop);
+        if (res.text) {
+          entry.text = res.text.slice(0, TEXT_MAX_LENGTH);
+          entry.tokens = res.tokens;
+        }
+      } else {
+        const text = getDirectText(el);
+        if (text) entry.text = text;
+      }
     }
 
     // Role & interaction
@@ -303,7 +313,18 @@
 
       // Capture the current value (will be sanitized later if PII)
       const value = el.value;
-      if (value) entry.value = value.slice(0, TEXT_MAX_LENGTH);
+      if (value) {
+        entry.value = value.slice(0, TEXT_MAX_LENGTH);
+        entry.tokens = [{
+          id: `dom_input_${elements.length + 1}`,
+          text: entry.value,
+          start: 0,
+          end: entry.value.length,
+          bbox: entry.bbox,
+          boxes: [entry.bbox],
+          nodeId: entry.id || entry.testId || null
+        }];
+      }
 
       // Associated label
       const label = findLabel(el);

@@ -43,6 +43,9 @@ Privamon.Verifier = (() => {
         // Check if the region is actually opaque/blank
         const isBlank = await isRegionBlank(regionDataUrl, region.bbox);
 
+        const tokenStr = (region.tokens && region.tokens.length > 0) ? region.tokens.join(', ') : 'none';
+        console.log(`[VERIFIER][TRACE] PII: ${region.type} "${region.text || ''}" | Source: ${region.source} | Tokens: [${tokenStr}] | Box: ${region.bbox.x},${region.bbox.y} ${region.bbox.width}x${region.bbox.height} | Status: ${isBlank ? 'PASS' : 'FAIL'}`);
+
         if (!isBlank) {
           failedRegions.push({
             ...region,

@@ -128,7 +128,7 @@ async function handleStartAnalysis(task) {
     const domStart = performance.now();
     const domResults = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      files: ['content/dom-extractor.js'],
+      files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
     });
     const domTime = Math.round(performance.now() - domStart);
 

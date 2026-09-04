@@ -57,10 +57,12 @@ Privamon.SanitizePipeline = (() => {
     progress('pixelId', 'active', 'Identifying pixel-based regions...');
     const t2 = performance.now();
     const allPixelRegions = domData.pixelRegions || [];
+    console.log(`[PIPELINE] Extracted ${allPixelRegions.length} pixel regions from DOM`);
+    
     const ocrCandidates = Privamon.OCREngine.selectRegionsForOCR(allPixelRegions, domData.viewportInfo);
     timings.pixelIdentification = Math.round(performance.now() - t2);
     progress('pixelId', 'done');
-    console.log(`[Pipeline] Pixel regions: ${allPixelRegions.length} total, ${ocrCandidates.length} selected for OCR`);
+    console.log(`[PIPELINE] OCR Selection: ${ocrCandidates.length} ACCEPTED, ${allPixelRegions.length - ocrCandidates.length} REJECTED`);
 
     // ── Create Coordinate Mapper ──
     const mapper = Privamon.CoordinateMapper.create(domData.viewportInfo, screenshotDims);
@@ -77,11 +79,14 @@ Privamon.SanitizePipeline = (() => {
         console.warn('[Pipeline] OCR failed (non-fatal):', err.message);
       }
     } else {
-      console.log('[Pipeline] No pixel regions selected for OCR — skipping');
+      console.log('[PIPELINE] No pixel regions selected for OCR — skipping OCR stage');
     }
     timings.ocr = Math.round(performance.now() - t3);
     progress('ocr', ocrCandidates.length > 0 ? 'done' : 'skipped');
-    console.log(`[Pipeline] OCR: ${ocrDetections.length} detections in ${timings.ocr}ms`);
+    console.log(`[PIPELINE] OCR raw output: ${ocrDetections.length} detections in ${timings.ocr}ms`);
+    if (ocrDetections.length > 0) {
+      console.log('[PIPELINE] Raw OCR detections:', JSON.stringify(ocrDetections, null, 2));
+    }
 
     // ── Stage 4: Vision model (face detection) ──
     progress('vision', 'active', 'Running vision analysis...');
@@ -96,35 +101,45 @@ Privamon.SanitizePipeline = (() => {
     progress('vision', visionDetections.length > 0 ? 'done' : 'skipped');
     console.log(`[Pipeline] Vision: ${visionDetections.length} detections in ${timings.vision}ms`);
 
-    // Tag with coordinate space before fusion
-    domDetections.forEach(d => d.coordinateSpace = 'css-viewport');
+    // Tag vision detections with coordinate space
     visionDetections.forEach(d => d.coordinateSpace = 'screenshot');
 
-    // ── Stage 5: PII Fusion ──
-    progress('fusion', 'active', 'Merging detections...');
+    // ── Stage 5: Coordinate Mapping (DOM CSS -> Screenshot pixels) ──
+    // Normalize DOM detections to physical screenshot pixels BEFORE fusion
+    // so that IoU deduplication and containment checks compare matching units.
+    progress('coordMap', 'active', 'Mapping DOM coordinates to screenshot pixels...');
+    const tCoord = performance.now();
+    const mappedDomDetections = mapper.mapAll(domDetections);
+    timings.coordinateMapping = Math.round(performance.now() - tCoord);
+    progress('coordMap', 'done');
+    console.log(`[PIPELINE] DOM coordinates mapped: ${mappedDomDetections.length} detections in ${timings.coordinateMapping}ms`);
+
+    // ── Stage 6: PII Fusion (Unified Screenshot Pixel Space) ──
+    progress('fusion', 'active', 'Merging detections in screenshot space...');
     const t5 = performance.now();
+    
+    console.log(`[PIPELINE] Fusion inputs -> DOM: ${mappedDomDetections.length}, OCR: ${ocrDetections.length}, Vision: ${visionDetections.length}`);
+    
     const { detections: fusedDetections, summary: detectionSummary } =
-      Privamon.PIIFusion.fuse(domDetections, ocrDetections, visionDetections);
+      Privamon.PIIFusion.fuse(mappedDomDetections, ocrDetections, visionDetections);
     timings.fusion = Math.round(performance.now() - t5);
     progress('fusion', 'done');
-    console.log(`[Pipeline] Fused: ${fusedDetections.length} unique detections`);
-    console.log(`[Pipeline] Summary:`, detectionSummary);
-
-    // ── Stage 6: Coordinate Mapping ──
-    progress('coordMap', 'active', 'Mapping coordinates...');
-    const t6 = performance.now();
-    const mappedDetections = mapper.mapAll(fusedDetections);
-    timings.coordinateMapping = Math.round(performance.now() - t6);
-    progress('coordMap', 'done');
+    console.log(`[PIPELINE] Fusion output -> ${fusedDetections.length} fused detections`);
+    if (fusedDetections.length > 0) {
+      console.log(`[PIPELINE] Fused detections:`, JSON.stringify(fusedDetections, null, 2));
+    }
 
     // ── Stage 7: Redaction ──
     progress('redaction', 'active', 'Redacting sensitive regions...');
     const t7 = performance.now();
     let redactionResult;
-    if (mappedDetections.length > 0) {
-      redactionResult = await Privamon.Redactor.redact(screenshot, mappedDetections);
+    if (fusedDetections.length > 0) {
+      console.log(`[PIPELINE][REDACTION] Redacting ${fusedDetections.length} regions...`);
+      redactionResult = await Privamon.Redactor.redact(screenshot, fusedDetections);
+      console.log(`[PIPELINE][REDACTION] Successfully redacted ${redactionResult.redactedRegions.length} regions`);
     } else {
       // No PII found — return original screenshot unchanged
+      console.log(`[PIPELINE][REDACTION] No regions to redact.`);
       redactionResult = {
         sanitizedDataUrl: screenshot,
         redactedRegions: [],
@@ -172,7 +187,7 @@ Privamon.SanitizePipeline = (() => {
 
     return {
       sanitizedScreenshot: verificationResult.sanitizedDataUrl,
-      detections: mappedDetections,
+      detections: fusedDetections,
       detectionSummary,
       sanitizedDom,
       timings,

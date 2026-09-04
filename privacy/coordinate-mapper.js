@@ -142,6 +142,7 @@ Privamon.CoordinateMapper = (() => {
           ...d,
           cssBbox: null, // Did not originate from CSS viewport
           bbox: { ...d.bbox }, // Keep exactly as is
+          boxes: d.boxes ? d.boxes.map(b => ({ ...b })) : undefined,
         };
       }
 
@@ -151,6 +152,7 @@ Privamon.CoordinateMapper = (() => {
         cssBbox: { ...d.bbox },
         // Add mapped screenshot bbox
         bbox: mapBbox(d.bbox, scaleX, scaleY, screenshotDims),
+        boxes: d.boxes ? d.boxes.map(b => mapBbox(b, scaleX, scaleY, screenshotDims)) : undefined,
         coordinateSpace: 'screenshot'
       };
     });

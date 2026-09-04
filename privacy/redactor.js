@@ -52,27 +52,35 @@ Privamon.Redactor = (() => {
     const redactedRegions = [];
 
     for (const detection of detections) {
-      if (!detection.bbox) continue;
+      if (!detection.bbox && (!detection.boxes || detection.boxes.length === 0)) continue;
 
-      const { x, y, width, height } = detection.bbox;
+      const targetBoxes = (detection.boxes && detection.boxes.length > 0) ? detection.boxes : [detection.bbox];
 
-      // Apply padding, clamped to canvas bounds
-      const rx = Math.max(0, x - padding);
-      const ry = Math.max(0, y - padding);
-      const rw = Math.min(canvas.width - rx, width + 2 * padding);
-      const rh = Math.min(canvas.height - ry, height + 2 * padding);
+      for (const box of targetBoxes) {
+        if (!box) continue;
+        const { x, y, width, height } = box;
 
-      if (rw <= 0 || rh <= 0) continue;
+        // Apply padding, clamped to canvas bounds
+        const rx = Math.max(0, x - padding);
+        const ry = Math.max(0, y - padding);
+        const rw = Math.min(canvas.width - rx, width + 2 * padding);
+        const rh = Math.min(canvas.height - ry, height + 2 * padding);
 
-      ctx.fillRect(rx, ry, rw, rh);
+        if (rw <= 0 || rh <= 0) continue;
 
-      redactedRegions.push({
-        type: detection.type,
-        source: detection.source,
-        confidence: detection.confidence,
-        bbox: { x: rx, y: ry, width: rw, height: rh },
-        originalBbox: detection.bbox,
-      });
+        ctx.fillRect(rx, ry, rw, rh);
+
+        redactedRegions.push({
+          type: detection.type,
+          text: detection.text || '',
+          source: detection.source || 'unknown',
+          tokens: detection.tokens || [],
+          confidence: detection.confidence,
+          bbox: { x: rx, y: ry, width: rw, height: rh },
+          originalBbox: box,
+          boxes: detection.boxes || [box],
+        });
+      }
     }
 
     // Export sanitized screenshot

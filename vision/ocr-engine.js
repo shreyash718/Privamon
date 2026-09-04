@@ -60,56 +60,53 @@ Privamon.OCREngine = (() => {
     const viewportArea = viewportInfo.cssViewportWidth * viewportInfo.cssViewportHeight;
 
     return pixelRegions.filter(region => {
-      const { bbox, tag, alt, src, area } = region;
+      const { regionId, bbox, tag, alt, src, area } = region;
+      const rId = regionId || 'unknown';
 
       // 1. Size filter — skip tiny icons
       if (bbox.width < MIN_OCR_WIDTH || bbox.height < MIN_OCR_HEIGHT) {
+        console.log(`[OCR][${rId}][REJECTED] Reason: size_too_small, tag: ${tag}, bbox: ${bbox.width}x${bbox.height}`);
         return false;
       }
 
       // 2. Skip absolutely massive images that will crash WASM memory (e.g., > 5MP)
       if (area > MAX_OCR_AREA) {
+        console.log(`[OCR][${rId}][REJECTED] Reason: area_too_large, tag: ${tag}, area: ${area}`);
         return false;
       }
 
       // 3. Canvas elements are higher priority (likely generated content)
-      if (tag === 'CANVAS') return true;
+      if (tag === 'CANVAS') {
+        console.log(`[OCR][${rId}][ACCEPTED] Reason: canvas_tag, bbox: ${bbox.width}x${bbox.height}`);
+        return true;
+      }
 
       // 4. SVG — skip (usually vector graphics, not text documents)
-      if (tag === 'SVG') return false;
-
-      // 5. Video — skip for OCR (would need frame extraction)
-      if (tag === 'VIDEO') return false;
-
-      // 6. IFRAME — skip (separate document, can't easily extract)
-      if (tag === 'IFRAME') return false;
-
-      // 7. Image: check for text hints in alt/src
-      if (tag === 'IMG') {
-        const altLower = (alt || '').toLowerCase();
-        const srcLower = (src || '').toLowerCase();
-
-        // Check for text-hint keywords using exact word matching to avoid false positives 
-        // (e.g., 'id' matching inside 'width' or 'pan' inside 'company')
-        const words = [...altLower.split(/[^a-z0-9]+/), ...srcLower.split(/[^a-z0-9]+/)];
-        for (const keyword of TEXT_HINT_KEYWORDS) {
-          if (words.includes(keyword)) {
-            return true;
-          }
-        }
-
-        // Data URIs or blob URIs suggest generated/dynamic content
-        // BUT they can also be massive photos. Only accept if relatively small.
-        if (srcLower.startsWith('data:') || srcLower.startsWith('blob:')) {
-          if (area < 150000) return true;
-        }
-
-        // Default: skip small/decorative images and arbitrary generic photos
-        // (Tesseract is too slow on complex scenery/people photos)
+      if (tag === 'SVG') {
+        console.log(`[OCR][${rId}][REJECTED] Reason: svg_tag`);
         return false;
       }
 
+      // 5. Video — skip for OCR (would need frame extraction)
+      if (tag === 'VIDEO') {
+        console.log(`[OCR][${rId}][REJECTED] Reason: video_tag`);
+        return false;
+      }
+
+      // 6. IFRAME — skip (separate document, can't easily extract)
+      if (tag === 'IFRAME') {
+        console.log(`[OCR][${rId}][REJECTED] Reason: iframe_tag`);
+        return false;
+      }
+
+      // 7. Image: Accept all images that passed the size constraints
+      if (tag === 'IMG') {
+        console.log(`[OCR][${rId}][ACCEPTED] Reason: valid_image, bbox: ${bbox.width}x${bbox.height}`);
+        return true;
+      }
+
       // Default: include (OBJECT, EMBED, etc.)
+      console.log(`[OCR][${rId}][ACCEPTED] Reason: default_allow, tag: ${tag}`);
       return true;
     });
   }
@@ -212,6 +209,163 @@ Privamon.OCREngine = (() => {
   }
 
   /**
+   * Group OCR word tokens into lines and reconstruct text with layout preservation.
+   * Produces aligned tokens with character offsets (start, end) in the reconstructed string.
+   */
+  function buildTextAndTokens(ocrResults) {
+    if (!ocrResults || ocrResults.length === 0) {
+      return { text: '', tokens: [] };
+    }
+
+    // Sort tokens primarily by y, secondarily by x
+    const sorted = [...ocrResults].sort((a, b) => {
+      const diffY = a.bbox.y - b.bbox.y;
+      if (Math.abs(diffY) > 8) return diffY;
+      return a.bbox.x - b.bbox.x;
+    });
+
+    // Group into visual lines
+    const lines = [];
+    for (const item of sorted) {
+      const midY = item.bbox.y + item.bbox.height / 2;
+      let placed = false;
+      for (const line of lines) {
+        const refMidY = line[0].bbox.y + line[0].bbox.height / 2;
+        const avgH = (item.bbox.height + line[0].bbox.height) / 2;
+        if (Math.abs(midY - refMidY) < avgH * 0.6) {
+          line.push(item);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        lines.push([item]);
+      }
+    }
+
+    // Sort each line horizontally
+    for (const line of lines) {
+      line.sort((a, b) => a.bbox.x - b.bbox.x);
+    }
+
+    // Build text with \n between lines and space between words
+    let fullText = '';
+    const tokens = [];
+    let tokenIndex = 0;
+
+    for (let li = 0; li < lines.length; li++) {
+      const line = lines[li];
+      for (let wi = 0; wi < line.length; wi++) {
+        const word = line[wi];
+        const start = fullText.length;
+        fullText += word.text;
+        const end = fullText.length;
+        tokenIndex++;
+        tokens.push({
+          id: `ocr_${String(tokenIndex).padStart(4, '0')}`,
+          text: word.text,
+          start,
+          end,
+          bbox: word.bbox,
+          confidence: word.confidence,
+        });
+        if (wi < line.length - 1) {
+          fullText += ' ';
+        }
+      }
+      if (li < lines.length - 1) {
+        fullText += '\n';
+      }
+    }
+
+    return { text: fullText, tokens };
+  }
+
+  /**
+   * Proportional sub-box calculation for partial token overlaps.
+   */
+  function computeTokenSubBox(token, spanStart, spanEnd) {
+    const box = token.bbox;
+    const tStart = token.start;
+    const tEnd = token.end;
+
+    if (spanStart <= tStart && spanEnd >= tEnd) {
+      return { ...box };
+    }
+
+    const tokenLen = Math.max(1, (token.text || '').length);
+    const charW = box.width / tokenLen;
+
+    const clampedStart = Math.max(tStart, spanStart);
+    const clampedEnd = Math.min(tEnd, spanEnd);
+
+    const offsetChars = clampedStart - tStart;
+    const spanChars = Math.max(1, clampedEnd - clampedStart);
+
+    const subX = box.x + Math.round(offsetChars * charW);
+    const subW = Math.max(2, Math.round(spanChars * charW));
+    const maxRight = box.x + box.width;
+
+    return {
+      x: Math.min(subX, maxRight - 2),
+      y: box.y,
+      width: Math.min(subW, maxRight - subX),
+      height: box.height
+    };
+  }
+
+  /**
+   * Fallback multi-line aware token-to-bbox mapper with partial overlap precision.
+   */
+  function mapSpanToBoxes(spanStart, spanEnd, tokens) {
+    const matched = tokens.filter(t => t.end > spanStart && t.start < spanEnd);
+    if (matched.length === 0) return { bbox: null, boxes: [], tokens: [] };
+
+    // Calculate exact sub-boxes for each overlapping token
+    const items = matched.map(t => ({
+      id: t.id,
+      bbox: computeTokenSubBox(t, spanStart, spanEnd)
+    }));
+
+    // Group matched items by line
+    const lines = [];
+    for (const item of items) {
+      const midY = item.bbox.y + item.bbox.height / 2;
+      let placed = false;
+      for (const line of lines) {
+        const refMidY = line[0].bbox.y + line[0].bbox.height / 2;
+        const avgH = (item.bbox.height + line[0].bbox.height) / 2;
+        if (Math.abs(midY - refMidY) < avgH * 0.6) {
+          line.push(item);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) lines.push([item]);
+    }
+
+    const perLineBoxes = lines.map(line => {
+      const x1 = Math.min(...line.map(w => w.bbox.x));
+      const y1 = Math.min(...line.map(w => w.bbox.y));
+      const x2 = Math.max(...line.map(w => w.bbox.x + w.bbox.width));
+      const y2 = Math.max(...line.map(w => w.bbox.y + w.bbox.height));
+      return { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+    });
+
+    const x1 = Math.min(...items.map(w => w.bbox.x));
+    const y1 = Math.min(...items.map(w => w.bbox.y));
+    const x2 = Math.max(...items.map(w => w.bbox.x + w.bbox.width));
+    const y2 = Math.max(...items.map(w => w.bbox.y + w.bbox.height));
+    const unionBox = { x: x1, y: y1, width: x2 - x1, height: y2 - y1 };
+
+    return {
+      tokens: matched.map(w => w.id),
+      bbox: unionBox,
+      boxes: perLineBoxes.length > 1 ? perLineBoxes : [unionBox],
+    };
+  }
+
+  /**
    * Process multiple regions sequentially.
    *
    * @param {string} screenshotDataUrl - Full screenshot
@@ -237,96 +391,82 @@ Privamon.OCREngine = (() => {
 
       for (let i = 0; i < regions.length; i++) {
         const region = regions[i];
-        console.log(`[OCR] region detected`);
+        const rId = region.regionId || `region_${i}`;
         
         // Map the region's CSS bbox to screenshot pixels
         const screenshotBbox = mapper.mapBbox(region.bbox);
 
         // Skip if region is too small after mapping
         if (screenshotBbox.width < 20 || screenshotBbox.height < 10) {
-            console.log(`[OCR] skipped (too small after mapping)`);
+            console.log(`[OCR][${rId}][REJECTED] Reason: mapped_size_too_small, bbox: ${screenshotBbox.width}x${screenshotBbox.height}`);
             continue;
         }
 
-        console.log(`[OCR] screenshot crop dimensions: ${screenshotBbox.width}x${screenshotBbox.height}`);
+        console.log(`[OCR][${rId}][CROP] CSS: ${Math.round(region.bbox.x)},${Math.round(region.bbox.y)} ${Math.round(region.bbox.width)}x${Math.round(region.bbox.height)} | Screenshot: ${screenshotBbox.x},${screenshotBbox.y} ${screenshotBbox.width}x${screenshotBbox.height} | ScaleX: ${mapper.info.scaleX.toFixed(3)}, ScaleY: ${mapper.info.scaleY.toFixed(3)}`);
 
         const tStartExtract = performance.now();
-        console.log(`[OCR] extractRegion START`);
         // Extract the region from the screenshot
         const regionDataUrl = await Privamon.Redactor.extractRegion(
           screenshotDataUrl,
           screenshotBbox
         );
         const tExtract = Math.round(performance.now() - tStartExtract);
-        console.log(`[OCR] extractRegion END: ${tExtract} ms`);
-
-        // We can't directly measure the OCR input dimensions here easily without loading the image again, 
-        // but it's identical to the crop dimensions because extractRegion draws it 1:1.
-        console.log(`[OCR] OCR input dimensions: ${screenshotBbox.width}x${screenshotBbox.height}`);
 
         const tStartRecognize = performance.now();
-        console.log(`[OCR] worker.recognize START`);
         // Run OCR
         const ocrResults = await recognizeRegion(regionDataUrl, screenshotBbox);
         const tRecognize = Math.round(performance.now() - tStartRecognize);
-        console.log(`[OCR] worker.recognize END: ${tRecognize} ms`);
-        console.log(`[OCR] OCR words: ${ocrResults.length}`);
+        
+        console.log(`[OCR][${rId}][TESSERACT] words=${ocrResults.length} in ${tRecognize}ms (extract: ${tExtract}ms)`);
 
         const tStartPii = performance.now();
-        console.log(`[OCR] PII detection START`);
         
-        // Combine OCR text for this region and run PII detection
-        const regionText = ocrResults.map(r => r.text).join(' ');
+        // Reconstruct coherent text and word tokens preserving layout & lines
+        const { text: regionText, tokens: tokenList } = buildTextAndTokens(ocrResults);
         let tPiiEnd = tStartPii;
         
         if (regionText.trim()) {
-          const piiDetections = Privamon.PIIDetector.detectInText(regionText, 'ocr', '');
+          console.log(`[OCR][${rId}][TEXT] "${regionText.replace(/\n/g, '\\n')}"`);
+          // Query Python PII engine (Presidio + GLiNER) with fallback to JS detector
+          const piiDetections = await Privamon.PIIDetector.detectAsync(regionText, 'ocr', '', tokenList);
           tPiiEnd = performance.now();
-          console.log(`[OCR] PII detection END: ${Math.round(tPiiEnd - tStartPii)} ms`);
+          console.log(`[OCR][${rId}][PII_DETECTION] found=${piiDetections.length} in ${Math.round(tPiiEnd - tStartPii)}ms`);
           
-          console.log(`[OCR] PII matching START`);
           const tStartMatching = performance.now();
 
           for (const pii of piiDetections) {
-            if (!pii.span) continue;
-
-            let currentIdx = 0;
-            let matchStartIndex = -1;
-            let matchEndIndex = -1;
-
-            for (let i = 0; i < ocrResults.length; i++) {
-              const wordStart = currentIdx;
-              const wordEnd = currentIdx + ocrResults[i].text.length;
-
-              // If the word overlaps with the PII character span
-              if (wordEnd > pii.span.start && wordStart < pii.span.end) {
-                if (matchStartIndex === -1) matchStartIndex = i;
-                matchEndIndex = i;
-              }
-
-              // +1 for the space added by join(' ')
-              currentIdx = wordEnd + 1;
-            }
-
-            if (matchStartIndex !== -1) {
-              const x1 = Math.min(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.x));
-              const y1 = Math.min(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.y));
-              const x2 = Math.max(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.x + w.bbox.width));
-              const y2 = Math.max(...ocrResults.slice(matchStartIndex, matchEndIndex + 1).map(w => w.bbox.y + w.bbox.height));
-
+            // If already enriched with bounding boxes by the engine
+            if (pii.bbox) {
               allOcrDetections.push({
                 ...pii,
                 source: 'ocr',
-                bbox: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
-                coordinateSpace: 'screenshot' // ALREADY IN SCREENSHOT COORDINATES!
+                tokens: pii.tokens || [],
+                boxes: pii.boxes || [pii.bbox],
+                coordinateSpace: 'screenshot' // In screenshot pixels
+              });
+              continue;
+            }
+
+            // Fallback JS span mapping if bbox wasn't provided
+            const spanStart = pii.span ? pii.span.start : (pii.start ?? -1);
+            const spanEnd = pii.span ? pii.span.end : (pii.end ?? -1);
+            if (spanStart === -1 || spanEnd === -1) continue;
+
+            const mappedBoxes = mapSpanToBoxes(spanStart, spanEnd, tokenList);
+            if (mappedBoxes.bbox) {
+              allOcrDetections.push({
+                ...pii,
+                source: 'ocr',
+                tokens: mappedBoxes.tokens || [],
+                bbox: mappedBoxes.bbox,
+                boxes: mappedBoxes.boxes,
+                coordinateSpace: 'screenshot'
               });
             }
           }
-          console.log(`[OCR] PII matching END: ${Math.round(performance.now() - tStartMatching)} ms`);
+          console.log(`[OCR][${rId}] PII matching END: ${Math.round(performance.now() - tStartMatching)} ms`);
         } else {
-            console.log(`[OCR] PII detection END: 0 ms`);
-            console.log(`[OCR] PII matching START`);
-            console.log(`[OCR] PII matching END: 0 ms`);
+            console.log(`[OCR][${rId}] Empty OCR text — skipping PII detection.`);
         }
       }
 

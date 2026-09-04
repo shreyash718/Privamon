@@ -1,0 +1,7 @@
+presidio-analyzer>=2.2.350
+gliner>=0.2.10
+torch>=2.0.0
+transformers>=4.40.0
+fastapi>=0.100.0
+uvicorn>=0.20.0
+pytest>=8.0.0

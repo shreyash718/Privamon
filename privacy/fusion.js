@@ -124,6 +124,19 @@ Privamon.PIIFusion = (() => {
           // Merge bboxes to cover both areas
           current.bbox = mergeBboxes(current.bbox, other.bbox);
 
+          // Preserve segmented boxes from both detections
+          if (other.boxes && other.boxes.length > 0) {
+            current.boxes = [...(current.boxes || (current.bbox ? [current.bbox] : [])), ...other.boxes];
+          }
+
+          // Combine token IDs without duplicates
+          if (other.tokens && other.tokens.length > 0) {
+            if (!current.tokens) current.tokens = [];
+            for (const tok of other.tokens) {
+              if (!current.tokens.includes(tok)) current.tokens.push(tok);
+            }
+          }
+
           // Keep max confidence
           current.confidence = Math.max(current.confidence, other.confidence);
 
@@ -153,7 +166,9 @@ Privamon.PIIFusion = (() => {
       type: detection.type || 'other',
       source: detection.source || defaultSource,
       text: detection.text || '',
+      tokens: detection.tokens || [],
       bbox: detection.bbox || null,
+      boxes: detection.boxes || null,
       confidence: detection.confidence || 0.5,
       elementId: detection.elementId || null,
       reason: detection.reason || null,
