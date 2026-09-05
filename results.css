@@ -106,6 +106,7 @@ body {
 /* ── Screenshot Panel ── */
 .screenshot-panel {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -114,86 +115,143 @@ body {
 
 .screenshot-container {
   flex: 1;
+  min-width: 0;
+  min-height: 0;
+
   overflow: auto;
   position: relative;
+
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding: 20px;
+
+  padding: 24px;
+
   background:
-    radial-gradient(circle at 20% 80%, rgba(99, 102, 241, 0.04) 0%, transparent 50%),
-    linear-gradient(var(--bg-primary), var(--bg-primary));
+    radial-gradient(
+      circle at 20% 80%,
+      rgba(99, 102, 241, 0.04) 0%,
+      transparent 50%
+    ),
+    var(--bg-primary);
 }
 
+/* Important:
+   Do NOT use transform: scale() for zooming.
+   Let width/height control the actual layout size.
+*/
 .canvas-wrapper {
   position: relative;
-  transform-origin: top left;
-  transition: transform var(--transition);
+  flex-shrink: 0;
+
+  /* These are updated by JS */
+  width: auto;
+  height: auto;
+
+  transform: none;
+  transition: none;
+
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
 }
 
+/* Actual screenshot */
 #screenshotCanvas {
   display: block;
+
+  width: 100%;
+  height: auto;
+
   max-width: none;
+  max-height: none;
+
+  object-fit: contain;
+
+  border-radius: 6px;
+
+  /* Prevent browser interpolation from making it look blurry */
   image-rendering: auto;
-  border-radius: var(--radius-sm);
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 
+/* Overlay must exactly cover the canvas */
 .detection-overlays {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0;
+
   width: 100%;
   height: 100%;
+
   pointer-events: none;
 }
 
+/* ── Better detection boxes ── */
 .detection-box {
   position: absolute;
-  border: 2px solid;
+  border: 2px solid #64748b;
   border-radius: 3px;
   pointer-events: none;
-  transition: opacity var(--transition);
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.05);
 }
-
-.detection-box.type-email     { border-color: #ef4444; }
-.detection-box.type-phone     { border-color: #f97316; }
-.detection-box.type-password  { border-color: #dc2626; }
-.detection-box.type-creditCard { border-color: #e11d48; }
-.detection-box.type-aadhaar   { border-color: #db2777; }
-.detection-box.type-pan       { border-color: #c026d3; }
-.detection-box.type-face      { border-color: #8b5cf6; }
-.detection-box.type-name      { border-color: #f59e0b; }
-.detection-box.type-dob       { border-color: #f59e0b; }
-.detection-box.type-ip        { border-color: #06b6d4; }
-.detection-box.type-other     { border-color: #64748b; }
 
 .detection-label {
   position: absolute;
-  top: -18px;
-  left: -1px;
+  top: -19px;
+  left: -2px;
   font-size: 10px;
+  line-height: 16px;
   font-weight: 600;
   padding: 1px 5px;
   border-radius: 3px 3px 0 0;
   color: white;
+  background: #64748b;
   white-space: nowrap;
   text-transform: uppercase;
   letter-spacing: 0.3px;
+  z-index: 5;
 }
 
-.type-email     .detection-label { background: #ef4444; }
-.type-phone     .detection-label { background: #f97316; }
-.type-password  .detection-label { background: #dc2626; }
-.type-creditCard .detection-label { background: #e11d48; }
-.type-aadhaar   .detection-label { background: #db2777; }
-.type-pan       .detection-label { background: #c026d3; }
-.type-face      .detection-label { background: #8b5cf6; }
-.type-name      .detection-label { background: #f59e0b; }
-.type-dob       .detection-label { background: #f59e0b; }
-.type-ip        .detection-label { background: #06b6d4; }
-.type-other     .detection-label { background: #64748b; }
+/* Entity-specific colors */
+.type-email, .type-email_address { border-color: #ef4444; }
+.type-email .detection-label, .type-email_address .detection-label { background: #ef4444; }
 
+.type-phone, .type-phone_number { border-color: #f97316; }
+.type-phone .detection-label, .type-phone_number .detection-label { background: #f97316; }
+
+.type-person, .type-name { border-color: #eab308; }
+.type-person .detection-label, .type-name .detection-label { background: #eab308; color: #1e293b; }
+
+.type-aadhaar { border-color: #ec4899; }
+.type-aadhaar .detection-label { background: #ec4899; }
+
+.type-pan { border-color: #a855f7; }
+.type-pan .detection-label { background: #a855f7; }
+
+.type-upi_id, .type-upi { border-color: #10b981; }
+.type-upi_id .detection-label, .type-upi .detection-label { background: #10b981; }
+
+.type-credit_card, .type-creditcard { border-color: #e11d48; }
+.type-credit_card .detection-label, .type-creditcard .detection-label { background: #e11d48; }
+
+.type-address, .type-location { border-color: #3b82f6; }
+.type-address .detection-label, .type-location .detection-label { background: #3b82f6; }
+
+.type-organization { border-color: #6366f1; }
+.type-organization .detection-label { background: #6366f1; }
+
+.type-date_of_birth, .type-dob, .type-date_time { border-color: #14b8a6; }
+.type-date_of_birth .detection-label, .type-dob .detection-label, .type-date_time .detection-label { background: #14b8a6; }
+
+.type-passport, .type-driving_licence, .type-voter_id, .type-gstin, .type-bank_account, .type-vehicle_registration { border-color: #8b5cf6; }
+.type-passport .detection-label, .type-driving_licence .detection-label, .type-voter_id .detection-label, .type-gstin .detection-label, .type-bank_account .detection-label, .type-vehicle_registration .detection-label { background: #8b5cf6; }
+
+.type-face { border-color: #a855f7; }
+.type-face .detection-label { background: #a855f7; }
+
+.type-password { border-color: #dc2626; }
+.type-password .detection-label { background: #dc2626; }
+
+.type-other { border-color: #64748b; }
+.type-other .detection-label { background: #64748b; }
 .loading-state {
   position: absolute;
   inset: 0;
@@ -216,45 +274,63 @@ body {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Zoom Controls ── */
 .zoom-controls {
+  height: 50px;
+
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 8px;
+
   padding: 8px;
+
   background: var(--bg-card);
   border-top: 1px solid var(--border-subtle);
+
   flex-shrink: 0;
 }
 
 .zoom-btn {
   width: 32px;
   height: 32px;
+
   display: flex;
   align-items: center;
   justify-content: center;
+
   background: var(--bg-input);
   border: 1px solid var(--border-subtle);
+
   border-radius: var(--radius-sm);
+
   color: var(--text-primary);
   font-size: 16px;
+
   cursor: pointer;
-  transition: background var(--transition);
+
+  transition:
+    background var(--transition),
+    border-color var(--transition),
+    transform 100ms ease;
 }
 
 .zoom-btn:hover {
   background: var(--bg-hover);
+  border-color: var(--border-focus);
+}
+
+.zoom-btn:active {
+  transform: scale(0.95);
 }
 
 .zoom-level {
   font-size: 12px;
   font-family: 'Consolas', monospace;
   color: var(--text-secondary);
+
   min-width: 50px;
   text-align: center;
 }
-
 /* ── Side Panel ── */
 .side-panel {
   width: 320px;

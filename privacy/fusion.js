@@ -110,7 +110,30 @@ Privamon.PIIFusion = (() => {
         if (used.has(j)) continue;
 
         const other = filtered[j];
+
+        // Face detections must only merge with other face detections (never merge with text or labels)
+        const isFaceCurrent = current.type === 'face';
+        const isFaceOther = other.type === 'face';
+        if (isFaceCurrent !== isFaceOther) {
+          continue;
+        }
+
         const iou = calculateIoU(current.bbox, other.bbox);
+
+        if (isFaceCurrent && isFaceOther) {
+          // If two face detections overlap (e.g. from region scan + full scan), deduplicate cleanly
+          if (iou >= 0.25 || contains(current.bbox, other.bbox) || contains(other.bbox, current.bbox)) {
+            used.add(j);
+            if (other.confidence > current.confidence) {
+              current.bbox = other.bbox;
+              current.boxes = other.boxes || [other.bbox];
+              current.confidence = other.confidence;
+            }
+            if (!current.mergedSources) current.mergedSources = [current.source];
+            current.mergedSources.push(other.source);
+            continue;
+          }
+        }
 
         if (iou >= IOU_THRESHOLD || contains(current.bbox, other.bbox) || contains(other.bbox, current.bbox)) {
           // Same region: merge bboxes, keep higher confidence & more specific type

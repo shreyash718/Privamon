@@ -72,6 +72,10 @@ Privamon.VisionModel = (() => {
     }
 
     const allDetections = [];
+    const screenshotDims = {
+      width: mapper?.info?.screenshotWidth || 0,
+      height: mapper?.info?.screenshotHeight || 0,
+    };
 
     for (const model of registry) {
       try {
@@ -80,26 +84,59 @@ Privamon.VisionModel = (() => {
           await model.initialize();
         }
 
-        for (const region of pixelRegions) {
-          // Check model-specific selectivity
-          if (typeof model.shouldProcess === 'function' && !model.shouldProcess(region)) {
-            continue;
+        // 1. Primary: Run detection on full screenshot to catch ALL faces
+        // (DOM photos, non-DOM elements, canvas, video, CSS backgrounds, profile photos, grids)
+        let fullWidth = screenshotDims.width;
+        let fullHeight = screenshotDims.height;
+        if (!fullWidth || !fullHeight) {
+          try {
+            const img = await Privamon.Redactor.loadImage(screenshotDataUrl);
+            fullWidth = img.width;
+            fullHeight = img.height;
+          } catch (e) {
+            fullWidth = 0;
+            fullHeight = 0;
           }
+        }
 
-          // Map region bbox to screenshot coordinates
-          const screenshotBbox = mapper.mapBbox(region.bbox);
-          if (screenshotBbox.width < 10 || screenshotBbox.height < 10) continue;
+        if (fullWidth > 30 && fullHeight > 30) {
+          try {
+            console.log(`[VisionModel] Running ${model.name} full-screenshot scan (${fullWidth}×${fullHeight})...`);
+            const fullBbox = { x: 0, y: 0, width: fullWidth, height: fullHeight };
+            const fullDetections = await model.detect(screenshotDataUrl, fullBbox);
+            if (Array.isArray(fullDetections) && fullDetections.length > 0) {
+              console.log(`[VisionModel] Full-screenshot scan found ${fullDetections.length} ${model.capabilities?.[0] || 'detection'}(s)`);
+              allDetections.push(...fullDetections);
+            } else {
+              console.log(`[VisionModel] Full-screenshot scan returned 0 detections`);
+            }
+          } catch (fullScanErr) {
+            console.warn(`[VisionModel] Full screenshot scan failed:`, fullScanErr.message);
+          }
+        }
 
-          // Extract region
-          const regionDataUrl = await Privamon.Redactor.extractRegion(
-            screenshotDataUrl,
-            screenshotBbox
-          );
+        // 2. Secondary: Process candidate DOM image/canvas regions for high-resolution closeups
+        for (const region of (pixelRegions || [])) {
+          try {
+            if (typeof model.shouldProcess === 'function' && !model.shouldProcess(region)) {
+              continue;
+            }
 
-          // Run detection
-          const detections = await model.detect(regionDataUrl, screenshotBbox);
-          if (Array.isArray(detections)) {
-            allDetections.push(...detections);
+            const screenshotBbox = mapper.mapBbox(region.bbox);
+            if (screenshotBbox.width < 30 || screenshotBbox.height < 30) continue;
+
+            const regionDataUrl = await Privamon.Redactor.extractRegion(
+              screenshotDataUrl,
+              screenshotBbox
+            );
+
+            const detections = await model.detect(regionDataUrl, screenshotBbox);
+            if (Array.isArray(detections) && detections.length > 0) {
+              console.log(`[VisionModel] Region scan found ${detections.length} face(s) in region ${screenshotBbox.width}×${screenshotBbox.height}`);
+              allDetections.push(...detections);
+            }
+          } catch (regionErr) {
+            console.warn('[VisionModel] Region scan error (non-fatal):', regionErr.message);
           }
         }
       } catch (err) {

@@ -61,10 +61,15 @@ Privamon.Redactor = (() => {
         const { x, y, width, height } = box;
 
         // Apply padding, clamped to canvas bounds
-        const rx = Math.max(0, x - padding);
-        const ry = Math.max(0, y - padding);
-        const rw = Math.min(canvas.width - rx, width + 2 * padding);
-        const rh = Math.min(canvas.height - ry, height + 2 * padding);
+        const isFace = (detection.type === 'face');
+        const effectivePadding = isFace
+          ? Math.max(4, Math.round(Math.min(width, height) * 0.03))
+          : padding;
+
+        const rx = Math.max(0, x - effectivePadding);
+        const ry = Math.max(0, y - effectivePadding);
+        const rw = Math.min(canvas.width - rx, width + 2 * effectivePadding);
+        const rh = Math.min(canvas.height - ry, height + 2 * effectivePadding);
 
         if (rw <= 0 || rh <= 0) continue;
 
@@ -117,15 +122,20 @@ Privamon.Redactor = (() => {
    */
   async function extractRegion(screenshotDataUrl, bbox) {
     const img = await loadImage(screenshotDataUrl);
+    const rx = Math.max(0, Math.round(bbox.x));
+    const ry = Math.max(0, Math.round(bbox.y));
+    const rw = Math.max(1, Math.min(img.width - rx, Math.round(bbox.width)));
+    const rh = Math.max(1, Math.min(img.height - ry, Math.round(bbox.height)));
+
     const canvas = document.createElement('canvas');
-    canvas.width = bbox.width;
-    canvas.height = bbox.height;
+    canvas.width = rw;
+    canvas.height = rh;
     const ctx = canvas.getContext('2d');
 
     ctx.drawImage(
       img,
-      bbox.x, bbox.y, bbox.width, bbox.height,
-      0, 0, bbox.width, bbox.height
+      rx, ry, rw, rh,
+      0, 0, rw, rh
     );
 
     return canvas.toDataURL('image/png');

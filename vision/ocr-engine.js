@@ -180,29 +180,57 @@ Privamon.OCREngine = (() => {
         timeoutPromise
       ]);
 
-      if (!result || !result.data || !result.data.words) return [];
+      if (!result || !result.data) return [];
 
-      // Map Tesseract word bboxes back to screenshot coordinates
+      const regX = Math.round(regionBbox.x);
+      const regY = Math.round(regionBbox.y);
+
+      // 1. Prefer Tesseract's native layout engine lines
+      if (result.data.lines && result.data.lines.length > 0) {
+        const lineItems = [];
+        result.data.lines.forEach((line, lineIdx) => {
+          const words = (line.words || []).filter(w => (w.confidence === undefined || w.confidence > 5) && w.text && w.text.trim());
+          words.forEach((w, wordIdx) => {
+            lineItems.push({
+              text: w.text.trim(),
+              confidence: (w.confidence ?? 80) / 100,
+              lineIndex: lineIdx,
+              wordIndex: wordIdx,
+              bbox: {
+                x: regX + Math.round(w.bbox.x0),
+                y: regY + Math.round(w.bbox.y0),
+                width: Math.max(1, Math.round(w.bbox.x1 - w.bbox.x0)),
+                height: Math.max(1, Math.round(w.bbox.y1 - w.bbox.y0)),
+              },
+              source: 'ocr',
+            });
+          });
+        });
+        if (lineItems.length > 0) {
+          return lineItems;
+        }
+      }
+
+      if (!result.data.words) return [];
+
+      // 2. Fallback: Map Tesseract word bboxes back to screenshot coordinates
       return result.data.words
-        .filter(w => w.confidence > 5 && w.text.trim()) // Lowered to 5 to avoid discarding valid text. Regex handles false positives.
+        .filter(w => (w.confidence === undefined || w.confidence > 5) && w.text && w.text.trim())
         .map(w => ({
-          text: w.text,
-          confidence: w.confidence / 100, // Normalize to 0–1
-          // Tesseract bbox is relative to the region image.
-          // We need to offset by the region's position in the screenshot.
+          text: w.text.trim(),
+          confidence: (w.confidence ?? 80) / 100,
           bbox: {
-            x: regionBbox.x + w.bbox.x0,
-            y: regionBbox.y + w.bbox.y0,
-            width: w.bbox.x1 - w.bbox.x0,
-            height: w.bbox.y1 - w.bbox.y0,
+            x: regX + Math.round(w.bbox.x0),
+            y: regY + Math.round(w.bbox.y0),
+            width: Math.max(1, Math.round(w.bbox.x1 - w.bbox.x0)),
+            height: Math.max(1, Math.round(w.bbox.y1 - w.bbox.y0)),
           },
           source: 'ocr',
         }));
     } catch (err) {
       console.error('[OCREngine] Recognition failed or timed out:', err);
-      // If we hit a timeout or serious error, kill the worker to prevent it from hanging future jobs
       if (err.message === 'OCR Timeout' || err.message.includes('Timeout')) {
-         terminate(); // Do NOT await terminate, as a deadlocked worker will hang the promise forever!
+         terminate();
       }
       return [];
     }
@@ -217,35 +245,55 @@ Privamon.OCREngine = (() => {
       return { text: '', tokens: [] };
     }
 
-    // Sort tokens primarily by y, secondarily by x
-    const sorted = [...ocrResults].sort((a, b) => {
-      const diffY = a.bbox.y - b.bbox.y;
-      if (Math.abs(diffY) > 8) return diffY;
-      return a.bbox.x - b.bbox.x;
-    });
-
-    // Group into visual lines
     const lines = [];
-    for (const item of sorted) {
-      const midY = item.bbox.y + item.bbox.height / 2;
-      let placed = false;
-      for (const line of lines) {
-        const refMidY = line[0].bbox.y + line[0].bbox.height / 2;
-        const avgH = (item.bbox.height + line[0].bbox.height) / 2;
-        if (Math.abs(midY - refMidY) < avgH * 0.6) {
-          line.push(item);
-          placed = true;
-          break;
+
+    // Case 1: Tesseract provided native lineIndex
+    const hasLineIndex = ocrResults.some(item => item.lineIndex !== undefined);
+    if (hasLineIndex) {
+      const lineMap = new Map();
+      for (const item of ocrResults) {
+        const lIdx = item.lineIndex ?? 0;
+        if (!lineMap.has(lIdx)) lineMap.set(lIdx, []);
+        lineMap.get(lIdx).push(item);
+      }
+      const sortedKeys = Array.from(lineMap.keys()).sort((a, b) => a - b);
+      for (const k of sortedKeys) {
+        const line = lineMap.get(k);
+        line.sort((a, b) => a.bbox.x - b.bbox.x);
+        lines.push(line);
+      }
+    } else {
+      // Case 2: Robust vertical clustering with transitive numeric comparator
+      const sorted = [...ocrResults].sort((a, b) => a.bbox.y - b.bbox.y);
+
+      for (const item of sorted) {
+        const itemMidY = item.bbox.y + item.bbox.height / 2;
+        let placed = false;
+        for (const line of lines) {
+          const lineMidY = line.reduce((sum, w) => sum + (w.bbox.y + w.bbox.height / 2), 0) / line.length;
+          const avgH = line.reduce((sum, w) => sum + w.bbox.height, 0) / line.length;
+          if (Math.abs(itemMidY - lineMidY) < avgH * 0.55) {
+            line.push(item);
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          lines.push([item]);
         }
       }
-      if (!placed) {
-        lines.push([item]);
-      }
-    }
 
-    // Sort each line horizontally
-    for (const line of lines) {
-      line.sort((a, b) => a.bbox.x - b.bbox.x);
+      // Sort lines vertically by average y
+      lines.sort((l1, l2) => {
+        const y1 = l1.reduce((sum, w) => sum + w.bbox.y, 0) / l1.length;
+        const y2 = l2.reduce((sum, w) => sum + w.bbox.y, 0) / l2.length;
+        return y1 - y2;
+      });
+
+      // Sort each line horizontally
+      for (const line of lines) {
+        line.sort((a, b) => a.bbox.x - b.bbox.x);
+      }
     }
 
     // Build text with \n between lines and space between words
@@ -394,7 +442,13 @@ Privamon.OCREngine = (() => {
         const rId = region.regionId || `region_${i}`;
         
         // Map the region's CSS bbox to screenshot pixels
-        const screenshotBbox = mapper.mapBbox(region.bbox);
+        const rawMapped = mapper.mapBbox(region.bbox);
+        const screenshotBbox = {
+          x: Math.max(0, Math.round(rawMapped.x)),
+          y: Math.max(0, Math.round(rawMapped.y)),
+          width: Math.round(rawMapped.width),
+          height: Math.round(rawMapped.height),
+        };
 
         // Skip if region is too small after mapping
         if (screenshotBbox.width < 20 || screenshotBbox.height < 10) {

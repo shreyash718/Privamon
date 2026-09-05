@@ -46,6 +46,8 @@ _PRUNE_RECOGNIZER_NAMES = {
     "UsItinRecognizer",
     "UsPassportRecognizer",
     "UsSsnRecognizer",
+    "UsLicenseRecognizer",
+    "SpacyRecognizer",
 }
 
 
@@ -106,27 +108,40 @@ class PresidioDetector:
         detections = []
         for r in results:
             raw_matched_text = text[r.start:r.end]
+            start, end = r.start, r.end
 
             # Post-processing 1: Clean email span bleeding into punctuation / next words
-            start, end = r.start, r.end
             if r.entity_type == "EMAIL_ADDRESS":
-                # If matched text ends with dot, comma, or trailing sentence words
                 clean_email = re.split(r"[\s,;!?:()]", raw_matched_text)[0].rstrip(".")
                 if len(clean_email) > 3 and "@" in clean_email:
                     end = start + len(clean_email)
                     raw_matched_text = clean_email
 
-            # Post-processing 2: Centralized False-Positive Suppression
+            # Post-processing 2: Never allow entities (other than LOCATION/ADDRESS) to cross newlines
+            if "\n" in raw_matched_text and r.entity_type not in ("LOCATION", "ADDRESS"):
+                first_line = raw_matched_text.split("\n")[0]
+                end = start + len(first_line)
+                raw_matched_text = first_line
+
+            # Post-processing 3: Strip leading/trailing punctuation and whitespace
+            stripped = raw_matched_text.strip(" \t\r\n:,;.-")
+            if not stripped or len(stripped) < 2:
+                continue
+            if stripped != raw_matched_text:
+                lead_trim = len(raw_matched_text) - len(raw_matched_text.lstrip(" \t\r\n:,;.-"))
+                start += lead_trim
+                end = start + len(stripped)
+                raw_matched_text = stripped
+
+            # Post-processing 4: Centralized False-Positive Suppression
             suppress_reason = is_suppressed_by_negative_context(text, start)
             if suppress_reason:
                 continue
 
-            # Post-processing 3: Aadhaar vs Phone conflict resolution
-            # If standard Presidio or generic phone matched an Aadhaar number, or Aadhaar matched a phone
+            # Post-processing 5: Aadhaar vs Phone conflict resolution
             digits_only = re.sub(r"\D", "", raw_matched_text)
             if r.entity_type == "PHONE_NUMBER" and len(digits_only) == 12 and not raw_matched_text.startswith("+"):
-                # Could be 12-digit Aadhaar misclassified as phone
-                pass
+                continue
 
             detections.append({
                 "type": r.entity_type,

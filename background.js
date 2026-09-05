@@ -181,6 +181,12 @@ async function handlePipelineResult(message) {
       type: 'pipelineError',
       error: message.error,
     });
+    try {
+      if (chrome.offscreen && typeof chrome.offscreen.closeDocument === 'function') {
+        await chrome.offscreen.closeDocument();
+      }
+    } catch (e) { /* ignore */ }
+    offscreenReady = false;
     return;
   }
 
@@ -242,6 +248,15 @@ async function handlePipelineResult(message) {
         error: 'Results too large to store. Please try a simpler page.',
       });
     }
+  } finally {
+    // Close offscreen document so memory is released and next run loads clean state from disk
+    try {
+      if (chrome.offscreen && typeof chrome.offscreen.closeDocument === 'function') {
+        await chrome.offscreen.closeDocument();
+        console.log('[Background] Offscreen document closed');
+      }
+    } catch (e) { /* ignore */ }
+    offscreenReady = false;
   }
 }
 

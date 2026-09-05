@@ -239,6 +239,116 @@ def detect_pii_batch(request: BatchDetectRequest):
     return {"results": [r.dict() for r in results]}
 
 
+class FaceDetectRequest(BaseModel):
+    image: str = Field(..., description="Base64 or data URL of image to scan for faces")
+    bbox: Optional[Dict[str, Any]] = Field(default=None, description="Optional bounding box in screenshot pixels")
+    threshold: Optional[float] = Field(default=0.60, description="Confidence threshold")
+
+
+face_session = None
+
+
+def get_face_session():
+    global face_session
+    if face_session is None:
+        import onnxruntime as ort
+        model_path = os.path.join("lib", "onnx", "blazeface.onnx")
+        if not os.path.exists(model_path):
+            model_path = os.path.join("lib", "onnx", "version-RFB-320-clean.onnx")
+        opts = ort.SessionOptions()
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        face_session = ort.InferenceSession(model_path, sess_options=opts, providers=["CPUExecutionProvider"])
+    return face_session
+
+
+@app.post("/detect/face")
+def detect_faces(request: FaceDetectRequest):
+    t_start = time.perf_counter()
+    import io
+    import base64
+    from PIL import Image
+    import numpy as np
+
+    data_url = request.image or ""
+    if "," in data_url:
+        data_url = data_url.split(",", 1)[1]
+
+    try:
+        raw_bytes = base64.b64decode(data_url)
+        img = Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    except Exception as e:
+        logger.error(f"[VisionEngine] Failed to decode image: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid image: {str(e)}")
+
+    orig_w, orig_h = img.size
+    region_bbox = request.bbox or {"x": 0, "y": 0, "width": orig_w, "height": orig_h}
+
+    thresh = request.threshold or 0.50
+    logger.info(f"[VisionEngine] Face scan requested for image {orig_w}x{orig_h} (threshold={thresh})")
+
+    sess = get_face_session()
+    img_resized = img.resize((320, 240))
+    arr = (np.array(img_resized, dtype=np.float32) - 127.0) / 128.0
+    inp = np.transpose(arr, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
+
+    confidences, boxes = sess.run(None, {"input": inp})
+    scores = confidences[0, :, 1]
+    boxes = boxes[0]
+
+    mask = scores >= thresh
+    scores = scores[mask]
+    boxes = boxes[mask]
+
+    if len(scores) == 0:
+        proc_time = round((time.perf_counter() - t_start) * 1000, 2)
+        logger.info(f"[VisionEngine] No faces detected ({proc_time}ms)")
+        return {"faces": [], "processing_ms": proc_time}
+
+    def iou(b1, b2):
+        xA = max(b1[0], b2[0])
+        yA = max(b1[1], b2[1])
+        xB = min(b1[2], b2[2])
+        yB = min(b1[3], b2[3])
+        inter = max(0, xB - xA) * max(0, yB - yA)
+        areaA = (b1[2] - b1[0]) * (b1[3] - b1[1])
+        areaB = (b2[2] - b2[0]) * (b2[3] - b2[1])
+        return inter / max(1e-6, areaA + areaB - inter)
+
+    order = scores.argsort()[::-1]
+    keep = []
+    while len(order) > 0:
+        i = order[0]
+        keep.append(i)
+        ovr = np.array([iou(boxes[i], boxes[o]) for o in order[1:]])
+        inds = np.where(ovr <= 0.3)[0]
+        order = order[inds + 1]
+
+    faces = []
+    for k in keep:
+        s = float(scores[k])
+        b = boxes[k]
+        xmin, ymin, xmax, ymax = float(b[0]), float(b[1]), float(b[2]), float(b[3])
+        rx = int(region_bbox["x"] + xmin * region_bbox["width"])
+        ry = int(region_bbox["y"] + ymin * region_bbox["height"])
+        rw = int((xmax - xmin) * region_bbox["width"])
+        rh = int((ymax - ymin) * region_bbox["height"])
+        faces.append({
+            "type": "face",
+            "source": "vision",
+            "text": "[face detected]",
+            "confidence": round(s, 4),
+            "bbox": {"x": rx, "y": ry, "width": rw, "height": rh},
+            "boxes": [{"x": rx, "y": ry, "width": rw, "height": rh}]
+        })
+
+    proc_time = round((time.perf_counter() - t_start) * 1000, 2)
+    logger.info(f"[VisionEngine] Successfully detected {len(faces)} face(s) in {proc_time}ms")
+    return {
+        "faces": faces,
+        "processing_ms": proc_time
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     # Bind exclusively to localhost

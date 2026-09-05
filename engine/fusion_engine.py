@@ -145,10 +145,23 @@ def fuse_detections(raw_detections: List[Dict[str, Any]], original_text: str) ->
 
                 # Case A: Same entity type -> Merge span & combine confidence
                 if current["type"] == existing["type"]:
-                    existing["start"] = min(existing["start"], current["start"])
-                    existing["end"] = max(existing["end"], current["end"])
-                    existing["text"] = original_text[existing["start"]:existing["end"]]
-                    existing["confidence"] = calculate_combined_confidence(existing["confidence"], current["confidence"])
+                    candidate_start = min(existing["start"], current["start"])
+                    candidate_end = max(existing["end"], current["end"])
+                    candidate_text = original_text[candidate_start:candidate_end]
+
+                    if "\n" in candidate_text and current["type"] not in ("ADDRESS", "LOCATION"):
+                        # Do not merge across newlines for single-line entities
+                        if current["confidence"] > existing["confidence"]:
+                            existing["start"] = current["start"]
+                            existing["end"] = current["end"]
+                            existing["text"] = current["text"]
+                            existing["confidence"] = current["confidence"]
+                            existing["source"] = current["source"]
+                    else:
+                        existing["start"] = candidate_start
+                        existing["end"] = candidate_end
+                        existing["text"] = candidate_text
+                        existing["confidence"] = calculate_combined_confidence(existing["confidence"], current["confidence"])
 
                     for s in current["source"]:
                         if s not in existing["source"]:
@@ -243,6 +256,16 @@ def fuse_detections(raw_detections: List[Dict[str, Any]], original_text: str) ->
             discard_log.append(discard_entry)
             logger.info(json.dumps(discard_entry))
         else:
+            # Strip trailing/leading punctuation and whitespace
+            txt = item["text"]
+            stripped = txt.strip(" \t\r\n:,;.-")
+            if not stripped or len(stripped) < 2:
+                continue
+            if stripped != txt:
+                lead = len(txt) - len(txt.lstrip(" \t\r\n:,;.-"))
+                item["start"] += lead
+                item["end"] = item["start"] + len(stripped)
+                item["text"] = stripped
             final_detections.append(item)
 
     return final_detections, discard_log
