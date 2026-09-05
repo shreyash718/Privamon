@@ -255,6 +255,9 @@ def get_face_session():
         model_path = os.path.join("lib", "onnx", "blazeface.onnx")
         if not os.path.exists(model_path):
             model_path = os.path.join("lib", "onnx", "version-RFB-320-clean.onnx")
+        if not os.path.exists(model_path):
+            logger.warning(f"[VisionEngine] ONNX face model not found at {model_path}. Please download it.")
+            return None
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         face_session = ort.InferenceSession(model_path, sess_options=opts, providers=["CPUExecutionProvider"])
@@ -287,6 +290,9 @@ def detect_faces(request: FaceDetectRequest):
     logger.info(f"[VisionEngine] Face scan requested for image {orig_w}x{orig_h} (threshold={thresh})")
 
     sess = get_face_session()
+    if sess is None:
+        return {"faces": [], "processing_ms": 0, "error": "ONNX face model not found"}
+
     img_resized = img.resize((320, 240))
     arr = (np.array(img_resized, dtype=np.float32) - 127.0) / 128.0
     inp = np.transpose(arr, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
