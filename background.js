@@ -201,6 +201,7 @@ async function handlePipelineResult(message) {
         detections: result.detections,
         detectionSummary: result.detectionSummary,
         sanitizedDom: result.sanitizedDom,
+        ocrRawText: result.ocrRawText,
         timings: result.timings,
         metadata: result.metadata,
         timestamp: Date.now(),
@@ -232,6 +233,7 @@ async function handlePipelineResult(message) {
           // Omit full detections and sanitizedDom to save space
           detections: result.detections.slice(0, 50),
           sanitizedDom: null,
+          ocrRawText: result.ocrRawText,
         },
       });
 

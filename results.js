@@ -53,6 +53,12 @@
   const domViewer =
     document.getElementById('domViewer');
 
+  const ocrRawViewer =
+    document.getElementById('ocrRawViewer');
+
+  const ocrSanitizedViewer =
+    document.getElementById('ocrSanitizedViewer');
+
   const zoomLevelEl =
     document.getElementById('zoomLevel');
 
@@ -200,6 +206,39 @@
             null,
             2
           );
+      }
+
+      // ──────────────────────────────────────────
+      // Render OCR Text
+      // ──────────────────────────────────────────
+
+      if (resultData.ocrRawText) {
+        let rawHtml = resultData.ocrRawText.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        let sanitizedHtml = rawHtml;
+        
+        if (Array.isArray(resultData.detections)) {
+          const ocrDets = resultData.detections.filter(d => d.source === 'ocr' && d.text);
+          // Sort by length descending to avoid partial replacements
+          ocrDets.sort((a, b) => b.text.length - a.text.length);
+          
+          for (const det of ocrDets) {
+            const confClass = det.confidence > 0.85 ? 'confidence-high' : (det.confidence > 0.6 ? 'confidence-med' : 'confidence-low');
+            const confBadge = `<span class="confidence-badge ${confClass}">${Math.round((det.confidence || 0) * 100)}%</span>`;
+            
+            // Highlight in Raw (just append confidence badge)
+            const rawReplacement = `${det.text}${confBadge}`;
+            rawHtml = rawHtml.split(det.text).join(rawReplacement);
+
+            // Redact in Sanitized
+            const sanitizedReplacement = `[REDACTED ${det.type.toUpperCase()}]${confBadge}`;
+            sanitizedHtml = sanitizedHtml.split(det.text).join(sanitizedReplacement);
+          }
+        }
+        ocrRawViewer.innerHTML = rawHtml;
+        ocrSanitizedViewer.innerHTML = sanitizedHtml;
+      } else {
+        ocrRawViewer.textContent = "No OCR text detected.";
+        ocrSanitizedViewer.textContent = "No OCR text detected.";
       }
 
 

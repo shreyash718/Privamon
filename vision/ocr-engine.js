@@ -435,6 +435,7 @@ Privamon.OCREngine = (() => {
       if (!worker) return [];
 
       const allOcrDetections = [];
+      let fullRawText = '';
       console.log(`[OCR] Starting processing for ${regions.length} selected regions`);
 
       for (let i = 0; i < regions.length; i++) {
@@ -480,6 +481,7 @@ Privamon.OCREngine = (() => {
         let tPiiEnd = tStartPii;
         
         if (regionText.trim()) {
+          fullRawText += `\n--- Region ${rId} ---\n${regionText}\n`;
           console.log(`[OCR][${rId}][TEXT] "${regionText.replace(/\n/g, '\\n')}"`);
           // Query Python PII engine (Presidio + GLiNER) with fallback to JS detector
           const piiDetections = await Privamon.PIIDetector.detectAsync(regionText, 'ocr', '', tokenList);
@@ -524,7 +526,7 @@ Privamon.OCREngine = (() => {
         }
       }
 
-      return allOcrDetections;
+      return { detections: allOcrDetections, rawText: fullRawText };
     } finally {
       isProcessing = false;
     }

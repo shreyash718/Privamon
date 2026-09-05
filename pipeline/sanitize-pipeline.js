@@ -72,9 +72,12 @@ Privamon.SanitizePipeline = (() => {
     progress('ocr', 'active', 'Running OCR on selected regions...');
     const t3 = performance.now();
     let ocrDetections = [];
+    let ocrRawText = '';
     if (ocrCandidates.length > 0) {
       try {
-        ocrDetections = await Privamon.OCREngine.processRegions(screenshot, ocrCandidates, mapper);
+        const ocrResult = await Privamon.OCREngine.processRegions(screenshot, ocrCandidates, mapper);
+        ocrDetections = ocrResult.detections || [];
+        ocrRawText = ocrResult.rawText || '';
       } catch (err) {
         console.warn('[Pipeline] OCR failed (non-fatal):', err.message);
       }
@@ -187,6 +190,7 @@ Privamon.SanitizePipeline = (() => {
 
     return {
       sanitizedScreenshot: verificationResult.sanitizedDataUrl,
+      ocrRawText,
       detections: fusedDetections,
       detectionSummary,
       sanitizedDom,

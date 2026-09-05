@@ -455,3 +455,19 @@ body {
 }
 
 .hidden { display: none !important; }
+
+/* OCR Confidence Badges */
+.confidence-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: #fff;
+  vertical-align: middle;
+}
+.confidence-high { background-color: var(--success); }
+.confidence-med { background-color: var(--warning); color: #000; }
+.confidence-low { background-color: var(--error); }
+
