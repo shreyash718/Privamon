@@ -1,0 +1,12 @@
+node_modules/
+lib/
+!lib/onnx/
+lib/onnx/*
+!lib/onnx/*.onnx
+.DS_Store
+Thumbs.db
+*.log
+.env
+dist/
+*.crx
+*.pem

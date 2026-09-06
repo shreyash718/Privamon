@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privamon</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+            <rect width="28" height="28" rx="8" fill="url(#grad)"/>
+            <path d="M14 7C10.13 7 7 10.13 7 14s3.13 7 7 7 7-3.13 7-7-3.13-7-7-7zm0 2.5a2 2 0 110 4 2 2 0 010-4zm0 9.5c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08s5.97 1.09 6 3.08A7.46 7.46 0 0114 19z" fill="white" opacity="0.9"/>
+            <defs>
+              <linearGradient id="grad" x1="0" y1="0" x2="28" y2="28">
+                <stop stop-color="#6366f1"/>
+                <stop offset="1" stop-color="#8b5cf6"/>
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <div class="logo-text">
+          <h1>Privamon</h1>
+          <span class="tagline">Privacy Browser Agent</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Task Input -->
+    <section class="task-section" id="taskSection">
+      <label class="input-label" for="taskInput">What do you want me to do?</label>
+      <div class="input-wrapper">
+        <input
+          type="text"
+          id="taskInput"
+          placeholder="e.g. Fill this form, Find my order..."
+          autocomplete="off"
+          spellcheck="false"
+        >
+        <div class="input-glow"></div>
+      </div>
+
+      <button class="btn-primary" id="analyzeBtn">
+        <svg class="btn-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M8 1v14M1 8h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span>Analyze Screen</span>
+      </button>
+    </section>
+
+    <!-- Processing Status -->
+    <section class="status-section hidden" id="statusSection">
+      <div class="status-header">
+        <div class="spinner" id="spinner"></div>
+        <span class="status-text" id="statusText">Initializing...</span>
+      </div>
+
+      <div class="pipeline-stages" id="pipelineStages">
+        <!-- Populated dynamically -->
+      </div>
+    </section>
+
+    <!-- Results Summary -->
+    <section class="results-section hidden" id="resultsSection">
+      <div class="results-header">
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+          <path d="M10 1L2 6v8l8 5 8-5V6l-8-5z" stroke="#10b981" stroke-width="1.5"/>
+          <path d="M7 10l2 2 4-4" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>Sanitization Complete</span>
+      </div>
+
+      <div class="detections-list" id="detectionsList">
+        <!-- Populated dynamically -->
+      </div>
+
+      <div class="timing-summary" id="timingSummary">
+        <!-- Populated dynamically -->
+      </div>
+
+      <button class="btn-primary btn-view" id="viewResultsBtn">
+        <svg class="btn-icon" width="16" height="16" viewBox="0 0 16 16" fill="none">
+          <path d="M1 8s3-5 7-5 7 5 7 5-3 5-7 5-7-5-7-5z" stroke="currentColor" stroke-width="1.5"/>
+          <circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.5"/>
+        </svg>
+        <span>View Sanitized Screenshot</span>
+      </button>
+    </section>
+
+    <!-- Error Section -->
+    <section class="error-section hidden" id="errorSection">
+      <div class="error-header">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+          <circle cx="9" cy="9" r="8" stroke="#ef4444" stroke-width="1.5"/>
+          <path d="M9 5v4M9 12v.01" stroke="#ef4444" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <span id="errorText">An error occurred</span>
+      </div>
+      <button class="btn-secondary" id="retryBtn">Retry</button>
+    </section>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>Phase 1 · Local Processing Only · No Data Sent</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

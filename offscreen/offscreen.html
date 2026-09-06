@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Privamon Offscreen Processing</title>
+</head>
+<body>
+  <!--
+    Offscreen Document: Provides a DOM environment for heavy processing.
+    Service workers can't use Canvas, Image, or Web Workers — so all
+    image processing (OCR, redaction, vision) runs here.
+
+    This page is never visible to the user.
+  -->
+
+  <!-- Vendor Libraries (loaded first) -->
+  <script src="../lib/tesseract/tesseract.min.js"></script>
+  <script src="../lib/onnx/ort.min.js"></script>
+
+  <!-- Privacy Modules -->
+  <script src="../content/dom-range-mapper.js"></script>
+  <script src="../privacy/pii-detector.js"></script>
+  <script src="../privacy/pii-classifier.js"></script>
+  <script src="../privacy/fusion.js"></script>
+  <script src="../privacy/coordinate-mapper.js"></script>
+  <script src="../privacy/redactor.js"></script>
+  <script src="../privacy/verifier.js"></script>
+
+  <!-- Vision Modules -->
+  <script src="../vision/ocr-engine.js"></script>
+  <script src="../vision/vision-model.js"></script>
+  <script src="../vision/face-detector.js"></script>
+
+  <!-- DOM Sanitization -->
+  <script src="../dom/sanitized-dom.js"></script>
+
+  <!-- Pipeline -->
+  <script src="../pipeline/sanitize-pipeline.js"></script>
+
+  <!-- Offscreen Controller -->
+  <script src="offscreen.js"></script>
+</body>
+</html>
