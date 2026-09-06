@@ -20,6 +20,7 @@ from engine.custom_recognizers import (
     BankAccountRecognizer,
     GSTINRecognizer,
     VehicleRegistrationRecognizer,
+    HindiContextRecognizer,
     is_suppressed_by_negative_context
 )
 
@@ -83,6 +84,7 @@ class PresidioDetector:
         registry.add_recognizer(BankAccountRecognizer())
         registry.add_recognizer(GSTINRecognizer())
         registry.add_recognizer(VehicleRegistrationRecognizer())
+        registry.add_recognizer(HindiContextRecognizer())
 
         self.analyzer = AnalyzerEngine(
             registry=registry,
@@ -136,12 +138,35 @@ class PresidioDetector:
             # Post-processing 4: Centralized False-Positive Suppression
             suppress_reason = is_suppressed_by_negative_context(text, start)
             if suppress_reason:
+                # CANDIDATE != FINAL PII:
+                # Forward to context evaluation so the decision engine can record an explicit KEEP decision
+                if r.entity_type in ("PHONE_NUMBER", "PHONE"):
+                    from engine.context_engine import evaluate_phone_candidate
+                    eval_res = evaluate_phone_candidate(text, start, end, raw_matched_text)
+                    rec_meta = r.recognition_metadata if hasattr(r, "recognition_metadata") and r.recognition_metadata else {}
+                    if not isinstance(rec_meta, dict):
+                        rec_meta = {}
+                    rec_meta["context_eval"] = eval_res
+                    rec_name = rec_meta.get("recognizer_name", "IndianPhoneRecognizer")
+                    detections.append({
+                        "type": eval_res["final_type"],
+                        "text": raw_matched_text,
+                        "start": start,
+                        "end": end,
+                        "confidence": round(float(eval_res["decision_score"]), 4),
+                        "source": "presidio",
+                        "recognizer": rec_name,
+                        "metadata": rec_meta
+                    })
                 continue
 
             # Post-processing 5: Aadhaar vs Phone conflict resolution
             digits_only = re.sub(r"\D", "", raw_matched_text)
             if r.entity_type == "PHONE_NUMBER" and len(digits_only) == 12 and not raw_matched_text.startswith("+"):
                 continue
+
+            rec_meta = r.recognition_metadata if hasattr(r, "recognition_metadata") and r.recognition_metadata else {}
+            rec_name = rec_meta.get("recognizer_name", "presidio") if isinstance(rec_meta, dict) else "presidio"
 
             detections.append({
                 "type": r.entity_type,
@@ -150,7 +175,8 @@ class PresidioDetector:
                 "end": end,
                 "confidence": round(float(r.score), 4),
                 "source": "presidio",
-                "recognizer": r.recognition_metadata.get("recognizer_name", "presidio") if hasattr(r, "recognition_metadata") and r.recognition_metadata else "presidio"
+                "recognizer": rec_name,
+                "metadata": rec_meta if isinstance(rec_meta, dict) else {}
             })
 
         return detections

@@ -121,6 +121,7 @@ class DetectRequest(BaseModel):
     tokens: Optional[List[Dict[str, Any]]] = Field(default=[], description="Optional OCR word tokens with bounding boxes")
     source: Optional[str] = Field(default="ocr", description="Source of text: 'ocr' or 'dom'")
     context: Optional[str] = Field(default="", description="Nearby context keywords or labels")
+    dom_context: Optional[Dict[str, Any]] = Field(default=None, description="Structured DOM context (label, placeholder, name, id, autocomplete)")
 
 
 class DetectResponse(BaseModel):
@@ -162,7 +163,8 @@ def detect_pii(request: DetectRequest):
         )
 
     # --- Cache lookup ---
-    c_key = _cache_key(raw_text, request.context or "")
+    dom_ctx_str = str(sorted(request.dom_context.items())) if request.dom_context else ""
+    c_key = _cache_key(raw_text, f"{request.context or ''}|{dom_ctx_str}")
     cached = _cache_get(c_key)
     if cached is not None:
         t_elapsed = round((time.perf_counter() - t_start) * 1000, 2)
@@ -185,7 +187,6 @@ def detect_pii(request: DetectRequest):
     if p_det:
         p_results = p_det.detect(norm_text, request.context)
         for d in p_results:
-            # Map normalized character span back to original text span
             orig_start, orig_end = norm_result.map_span_to_original(d["start"], d["end"])
             raw_detections.append({
                 **d,
@@ -207,10 +208,15 @@ def detect_pii(request: DetectRequest):
                 "text": raw_text[orig_start:orig_end]
             })
 
-    # 4. Detection Fusion & Confidence Calibration
-    fused_detections, discard_log = fuse_detections(raw_detections, raw_text)
+    # 4. Structured context assembly
+    structured_ctx = request.dom_context or {}
+    if request.context and "nearby_text" not in structured_ctx:
+        structured_ctx["nearby_text"] = request.context
 
-    # 5. OCR Token Span Mapping (Bounding Box Generation)
+    # 5. Detection Fusion & Policy Decision
+    fused_detections, discard_log = fuse_detections(raw_detections, raw_text, structured_ctx)
+
+    # 6. OCR Token Span Mapping (Bounding Box Generation)
     if request.tokens:
         final_detections = map_detections_to_tokens(fused_detections, request.tokens, raw_text)
     else:

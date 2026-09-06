@@ -33,11 +33,20 @@ Privamon.SanitizePipeline = (() => {
    */
   async function run({ screenshot, domData, onProgress }) {
     const timings = {};
+    const pipelineWarnings = [];
     const progress = (stageId, status, statusText) => {
       if (typeof onProgress === 'function') {
         onProgress(stageId, status, statusText);
       }
     };
+
+    // ── Check Engine Health & Record Degradations ──
+    const engineHealth = await Privamon.PIIDetector.checkEngineHealth();
+    if (!engineHealth.online) {
+      pipelineWarnings.push(`Python PII engine offline (${engineHealth.error || 'refused'}) — deterministic JS fallback used`);
+    } else if (!engineHealth.glinerReady) {
+      pipelineWarnings.push('GLiNER neural model not ready — semantic NER unavailable');
+    }
 
     // ── Get screenshot dimensions ──
     const screenshotDims = await getImageDimensions(screenshot);
@@ -45,10 +54,10 @@ Privamon.SanitizePipeline = (() => {
     console.log(`[Pipeline] Viewport: ${domData.viewportInfo.cssViewportWidth}×${domData.viewportInfo.cssViewportHeight}`);
     console.log(`[Pipeline] DPR: ${domData.viewportInfo.devicePixelRatio}, Zoom: ${domData.viewportInfo.estimatedZoom}`);
 
-    // ── Stage 1: DOM PII Detection ──
-    progress('domPii', 'active', 'Detecting PII in DOM elements...');
+    // ── Stage 1: DOM PII Detection (Unified Batch Architecture) ──
+    progress('domPii', 'active', 'Detecting PII in DOM elements (Batch Mode)...');
     const t1 = performance.now();
-    const domDetections = Privamon.PIIDetector.detectAllDom(domData.elements);
+    const domDetections = await Privamon.PIIDetector.detectDOMBatchAsync(domData.elements);
     timings.domPiiDetection = Math.round(performance.now() - t1);
     progress('domPii', 'done');
     console.log(`[Pipeline] DOM PII: ${domDetections.length} detections in ${timings.domPiiDetection}ms`);
@@ -73,13 +82,16 @@ Privamon.SanitizePipeline = (() => {
     const t3 = performance.now();
     let ocrDetections = [];
     let ocrRawText = '';
+    let ocrWords = [];
     if (ocrCandidates.length > 0) {
       try {
         const ocrResult = await Privamon.OCREngine.processRegions(screenshot, ocrCandidates, mapper);
         ocrDetections = ocrResult.detections || [];
         ocrRawText = ocrResult.rawText || '';
+        ocrWords = ocrResult.words || [];
       } catch (err) {
         console.warn('[Pipeline] OCR failed (non-fatal):', err.message);
+        pipelineWarnings.push(`OCR failure (${err.message}) — image text uninspected`);
       }
     } else {
       console.log('[PIPELINE] No pixel regions selected for OCR — skipping OCR stage');
@@ -105,7 +117,10 @@ Privamon.SanitizePipeline = (() => {
     console.log(`[Pipeline] Vision: ${visionDetections.length} detections in ${timings.vision}ms`);
 
     // Tag vision detections with coordinate space
-    visionDetections.forEach(d => d.coordinateSpace = 'screenshot');
+    visionDetections.forEach(d => {
+      d.coordinateSpace = 'screenshot';
+      d.decision = 'REDACT';
+    });
 
     // ── Stage 5: Coordinate Mapping (DOM CSS -> Screenshot pixels) ──
     // Normalize DOM detections to physical screenshot pixels BEFORE fusion
@@ -123,25 +138,31 @@ Privamon.SanitizePipeline = (() => {
     
     console.log(`[PIPELINE] Fusion inputs -> DOM: ${mappedDomDetections.length}, OCR: ${ocrDetections.length}, Vision: ${visionDetections.length}`);
     
-    const { detections: fusedDetections, summary: detectionSummary } =
-      Privamon.PIIFusion.fuse(mappedDomDetections, ocrDetections, visionDetections);
+    const {
+      detections: allCandidates,
+      redactions: finalRedactions,
+      reviews: reviewList,
+      kept: keptList,
+      summary: detectionSummary
+    } = Privamon.PIIFusion.fuse(mappedDomDetections, ocrDetections, visionDetections);
+
     timings.fusion = Math.round(performance.now() - t5);
     progress('fusion', 'done');
-    console.log(`[PIPELINE] Fusion output -> ${fusedDetections.length} fused detections`);
-    if (fusedDetections.length > 0) {
-      console.log(`[PIPELINE] Fused detections:`, JSON.stringify(fusedDetections, null, 2));
+    console.log(`[PIPELINE] Fusion output -> ${allCandidates.length} total candidates: ${finalRedactions.length} REDACT, ${reviewList.length} REVIEW, ${keptList.length} KEEP`);
+    if (allCandidates.length > 0) {
+      console.log(`[PIPELINE] Candidates summary:`, JSON.stringify(detectionSummary, null, 2));
     }
 
-    // ── Stage 7: Redaction ──
+    // ── Stage 7: Redaction (ONLY process decision === 'REDACT') ──
     progress('redaction', 'active', 'Redacting sensitive regions...');
     const t7 = performance.now();
     let redactionResult;
-    if (fusedDetections.length > 0) {
-      console.log(`[PIPELINE][REDACTION] Redacting ${fusedDetections.length} regions...`);
-      redactionResult = await Privamon.Redactor.redact(screenshot, fusedDetections);
+    if (finalRedactions.length > 0) {
+      console.log(`[PIPELINE][REDACTION] Redacting ${finalRedactions.length} confirmed regions...`);
+      redactionResult = await Privamon.Redactor.redact(screenshot, finalRedactions);
       console.log(`[PIPELINE][REDACTION] Successfully redacted ${redactionResult.redactedRegions.length} regions`);
     } else {
-      // No PII found — return original screenshot unchanged
+      // No PII to redact — return original screenshot unchanged
       console.log(`[PIPELINE][REDACTION] No regions to redact.`);
       redactionResult = {
         sanitizedDataUrl: screenshot,
@@ -174,7 +195,7 @@ Privamon.SanitizePipeline = (() => {
     // ── Stage 9: Sanitized DOM ──
     progress('sanitizeDom', 'active', 'Sanitizing DOM...');
     const t9 = performance.now();
-    const sanitizedDom = Privamon.SanitizedDOM.sanitize(domData.elements, fusedDetections);
+    const sanitizedDom = Privamon.SanitizedDOM.sanitize(domData.elements, finalRedactions);
     timings.domSanitization = Math.round(performance.now() - t9);
     progress('sanitizeDom', 'done');
 
@@ -191,7 +212,11 @@ Privamon.SanitizePipeline = (() => {
     return {
       sanitizedScreenshot: verificationResult.sanitizedDataUrl,
       ocrRawText,
-      detections: fusedDetections,
+      detections: allCandidates,
+      redactions: finalRedactions,
+      reviews: reviewList,
+      kept: keptList,
+      ocrWords,
       detectionSummary,
       sanitizedDom,
       timings,
@@ -202,6 +227,8 @@ Privamon.SanitizePipeline = (() => {
         domStats: domData.stats,
         verificationPassed: verificationResult.verified,
         reRedacted: verificationResult.reRedacted,
+        warnings: pipelineWarnings,
+        engineHealth: engineHealth,
       },
     };
   }

@@ -199,6 +199,11 @@ async function handlePipelineResult(message) {
       privamon_result: {
         sanitizedScreenshot: result.sanitizedScreenshot,
         detections: result.detections,
+        allCandidates: result.allCandidates || result.detections,
+        redactions: result.redactions || [],
+        reviews: result.reviews || [],
+        kept: result.kept || [],
+        ocrWords: result.ocrWords || [],
         detectionSummary: result.detectionSummary,
         sanitizedDom: result.sanitizedDom,
         ocrRawText: result.ocrRawText,

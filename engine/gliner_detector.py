@@ -21,31 +21,49 @@ from typing import List, Dict, Any, Optional
 
 logger = logging.getLogger("privamon.gliner")
 
-DEFAULT_LABELS = [
+GROUP_A_LABELS = [
     "person",
     "address",
     "location",
     "organization",
+    "username",
+    "date of birth",
 ]
 
+GROUP_B_LABELS = [
+    "employee id",
+    "customer id",
+    "account identifier",
+    "application number",
+    "reference number",
+    "identification number",
+    "membership number",
+]
+
+DEFAULT_LABELS = GROUP_A_LABELS + GROUP_B_LABELS
+
 # Minimum word-count and alphabetic content thresholds for NER eligibility
-_MIN_ALPHA_WORDS = 2
-_MIN_TEXT_LEN = 8
+_MIN_ALPHA_WORDS = 1
+_MIN_TEXT_LEN = 6
 
 
 def is_eligible_for_ner(text: str) -> bool:
     """
-    Returns True only if the text contains enough alphabetic content
+    Returns True only if the text contains enough alphabetic context
     to warrant running expensive neural NER.
-    Returns False for purely numeric strings, short codes, tracking numbers,
-    order IDs, PIN codes, or extremely short text.
+    Returns False for purely numeric strings, standalone symbols, or short codes.
+    Allows mixed alphanumeric patterns when surrounded by words (e.g. 'Employee ID: 9876543210').
     """
     stripped = text.strip()
     if len(stripped) < _MIN_TEXT_LEN:
         return False
+    # If purely numeric or punctuation, skip
+    if re.fullmatch(r"[\d\s\-\.,:/#\(\)]+", stripped):
+        return False
     # Count words that contain at least one letter
-    alpha_words = re.findall(r'\b[a-zA-Z]+[a-zA-Z0-9]*\b', stripped)
+    alpha_words = re.findall(r'\b[a-zA-Z]{2,}[a-zA-Z0-9]*\b', stripped)
     return len(alpha_words) >= _MIN_ALPHA_WORDS
+
 
 LABEL_NORMALIZATION_MAP = {
     "person": "PERSON",
@@ -56,8 +74,17 @@ LABEL_NORMALIZATION_MAP = {
     "company": "ORGANIZATION",
     "username": "USERNAME",
     "date of birth": "DATE_OF_BIRTH",
-    "dob": "DATE_OF_BIRTH"
+    "dob": "DATE_OF_BIRTH",
+    "employee id": "EMPLOYEE_ID",
+    "customer id": "CUSTOMER_ID",
+    "account identifier": "ACCOUNT_IDENTIFIER",
+    "application number": "APPLICATION_NUMBER",
+    "reference number": "REFERENCE_NUMBER",
+    "identification number": "IDENTIFICATION_NUMBER",
+    "membership number": "MEMBERSHIP_NUMBER",
 }
+
+CANDIDATE_IDENTIFIER_LABELS = set(GROUP_B_LABELS)
 
 
 class GLiNERDetector:
@@ -139,6 +166,8 @@ class GLiNERDetector:
                 label = ent.get("label", "").lower()
                 norm_type = LABEL_NORMALIZATION_MAP.get(label, label.upper())
 
+                is_cand = label in CANDIDATE_IDENTIFIER_LABELS
+
                 detections.append({
                     "type": norm_type,
                     "text": ent.get("text", ""),
@@ -146,7 +175,8 @@ class GLiNERDetector:
                     "end": ent.get("end", 0),
                     "confidence": round(float(ent.get("score", 0.0)), 4),
                     "source": "gliner",
-                    "raw_label": label
+                    "raw_label": label,
+                    "is_candidate": is_cand
                 })
 
             return detections

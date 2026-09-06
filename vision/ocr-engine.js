@@ -112,8 +112,45 @@ Privamon.OCREngine = (() => {
   }
 
   /**
+   * Preprocess a crop image on a temporary canvas for OCR (contrast and moderate upscaling for small crops).
+   * Note: Scaling factor must be inverted when mapping detected word bounding boxes back to screenshot pixels.
+   */
+  async function preprocessCropForOCR(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let scale = 1.0;
+        // Moderate upscale if region is very small (< 400px in either dim) to assist OCR readability
+        if (img.width < 400 || img.height < 400) {
+          scale = Math.min(2.0, 800 / Math.max(img.width, img.height, 1));
+          if (scale < 1.0) scale = 1.0;
+        }
+
+        if (scale === 1.0) {
+          return resolve({ dataUrl, scale: 1.0 });
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        resolve({
+          dataUrl: canvas.toDataURL('image/png'),
+          scale: scale,
+        });
+      };
+      img.onerror = () => resolve({ dataUrl, scale: 1.0 });
+      img.src = dataUrl;
+    });
+  }
+
+  /**
    * Initialize the Tesseract.js worker.
    * Lazy initialization — only called when OCR is actually needed.
+   * Uses dual English + Hindi ('eng+hin') with fallback to English ('eng').
    */
   async function initialize() {
     if (isInitialized) return;
@@ -128,25 +165,41 @@ Privamon.OCREngine = (() => {
         }
 
         const tStart = performance.now();
-        
-        // Add a timeout for initialization to prevent indefinite buffering if traineddata is missing or stalled
         const initTimeout = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Tesseract initialization timeout')), 15000)
+          setTimeout(() => reject(new Error('Tesseract initialization timeout')), 20000)
         );
 
-        const workerPromise = Tesseract.createWorker('eng', 1, {
-          workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
-          corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-simd.wasm.js'),
-          langPath: chrome.runtime.getURL('lib/tesseract/'),
-          workerBlobURL: false,
-        });
+        let createdWorker = null;
 
-        worker = await Promise.race([workerPromise, initTimeout]);
+        // Try dual eng+hin first
+        try {
+          console.log('[OCREngine] Attempting worker initialization with eng+hin...');
+          const workerPromise = Tesseract.createWorker('eng+hin', 1, {
+            workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
+            corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-simd.wasm.js'),
+            langPath: chrome.runtime.getURL('lib/tesseract/'),
+            workerBlobURL: false,
+          });
+          createdWorker = await Promise.race([workerPromise, initTimeout]);
+        } catch (dualErr) {
+          console.warn('[OCREngine] eng+hin initialization failed, falling back to eng:', dualErr);
+          const fallbackTimeout = new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Tesseract fallback timeout')), 15000)
+          );
+          const fallbackPromise = Tesseract.createWorker('eng', 1, {
+            workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
+            corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-simd.wasm.js'),
+            langPath: chrome.runtime.getURL('lib/tesseract/'),
+            workerBlobURL: false,
+          });
+          createdWorker = await Promise.race([fallbackPromise, fallbackTimeout]);
+        }
 
+        worker = createdWorker;
         isInitialized = true;
         console.log(`[OCREngine] Initialized successfully in ${Math.round(performance.now() - tStart)}ms`);
       } catch (err) {
-        console.error('[OCREngine] Initialization failed:', err);
+        console.error('[OCREngine] Initialization failed completely:', err);
         worker = null;
         isInitialized = false;
         initPromise = null;
@@ -170,13 +223,17 @@ Privamon.OCREngine = (() => {
     }
 
     try {
-      // Add a generous timeout (25s) for full-page dense images
+      // Preprocess crop for improved contrast/readability
+      const preprocessed = await preprocessCropForOCR(regionDataUrl);
+      const invScale = 1.0 / (preprocessed.scale || 1.0);
+
+      // Timeout for recognition (25s)
       const timeoutPromise = new Promise((_, reject) => 
         setTimeout(() => reject(new Error('OCR Timeout')), 25000)
       );
       
       const result = await Promise.race([
-        worker.recognize(regionDataUrl),
+        worker.recognize(preprocessed.dataUrl),
         timeoutPromise
       ]);
 
@@ -197,10 +254,10 @@ Privamon.OCREngine = (() => {
               lineIndex: lineIdx,
               wordIndex: wordIdx,
               bbox: {
-                x: regX + Math.round(w.bbox.x0),
-                y: regY + Math.round(w.bbox.y0),
-                width: Math.max(1, Math.round(w.bbox.x1 - w.bbox.x0)),
-                height: Math.max(1, Math.round(w.bbox.y1 - w.bbox.y0)),
+                x: regX + Math.round(w.bbox.x0 * invScale),
+                y: regY + Math.round(w.bbox.y0 * invScale),
+                width: Math.max(1, Math.round((w.bbox.x1 - w.bbox.x0) * invScale)),
+                height: Math.max(1, Math.round((w.bbox.y1 - w.bbox.y0) * invScale)),
               },
               source: 'ocr',
             });
@@ -220,10 +277,10 @@ Privamon.OCREngine = (() => {
           text: w.text.trim(),
           confidence: (w.confidence ?? 80) / 100,
           bbox: {
-            x: regX + Math.round(w.bbox.x0),
-            y: regY + Math.round(w.bbox.y0),
-            width: Math.max(1, Math.round(w.bbox.x1 - w.bbox.x0)),
-            height: Math.max(1, Math.round(w.bbox.y1 - w.bbox.y0)),
+            x: regX + Math.round(w.bbox.x0 * invScale),
+            y: regY + Math.round(w.bbox.y0 * invScale),
+            width: Math.max(1, Math.round((w.bbox.x1 - w.bbox.x0) * invScale)),
+            height: Math.max(1, Math.round((w.bbox.y1 - w.bbox.y0) * invScale)),
           },
           source: 'ocr',
         }));
@@ -438,6 +495,8 @@ Privamon.OCREngine = (() => {
       let fullRawText = '';
       console.log(`[OCR] Starting processing for ${regions.length} selected regions`);
 
+      const allWords = [];
+
       for (let i = 0; i < regions.length; i++) {
         const region = regions[i];
         const rId = region.regionId || `region_${i}`;
@@ -473,6 +532,16 @@ Privamon.OCREngine = (() => {
         const tRecognize = Math.round(performance.now() - tStartRecognize);
         
         console.log(`[OCR][${rId}][TESSERACT] words=${ocrResults.length} in ${tRecognize}ms (extract: ${tExtract}ms)`);
+
+        // Collect all recognized words for debugging & visualization
+        for (const w of ocrResults) {
+          allWords.push({
+            text: w.text,
+            bbox: w.bbox,
+            confidence: w.confidence,
+            source: 'ocr'
+          });
+        }
 
         const tStartPii = performance.now();
         
@@ -526,7 +595,7 @@ Privamon.OCREngine = (() => {
         }
       }
 
-      return { detections: allOcrDetections, rawText: fullRawText };
+      return { detections: allOcrDetections, rawText: fullRawText, words: allWords };
     } finally {
       isProcessing = false;
     }

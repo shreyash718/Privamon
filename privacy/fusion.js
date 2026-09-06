@@ -172,19 +172,39 @@ Privamon.PIIFusion = (() => {
       merged.push(current);
     }
 
-    // Build summary
+    // Build summary & categorize decisions
     const summary = {};
+    const redactions = [];
+    const reviews = [];
+    const kept = [];
+
     for (const d of merged) {
       summary[d.type] = (summary[d.type] || 0) + 1;
+      if (d.decision === 'REDACT') {
+        redactions.push(d);
+      } else if (d.decision === 'REVIEW') {
+        reviews.push(d);
+      } else {
+        kept.push(d);
+      }
     }
 
-    return { detections: merged, summary };
+    return {
+      detections: merged,      // All candidates for diagnostics/overlays
+      redactions: redactions,  // Invariant: ONLY items with decision === 'REDACT'
+      reviews: reviews,
+      kept: kept,
+      summary
+    };
   }
 
   /**
    * Normalize a detection to the common format.
    */
   function normalize(detection, defaultSource) {
+    const isFace = (detection.type === 'face');
+    const defaultDecision = isFace ? 'REDACT' : (detection.decision || 'REDACT');
+
     return {
       type: detection.type || 'other',
       source: detection.source || defaultSource,
@@ -193,6 +213,12 @@ Privamon.PIIFusion = (() => {
       bbox: detection.bbox || null,
       boxes: detection.boxes || null,
       confidence: detection.confidence || 0.5,
+      model_confidence: detection.model_confidence || detection.confidence || 0.5,
+      decision_score: detection.decision_score || detection.confidence || 0.5,
+      sensitivity_class: detection.sensitivity_class || (isFace ? 'DIRECT_PII' : 'UNKNOWN'),
+      decision: defaultDecision,
+      positive_evidence: detection.positive_evidence || [],
+      negative_evidence: detection.negative_evidence || [],
       elementId: detection.elementId || null,
       reason: detection.reason || null,
       coordinateSpace: detection.coordinateSpace || null,

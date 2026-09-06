@@ -52,6 +52,10 @@ Privamon.Redactor = (() => {
     const redactedRegions = [];
 
     for (const detection of detections) {
+      // INVARIANT: The redactor MUST ONLY process items with explicit decision === 'REDACT'
+      if (detection.decision !== 'REDACT') {
+        continue;
+      }
       if (!detection.bbox && (!detection.boxes || detection.boxes.length === 0)) continue;
 
       const targetBoxes = (detection.boxes && detection.boxes.length > 0) ? detection.boxes : [detection.bbox];

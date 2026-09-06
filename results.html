@@ -21,9 +21,21 @@
         <h1>Privamon <span class="subtle">Sanitized Result</span></h1>
       </div>
       <div class="topbar-right">
-        <label class="toggle-label">
-          <input type="checkbox" id="toggleOverlay" checked>
-          <span>Show detections</span>
+        <label class="toggle-label" title="Show/hide candidates flagged for redaction">
+          <input type="checkbox" id="toggleRedact" checked>
+          <span style="color: #ef4444;">● REDACT</span>
+        </label>
+        <label class="toggle-label" title="Show/hide ambiguous candidates requiring review">
+          <input type="checkbox" id="toggleReview" checked>
+          <span style="color: #f59e0b;">● REVIEW</span>
+        </label>
+        <label class="toggle-label" title="Show/hide non-PII/discarded candidates">
+          <input type="checkbox" id="toggleKept">
+          <span style="color: #3b82f6;">● KEEP</span>
+        </label>
+        <label class="toggle-label" title="Show/hide all raw OCR word bounding boxes">
+          <input type="checkbox" id="toggleOcrWords">
+          <span style="color: #10b981;">● OCR Words</span>
         </label>
         <label class="toggle-label">
           <input type="checkbox" id="toggleDom">

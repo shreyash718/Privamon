@@ -16,7 +16,50 @@ Privamon.PIIDetector = (() => {
 
   const LOCAL_ENGINE_URL = 'http://127.0.0.1:8765/detect';
   const LOCAL_ENGINE_BATCH_URL = 'http://127.0.0.1:8765/detect/batch';
+  const LOCAL_ENGINE_HEALTH_URL = 'http://127.0.0.1:8765/health';
   const ENGINE_TIMEOUT_MS = 3000;
+
+  let lastEngineHealth = {
+    checked: false,
+    online: false,
+    glinerReady: false,
+    presidioReady: false,
+    error: null
+  };
+
+  /**
+   * Ping the local backend engine to verify server, Presidio, and GLiNER availability.
+   */
+  async function checkEngineHealth() {
+    try {
+      const resp = await fetch(LOCAL_ENGINE_HEALTH_URL, { signal: AbortSignal.timeout(1500) });
+      if (resp.ok) {
+        const data = await resp.json();
+        lastEngineHealth = {
+          checked: true,
+          online: true,
+          glinerReady: Boolean(data.gliner_ready),
+          presidioReady: Boolean(data.presidio_ready),
+          error: null
+        };
+        return lastEngineHealth;
+      }
+      throw new Error(`HTTP ${resp.status}`);
+    } catch (err) {
+      lastEngineHealth = {
+        checked: true,
+        online: false,
+        glinerReady: false,
+        presidioReady: false,
+        error: err.message
+      };
+      return lastEngineHealth;
+    }
+  }
+
+  function getEngineHealth() {
+    return lastEngineHealth;
+  }
 
   // ── Verhoeff Checksum Tables (for Aadhaar validation) ──
   const VERHOEFF_D = [
@@ -370,6 +413,12 @@ Privamon.PIIDetector = (() => {
           type: d.type,
           text: d.text,
           confidence: d.confidence,
+          decision_score: d.decision_score || d.confidence,
+          model_confidence: d.model_confidence || d.confidence,
+          sensitivity_class: d.sensitivity_class || 'DIRECT_PII',
+          decision: d.decision || 'REDACT',
+          positive_evidence: d.positive_evidence || [],
+          negative_evidence: d.negative_evidence || [],
           source: d.source || source,
           span: { start: d.start, end: d.end },
           bbox: d.bbox || null,
@@ -405,7 +454,8 @@ Privamon.PIIDetector = (() => {
           text: it.text || '',
           source: it.source || 'ocr',
           context: it.context || '',
-          tokens: it.tokens || []
+          tokens: it.tokens || [],
+          dom_context: it.dom_context || null
         }))
       };
 
@@ -426,6 +476,12 @@ Privamon.PIIDetector = (() => {
             type: d.type,
             text: d.text,
             confidence: d.confidence,
+            decision_score: d.decision_score || d.confidence,
+            model_confidence: d.model_confidence || d.confidence,
+            sensitivity_class: d.sensitivity_class || 'DIRECT_PII',
+            decision: d.decision || 'REDACT',
+            positive_evidence: d.positive_evidence || [],
+            negative_evidence: d.negative_evidence || [],
             source: d.source || itemSource,
             span: { start: d.start, end: d.end },
             bbox: d.bbox || null,
@@ -441,6 +497,150 @@ Privamon.PIIDetector = (() => {
 
     // Fallback: local JS detection per item
     return items.map(it => detectInText(it.text || '', it.source || 'ocr', it.context || ''));
+  }
+
+  /**
+   * High-accuracy batch DOM detection:
+   * Batches visible DOM elements and sends them to the local Python engine,
+   * unifying DOM and OCR intelligence while mapping coordinates accurately.
+   *
+   * @param {Array} elements - Elements from dom-extractor
+   * @returns {Promise<Array>} All detections mapped to viewport coordinates
+   */
+  async function detectDOMBatchAsync(elements) {
+    if (!elements || !elements.length) return [];
+
+    const semanticDetections = [];
+    const textEligibleItems = [];
+
+    for (let i = 0; i < elements.length; i++) {
+      const el = elements[i];
+      if (el.isPixelContent) continue;
+
+      // Sensitive input check
+      if (el.inputType === 'password') {
+        semanticDetections.push({
+          type: 'password',
+          text: '••••••••',
+          confidence: 1.0,
+          decision_score: 1.0,
+          model_confidence: 1.0,
+          sensitivity_class: 'DIRECT_PII',
+          decision: 'REDACT',
+          positive_evidence: ['input_type=password'],
+          negative_evidence: [],
+          source: 'dom',
+          bbox: el.bbox,
+          boxes: [el.bbox],
+          elementId: el.id || el.testId || null,
+          reason: 'input type=password',
+          coordinateSpace: 'css-viewport'
+        });
+      }
+
+      const textToScan = el.text || el.value || '';
+      if (textToScan && textToScan.trim().length > 0) {
+        textEligibleItems.push({
+          text: textToScan,
+          source: 'dom',
+          context: [el.label, el.placeholder, el.name, el.id].filter(Boolean).join(' '),
+          dom_context: {
+            label: el.label || '',
+            placeholder: el.placeholder || '',
+            name: el.name || '',
+            id: el.id || '',
+            autocomplete: el.autocomplete || '',
+            type: el.inputType || ''
+          },
+          element: el
+        });
+      }
+    }
+
+    if (textEligibleItems.length === 0) {
+      return semanticDetections;
+    }
+
+    const allEngineDetections = [];
+    const CHUNK_SIZE = 20;
+
+    try {
+      for (let i = 0; i < textEligibleItems.length; i += CHUNK_SIZE) {
+        const chunk = textEligibleItems.slice(i, i + CHUNK_SIZE);
+        const payload = {
+          items: chunk.map(item => ({
+            text: item.text,
+            source: 'dom',
+            context: item.context,
+            dom_context: item.dom_context
+          }))
+        };
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), ENGINE_TIMEOUT_MS * 2);
+
+        const response = await fetch(LOCAL_ENGINE_BATCH_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          throw new Error(`Engine returned HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        const results = data.results || [];
+
+        for (let j = 0; j < results.length; j++) {
+          const item = chunk[j];
+          const itemDetections = results[j]?.detections || [];
+          const el = item.element;
+
+          for (const d of itemDetections) {
+            let bbox = el.bbox;
+            let boxes = [el.bbox];
+            let tokenIds = [];
+
+            if (el.tokens && el.tokens.length > 0 && typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper) {
+              const mapped = Privamon.DOMRangeMapper.mapSpanToDomBoxes(d.start, d.end, el.tokens);
+              if (mapped && mapped.bbox) {
+                bbox = mapped.bbox;
+                boxes = mapped.boxes || [mapped.bbox];
+                tokenIds = mapped.tokens || [];
+              }
+            }
+
+            allEngineDetections.push({
+              type: d.type,
+              text: d.text,
+              confidence: d.confidence,
+              decision_score: d.decision_score || d.confidence,
+              model_confidence: d.model_confidence || d.confidence,
+              sensitivity_class: d.sensitivity_class || 'DIRECT_PII',
+              decision: d.decision || 'REDACT',
+              positive_evidence: d.positive_evidence || [],
+              negative_evidence: d.negative_evidence || [],
+              reason: d.reason || 'engine:hybrid',
+              source: 'dom',
+              span: { start: d.start, end: d.end },
+              bbox: bbox,
+              boxes: boxes,
+              tokens: tokenIds,
+              elementId: el.id || el.testId || null,
+              coordinateSpace: 'css-viewport'
+            });
+          }
+        }
+      }
+
+      return [...semanticDetections, ...allEngineDetections];
+    } catch (err) {
+      console.warn(`[PII] DOM Batch Engine detection failed (${err.message}). Falling back to local JS regexes.`);
+      return detectAllDom(elements);
+    }
   }
 
   /**
@@ -572,8 +772,11 @@ Privamon.PIIDetector = (() => {
     detectInText,
     detectAsync,
     detectBatchAsync,
+    detectDOMBatchAsync,
     detectInElement,
     detectAllDom,
+    checkEngineHealth,
+    getEngineHealth,
     validateVerhoeff,
     aadhaarCheck,
     hasNegativePrefix,

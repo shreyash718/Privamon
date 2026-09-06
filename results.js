@@ -62,8 +62,17 @@
   const zoomLevelEl =
     document.getElementById('zoomLevel');
 
-  const toggleOverlay =
-    document.getElementById('toggleOverlay');
+  const toggleRedact =
+    document.getElementById('toggleRedact');
+
+  const toggleReview =
+    document.getElementById('toggleReview');
+
+  const toggleKept =
+    document.getElementById('toggleKept');
+
+  const toggleOcrWords =
+    document.getElementById('toggleOcrWords');
 
   const toggleDom =
     document.getElementById('toggleDom');
@@ -111,10 +120,16 @@
     fitToWindow();
   });
 
-  toggleOverlay?.addEventListener('change', () => {
-    detectionOverlays.style.display =
-      toggleOverlay.checked ? '' : 'none';
-  });
+  function refreshOverlays() {
+    if (resultData && Array.isArray(resultData.detections)) {
+      renderDetectionOverlays(resultData.detections);
+    }
+  }
+
+  toggleRedact?.addEventListener('change', refreshOverlays);
+  toggleReview?.addEventListener('change', refreshOverlays);
+  toggleKept?.addEventListener('change', refreshOverlays);
+  toggleOcrWords?.addEventListener('change', refreshOverlays);
 
   toggleDom?.addEventListener('change', () => {
     domSection.classList.toggle(
@@ -458,12 +473,41 @@
   function renderDetectionOverlays(detections) {
     detectionOverlays.innerHTML = '';
 
+    const showRedact = toggleRedact ? toggleRedact.checked : true;
+    const showReview = toggleReview ? toggleReview.checked : true;
+    const showKept = toggleKept ? toggleKept.checked : false;
+    const showOcrWords = toggleOcrWords ? toggleOcrWords.checked : false;
+
+    // 1. Render raw OCR word boxes if toggle is active
+    if (showOcrWords && resultData && Array.isArray(resultData.ocrWords)) {
+      for (const w of resultData.ocrWords) {
+        if (!w || !w.bbox) continue;
+        const b = w.bbox;
+        const box = document.createElement('div');
+        box.className = 'detection-box ocr-word-box';
+        box.style.left = `${b.x * currentZoom}px`;
+        box.style.top = `${b.y * currentZoom}px`;
+        box.style.width = `${b.width * currentZoom}px`;
+        box.style.height = `${b.height * currentZoom}px`;
+        box.style.border = '1px dashed #10b981';
+        box.style.backgroundColor = 'rgba(16, 185, 129, 0.08)';
+        box.style.pointerEvents = 'auto';
+        box.title = `OCR Word: "${w.text}" (${Math.round((w.confidence || 0) * 100)}%)`;
+        detectionOverlays.appendChild(box);
+      }
+    }
+
     if (!Array.isArray(detections)) {
       return;
     }
 
     for (const det of detections) {
       if (!det) continue;
+
+      const decision = det.decision || 'REDACT';
+      if (decision === 'REDACT' && !showRedact) continue;
+      if (decision === 'REVIEW' && !showReview) continue;
+      if (decision === 'KEEP' && !showKept) continue;
 
       const targetBoxes = (Array.isArray(det.boxes) && det.boxes.length > 0)
         ? det.boxes
@@ -474,7 +518,12 @@
       const entityType = (det.type || 'other').toLowerCase();
       const confidence = Number.isFinite(det.confidence)
         ? Math.round(det.confidence * 100)
-        : 0;
+        : (Number.isFinite(det.model_confidence) ? Math.round(det.model_confidence * 100) : 0);
+      const decScore = Number.isFinite(det.decision_score)
+        ? det.decision_score.toFixed(2)
+        : (confidence / 100).toFixed(2);
+
+      const decisionClass = `decision-${decision.toLowerCase()}`;
 
       for (let i = 0; i < targetBoxes.length; i++) {
         const b = targetBoxes[i];
@@ -491,18 +540,41 @@
         }
 
         const box = document.createElement('div');
-        box.className = `detection-box type-${entityType}`;
+        box.className = `detection-box type-${entityType} ${decisionClass}`;
 
         box.style.left = `${b.x * currentZoom}px`;
         box.style.top = `${b.y * currentZoom}px`;
         box.style.width = `${b.width * currentZoom}px`;
         box.style.height = `${b.height * currentZoom}px`;
 
+        if (decision === 'REVIEW') {
+          box.style.border = '2px dashed #f59e0b';
+          box.style.backgroundColor = 'rgba(245, 158, 11, 0.12)';
+        } else if (decision === 'KEEP') {
+          box.style.border = '1px dotted #3b82f6';
+          box.style.backgroundColor = 'rgba(59, 130, 246, 0.08)';
+        }
+
+        const tooltip = [
+          `Type: ${det.type || 'unknown'}`,
+          `Decision: ${decision} (Decision Score: ${decScore})`,
+          `Sensitivity: ${det.sensitivity_class || 'DIRECT_PII'}`,
+          det.model_confidence !== undefined ? `Model Conf: ${Math.round(det.model_confidence * 100)}%` : null,
+          det.reason ? `Reason: ${det.reason}` : null,
+          det.positive_evidence && det.positive_evidence.length ? `Positive Evidence: ${det.positive_evidence.join(', ')}` : null,
+          det.negative_evidence && det.negative_evidence.length ? `Negative Evidence: ${det.negative_evidence.join(', ')}` : null,
+          det.source ? `Source: ${Array.isArray(det.source) ? det.source.join(', ') : det.source}` : null
+        ].filter(Boolean).join('\n');
+
+        box.title = tooltip;
+
         // Attach label only to the first box of the entity
         if (i === 0) {
           const label = document.createElement('span');
           label.className = 'detection-label';
-          label.textContent = `${det.type || 'other'} (${confidence}%)`;
+          label.textContent = `${det.type || 'other'} [${decision}] (${confidence}%)`;
+          if (decision === 'REVIEW') label.style.background = '#f59e0b';
+          if (decision === 'KEEP') label.style.background = '#3b82f6';
           box.appendChild(label);
         }
 
@@ -553,13 +625,49 @@
       dob: '📅 Dates of Birth',
       ip: '🌐 IP Addresses',
       address: '🏠 Addresses',
+      employee_id: '🪪 Employee IDs',
+      customer_id: '🏷️ Customer IDs',
       other: '⚠️ Other Sensitive',
     };
 
-
     let html = '';
-    let total = 0;
 
+    // High-Level Candidate Decision Breakdown & Warnings
+    if (resultData) {
+      const candidates = resultData.allCandidates || resultData.detections || [];
+      const redacts = candidates.filter(c => !c.decision || c.decision === 'REDACT').length;
+      const reviews = candidates.filter(c => c.decision === 'REVIEW').length;
+      const kept = candidates.filter(c => c.decision === 'KEEP').length;
+
+      const warnings = (resultData.metadata && Array.isArray(resultData.metadata.warnings))
+        ? resultData.metadata.warnings
+        : [];
+
+      if (warnings.length > 0) {
+        html += `
+          <div style="grid-column: 1 / -1; padding: 8px 10px; margin-bottom: 10px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 4px; color: #fca5a5; font-size: 11px; line-height: 1.4;">
+            <strong>⚠️ Scan Degraded — Subsystem Unavailable:</strong><br>
+            ${warnings.map(w => `• ${w}`).join('<br>')}
+          </div>
+        `;
+      }
+
+      html += `
+        <div style="grid-column: 1 / -1; display: flex; gap: 6px; margin-bottom: 12px; font-size: 11px; font-weight: 600;">
+          <span style="flex: 1; padding: 6px 4px; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; border-radius: 4px; text-align: center; color: #f87171;" title="Candidates flagged for redaction">
+            🛑 REDACT: ${redacts}
+          </span>
+          <span style="flex: 1; padding: 6px 4px; background: rgba(245, 158, 11, 0.15); border: 1px solid #f59e0b; border-radius: 4px; text-align: center; color: #fbbf24;" title="Ambiguous candidates needing review">
+            ⚠️ REVIEW: ${reviews}
+          </span>
+          <span style="flex: 1; padding: 6px 4px; background: rgba(59, 130, 246, 0.15); border: 1px solid #3b82f6; border-radius: 4px; text-align: center; color: #60a5fa;" title="Kept candidates (non-PII / rejected)">
+            🟢 KEEP: ${kept}
+          </span>
+        </div>
+      `;
+    }
+
+    let total = 0;
 
     for (
       const [type, count] of
@@ -573,14 +681,11 @@
         continue;
       }
 
-
       total += count;
-
 
       const label =
         typeLabels[type] ||
         `🔸 ${type}`;
-
 
       html += `
         <span class="summary-type">
@@ -593,18 +698,29 @@
       `;
     }
 
-
     if (total === 0) {
+      const hasWarnings = resultData?.metadata?.warnings?.length > 0;
+      if (hasWarnings) {
+        html += `
+          <span class="summary-type" style="color: #f87171;">
+            ⚠️ Incomplete scan (Engine Degraded)
+          </span>
 
-      html = `
-        <span class="summary-type">
-          ✅ No PII detected
-        </span>
+          <span class="summary-count" style="color: #f87171;">
+            !
+          </span>
+        `;
+      } else {
+        html += `
+          <span class="summary-type">
+            ✅ No sensitive PII detected
+          </span>
 
-        <span class="summary-count">
-          0
-        </span>
-      `;
+          <span class="summary-count">
+            0
+          </span>
+        `;
+      }
     }
 
 

@@ -1,0 +1,225 @@
+{
+  "rawText": "Name: Riya Sharma\n\nMobile: 9876543210\n\nOrder ID: 9876543210\n\nEmployee ID: XJ729184\n\nProduct ID: XJ729184\n\nEmail: riya@example.com\n\nAddress: 456 Green Park, New Delhi\n",
+  "words": [
+    {
+      "text": "Name:",
+      "confidence": 0.9660975646972656,
+      "bbox": {
+        "x": 32,
+        "y": 34,
+        "width": 60,
+        "height": 16
+      }
+    },
+    {
+      "text": "Riya",
+      "confidence": 0.9678336334228516,
+      "bbox": {
+        "x": 102,
+        "y": 34,
+        "width": 41,
+        "height": 20
+      }
+    },
+    {
+      "text": "Sharma",
+      "confidence": 0.9676769256591797,
+      "bbox": {
+        "x": 151,
+        "y": 34,
+        "width": 74,
+        "height": 16
+      }
+    },
+    {
+      "text": "Mobile:",
+      "confidence": 0.9618348693847656,
+      "bbox": {
+        "x": 32,
+        "y": 79,
+        "width": 66,
+        "height": 16
+      }
+    },
+    {
+      "text": "9876543210",
+      "confidence": 0.9629499053955078,
+      "bbox": {
+        "x": 107,
+        "y": 79,
+        "width": 118,
+        "height": 16
+      }
+    },
+    {
+      "text": "Order",
+      "confidence": 0.9659081268310546,
+      "bbox": {
+        "x": 31,
+        "y": 124,
+        "width": 54,
+        "height": 16
+      }
+    },
+    {
+      "text": "ID:",
+      "confidence": 0.9470301818847656,
+      "bbox": {
+        "x": 93,
+        "y": 124,
+        "width": 24,
+        "height": 16
+      }
+    },
+    {
+      "text": "9876543210",
+      "confidence": 0.9638490295410156,
+      "bbox": {
+        "x": 126,
+        "y": 124,
+        "width": 118,
+        "height": 16
+      }
+    },
+    {
+      "text": "Employee",
+      "confidence": 0.9563385009765625,
+      "bbox": {
+        "x": 32,
+        "y": 169,
+        "width": 94,
+        "height": 20
+      }
+    },
+    {
+      "text": "ID:",
+      "confidence": 0.9268978881835938,
+      "bbox": {
+        "x": 135,
+        "y": 169,
+        "width": 24,
+        "height": 16
+      }
+    },
+    {
+      "text": "XJ729184",
+      "confidence": 0.9180271911621094,
+      "bbox": {
+        "x": 167,
+        "y": 169,
+        "width": 97,
+        "height": 16
+      }
+    },
+    {
+      "text": "Product",
+      "confidence": 0.962822494506836,
+      "bbox": {
+        "x": 32,
+        "y": 214,
+        "width": 73,
+        "height": 16
+      }
+    },
+    {
+      "text": "ID:",
+      "confidence": 0.9288188171386719,
+      "bbox": {
+        "x": 113,
+        "y": 214,
+        "width": 24,
+        "height": 16
+      }
+    },
+    {
+      "text": "XJ729184",
+      "confidence": 0.912131576538086,
+      "bbox": {
+        "x": 145,
+        "y": 214,
+        "width": 97,
+        "height": 16
+      }
+    },
+    {
+      "text": "Email:",
+      "confidence": 0.9310038757324218,
+      "bbox": {
+        "x": 32,
+        "y": 259,
+        "width": 57,
+        "height": 16
+      }
+    },
+    {
+      "text": "riya@example.com",
+      "confidence": 0.9001624298095703,
+      "bbox": {
+        "x": 98,
+        "y": 259,
+        "width": 184,
+        "height": 20
+      }
+    },
+    {
+      "text": "Address:",
+      "confidence": 0.9577240753173828,
+      "bbox": {
+        "x": 30,
+        "y": 304,
+        "width": 84,
+        "height": 16
+      }
+    },
+    {
+      "text": "456",
+      "confidence": 0.9646530151367188,
+      "bbox": {
+        "x": 122,
+        "y": 304,
+        "width": 35,
+        "height": 16
+      }
+    },
+    {
+      "text": "Green",
+      "confidence": 0.9586607360839844,
+      "bbox": {
+        "x": 165,
+        "y": 304,
+        "width": 58,
+        "height": 16
+      }
+    },
+    {
+      "text": "Park,",
+      "confidence": 0.9586607360839844,
+      "bbox": {
+        "x": 232,
+        "y": 304,
+        "width": 47,
+        "height": 19
+      }
+    },
+    {
+      "text": "New",
+      "confidence": 0.9682212066650391,
+      "bbox": {
+        "x": 289,
+        "y": 304,
+        "width": 42,
+        "height": 16
+      }
+    },
+    {
+      "text": "Delhi",
+      "confidence": 0.9548465728759765,
+      "bbox": {
+        "x": 339,
+        "y": 304,
+        "width": 46,
+        "height": 16
+      }
+    }
+  ]
+}

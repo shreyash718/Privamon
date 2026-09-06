@@ -21,7 +21,15 @@ from presidio_analyzer import (
     Pattern,
     PatternRecognizer,
     RecognizerResult,
-    AnalysisExplanation
+    AnalysisExplanation,
+    EntityRecognizer
+)
+
+from engine.context_engine import (
+    evaluate_phone_candidate,
+    COMMERCIAL_NON_PERSONAL_KEYWORDS,
+    PERSONAL_ID_KEYWORDS,
+    AMBIGUOUS_ID_KEYWORDS
 )
 
 # ── Negative Context Keywords (False Positive Suppressors) ──
@@ -38,11 +46,21 @@ NEGATIVE_PREFIX_KEYWORDS = [
     r"sku\s*[:\-]?\s*",
     r"item\s*(?:code|id|#|no)?\s*[:\-]?\s*",
     r"model\s*(?:no|num|number)?\s*[:\-]?\s*",
+    r"employee\s*(?:id|#|no|num|number|code)?\s*[:\-]?\s*",
+    r"customer\s*(?:id|#|no|num|number|code)?\s*[:\-]?\s*",
+    r"patient\s*(?:id|#|no|num|number|code)?\s*[:\-]?\s*",
+    r"member\s*(?:id|#|no|num|number|code)?\s*[:\-]?\s*",
+    r"applicant\s*(?:id|#|no|num|number|code)?\s*[:\-]?\s*",
+    r"serial\s*(?:no|num|number)?\s*[:\-]?\s*",
+    r"roll\s*(?:no|num|number)?\s*[:\-]?\s*",
+    r"transaction\s*(?:id|#|no|num|number)?\s*[:\-]?\s*",
+    r"booking\s*(?:id|#|no|num|number)?\s*[:\-]?\s*",
+    r"case\s*(?:id|#|no|num|number)?\s*[:\-]?\s*",
 ]
 NEGATIVE_PREFIX_REGEX = re.compile(r"(?:" + "|".join(NEGATIVE_PREFIX_KEYWORDS) + r")$", re.IGNORECASE)
 
 
-def is_suppressed_by_negative_context(text: str, start: int, lookback_chars: int = 40) -> Optional[str]:
+def is_suppressed_by_negative_context(text: str, start: int, lookback_chars: int = 50) -> Optional[str]:
     """
     Inspects up to lookback_chars before `start` to check if a negative context keyword precedes the match.
     Returns the reason string if suppressed, else None.
@@ -222,12 +240,9 @@ class IndianPhoneRecognizer(PatternRecognizer):
         results = super().analyze(text, entities, nlp_artifacts)
         filtered_results = []
         for r in results:
-            suppress_reason = is_suppressed_by_negative_context(text, r.start)
-            if suppress_reason:
-                continue
-
+            match_text = text[r.start:r.end]
             # Ensure the matched number has exactly 10 digits (excluding +91 or 0 prefix)
-            digits = re.sub(r"\D", "", text[r.start:r.end])
+            digits = re.sub(r"\D", "", match_text)
             if digits.startswith("91") and len(digits) == 12:
                 digits = digits[2:]
             elif digits.startswith("0") and len(digits) == 11:
@@ -235,9 +250,18 @@ class IndianPhoneRecognizer(PatternRecognizer):
             if len(digits) != 10:
                 continue
 
-            # Reject repetitive dummy numbers like 9999999999 or 1234567890 if not in context
+            # Reject repetitive dummy numbers like 9999999999
             if len(set(digits)) <= 2:
                 continue
+
+            # Evaluate through bidirectional context engine
+            eval_res = evaluate_phone_candidate(text, r.start, r.end, match_text)
+
+            r.score = eval_res["decision_score"]
+            if hasattr(r, "recognition_metadata") and r.recognition_metadata is not None:
+                r.recognition_metadata["context_eval"] = eval_res
+            else:
+                r.recognition_metadata = {"context_eval": eval_res}
 
             filtered_results.append(r)
         return filtered_results
@@ -460,3 +484,51 @@ class VehicleRegistrationRecognizer(PatternRecognizer):
                 r.score = 0.90
                 filtered.append(r)
         return filtered
+
+
+# ── Custom Hindi Context Recognizer ──
+class HindiContextRecognizer(EntityRecognizer):
+    """
+    Recognizes contextual Hindi PII fields:
+    - नाम / श्री / श्रीमती - <नाम> (PERSON)
+    - पता / स्थान / निवास - <पता> (ADDRESS)
+    """
+    def __init__(self):
+        super().__init__(
+            supported_entities=["PERSON", "ADDRESS"],
+            name="HindiContextRecognizer",
+            supported_language="en"
+        )
+
+    def load(self) -> None:
+        pass
+
+    def analyze(self, text: str, entities: List[str], nlp_artifacts=None) -> List[RecognizerResult]:
+        results = []
+        # 1. Hindi Name: नाम - मिश्र जी / मशिर जी
+        for m in re.finditer(r"(?:नाम|श्री|श्रीमती)\s*[:\-–]\s*([^\n\r,]+)", text):
+            val = m.group(1).strip()
+            if val and len(val) >= 2:
+                v_start = m.start(1)
+                v_end = v_start + len(val)
+                results.append(RecognizerResult(
+                    entity_type="PERSON",
+                    start=v_start,
+                    end=v_end,
+                    score=0.88
+                ))
+
+        # 2. Hindi Address: पता - सेक्टर 11, फरीदाबाद
+        for m in re.finditer(r"(?:पता|स्थान|निवास)\s*[:\-–]\s*([^\n\r]+)", text):
+            val = m.group(1).strip()
+            if val and len(val) >= 2:
+                v_start = m.start(1)
+                v_end = v_start + len(val)
+                results.append(RecognizerResult(
+                    entity_type="ADDRESS",
+                    start=v_start,
+                    end=v_end,
+                    score=0.88
+                ))
+
+        return results
