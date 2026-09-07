@@ -452,7 +452,7 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
 
     let agentResp = { actions: [], message: '', thinking: '', raw_model_output: '' };
     try {
-      agentResp = await sendToServerAgent(pipelineResult, queryText, serverUrl);
+      agentResp = await sendToServerAgent(pipelineResult, queryText, serverUrl, tab);
     } catch (serverErr) {
       console.warn('[Background] Server side agent query failed:', serverErr.message);
       agentResp = {
@@ -605,9 +605,113 @@ function runPipelineAsync(screenshot, domData, task) {
 }
 
 /**
+ * Computes coarse 9-region position tag for spatial disambiguation.
+ */
+function computeCoarsePosition(bbox, viewportInfo) {
+  if (!bbox) return null;
+  const vpW = (viewportInfo && viewportInfo.cssViewportWidth) || 1280;
+  const vpH = (viewportInfo && viewportInfo.cssViewportHeight) || 800;
+  const midX = bbox.x + (bbox.width || 0) / 2;
+  const midY = bbox.y + (bbox.height || 0) / 2;
+
+  const vPos = midY < vpH * 0.33 ? 'top' : (midY < vpH * 0.66 ? 'mid' : 'bottom');
+  const hPos = midX < vpW * 0.33 ? 'left' : (midX < vpW * 0.66 ? 'center' : 'right');
+  return `${vPos}-${hPos}`;
+}
+
+/**
+ * Filters, ranks, and maps DOM elements based on task relevance and interactivity.
+ * Restricts payload to top 20 elements to preserve VLM token budget.
+ */
+function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 20) {
+  if (!Array.isArray(sanitizedDom) || sanitizedDom.length === 0) {
+    return [];
+  }
+
+  const stopWords = new Set(['the', 'a', 'an', 'is', 'to', 'on', 'in', 'it', 'for', 'of', 'and', 'at', 'by', 'this', 'that', 'with', 'from', 'my', 'me']);
+  const taskTokens = (task || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 1 && !stopWords.has(w));
+
+  const hasClickIntent = /\b(click|press|tap|select|submit|choose|open|go|check|tick)\b/i.test(task || '');
+  const hasTypeIntent = /\b(type|enter|fill|input|write|search|set)\b/i.test(task || '');
+
+  const scored = sanitizedDom.map((el, idx) => {
+    const tag = (el.tag || 'elem').toLowerCase();
+    const role = (el.role || '').toLowerCase();
+    const pos = computeCoarsePosition(el.bbox, viewportInfo);
+
+    let score = 0;
+
+    // 1. Interactivity weight
+    const isInteractiveTag = ['button', 'input', 'a', 'select', 'textarea'].includes(tag);
+    const isInteractiveRole = ['button', 'link', 'combobox', 'textbox', 'checkbox', 'radio', 'menuitem'].includes(role);
+    if (isInteractiveTag || isInteractiveRole) {
+      score += 10;
+    }
+
+    // 2. Action verb intent alignment
+    if (hasClickIntent && (tag === 'button' || tag === 'a' || role === 'button' || role === 'link')) {
+      score += 8;
+    }
+    if (hasTypeIntent && (tag === 'input' || tag === 'textarea' || role === 'textbox')) {
+      score += 8;
+    }
+
+    // 3. Keyword overlap
+    const searchableText = [
+      el.label,
+      el.placeholder,
+      el.text,
+      el.id,
+      el.name,
+      el.inputType,
+      el.role
+    ].filter(Boolean).join(' ').toLowerCase();
+
+    for (const token of taskTokens) {
+      if (searchableText.includes(token)) {
+        score += 6;
+      }
+    }
+
+    // 4. Viewport spatial tie-breaker (prefer upper/middle over far bottom)
+    if (pos && pos.startsWith('top')) score += 2;
+    else if (pos && pos.startsWith('mid')) score += 1;
+
+    return {
+      elementId: el.elementId || el.id || `dom-tok-${idx}`,
+      tag: tag,
+      role: el.role || null,
+      pos: pos,
+      label: el.label || null,
+      text: el.text ? el.text.slice(0, 80) : null,
+      bbox: el.bbox ? {
+        x: Math.round(el.bbox.x),
+        y: Math.round(el.bbox.y),
+        width: Math.round(el.bbox.width),
+        height: Math.round(el.bbox.height)
+      } : null,
+      attributes: {
+        type: el.inputType || null,
+        placeholder: el.placeholder || null,
+        value: el.value ? String(el.value).slice(0, 40) : null
+      },
+      _score: score
+    };
+  });
+
+  // Sort descending by score, take top maxElements
+  scored.sort((a, b) => b._score - a._score);
+  return scored.slice(0, maxElements).map(({ _score, ...el }) => el);
+}
+
+/**
  * Sends the sanitized image, redacted regions, task, and DOM context to server_side_agent.
  */
-async function sendToServerAgent(result, task, serverUrl = 'http://localhost:8000') {
+async function sendToServerAgent(result, task, serverUrl = 'http://localhost:8000', tab = null) {
   const endpoint = (serverUrl || 'http://localhost:8000').replace(/\/+$/, '') + '/interpret';
 
   // Format redacted regions
@@ -621,53 +725,72 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
     reason: r.type || r.reason || 'redacted_pii'
   }));
 
-  // Format structured sanitized DOM elements with elementIds for precise action targeting
-  const structuredDom = (Array.isArray(result.sanitizedDom) && result.sanitizedDom.length > 0)
-    ? result.sanitizedDom.slice(0, 45).map((el, idx) => ({
-        elementId: el.elementId || el.id || `dom-tok-${idx}`,
-        tag: (el.tag || 'elem').toLowerCase(),
-        role: el.role || null,
-        label: el.label || null,
-        text: el.text ? el.text.slice(0, 80) : null,
-        bbox: el.bbox ? {
-          x: Math.round(el.bbox.x),
-          y: Math.round(el.bbox.y),
-          width: Math.round(el.bbox.width),
-          height: Math.round(el.bbox.height)
-        } : null,
-        attributes: {
-          type: el.inputType || null,
-          placeholder: el.placeholder || null,
-          value: el.value ? String(el.value).slice(0, 40) : null
-        }
-      }))
-    : [];
+  // Rank and prune DOM elements (top 20 relevant elements with coarse spatial hints)
+  const viewportInfo = result.metadata?.viewportInfo || null;
+  const structuredDom = rankDomElements(result.sanitizedDom, task, viewportInfo, 20);
 
   // Concise text string format fallback
   let sanitized_dom_str = '';
   if (structuredDom.length > 0) {
     sanitized_dom_str = structuredDom.map(el => {
+      const pos = el.pos ? ` pos="${el.pos}"` : '';
       const type = el.attributes?.type ? ` type="${el.attributes.type}"` : '';
       const label = el.label ? ` label="${el.label}"` : '';
       const val = el.attributes?.value ? ` val="${el.attributes.value}"` : '';
       const text = el.text ? ` text="${el.text}"` : '';
-      return `<${el.tag} id="${el.elementId}"${type}${label}${val}${text}/>`;
+      return `<${el.tag} id="${el.elementId}"${pos}${type}${label}${val}${text}/>`;
     }).join('\n');
   }
 
-  // Retrieve past turn actions for priorActions grounding
+  // Retrieve past turn actions and evaluate outcomes
   let priorActions = [];
   try {
     const histData = await chrome.storage.local.get(['privamon_chat_history']);
     const pastTurns = histData.privamon_chat_history || [];
-    priorActions = pastTurns.slice(-3).map(t => {
-      if (t.action) {
-        const target = t.action.targetElementId || t.action.value || '';
-        return `${t.action.type} ${target}`.trim();
+    if (pastTurns.length > 0) {
+      const lastTurn = pastTurns[pastTurns.length - 1];
+      let lastOutcome = lastTurn.outcome || null;
+
+      if (!lastOutcome) {
+        // Compare page states between last turn and current turn
+        const lastUrl = lastTurn.pageUrl || '';
+        const currentUrl = (tab && tab.url) || '';
+
+        if (lastUrl && currentUrl && lastUrl !== currentUrl) {
+          lastOutcome = 'navigation_success';
+        } else if (lastTurn.action && lastTurn.action.targetElementId) {
+          const targetId = lastTurn.action.targetElementId;
+          const stillExists = Array.isArray(result.sanitizedDom) && result.sanitizedDom.some(
+            el => (el.elementId === targetId || el.id === targetId)
+          );
+          if (stillExists) {
+            lastOutcome = 'no_change_detected';
+          } else {
+            lastOutcome = 'state_changed';
+          }
+        } else {
+          lastOutcome = 'completed';
+        }
       }
-      return `"${t.task}"`;
-    });
-  } catch (e) { /* ignore */ }
+
+      priorActions = pastTurns.slice(-3).map((t, idx, arr) => {
+        const isLast = (idx === arr.length - 1);
+        const outcome = isLast && lastOutcome ? lastOutcome : (t.outcome || 'completed');
+        const actStr = t.action
+          ? `${t.action.type} ${t.action.targetElementId || t.action.value || ''}`.trim()
+          : `"${t.task}"`;
+
+        if (outcome === 'no_change_detected') {
+          return `${actStr} [outcome: no_change_detected — DO NOT REPEAT UNCHANGED]`;
+        } else if (outcome) {
+          return `${actStr} [outcome: ${outcome}]`;
+        }
+        return actStr;
+      });
+    }
+  } catch (e) {
+    console.warn('[Background] Failed to process prior actions outcome:', e);
+  }
 
   const detectionSummary = result.detectionSummary || {
     total: redacted_regions.length,

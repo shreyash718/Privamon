@@ -1,27 +1,121 @@
-import requests, json, io, base64, re, time
+import os, requests, json, io, base64, re, time
 from typing import Optional, Union, Any
 from PIL import Image
 from pydantic import ValidationError
 from schemas import InterpretResponse, ActionPayload
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-MODEL_NAME = "qwen3-vl:2b"
-
-def optimize_image_b64(b64_str: str, max_dimension: int = 512) -> str:
+def _load_env_file():
     """
-    Optimizes base64 screenshot for VLM consumption:
-    - Downscales images larger than max_dimension to cut token count
-    - Converts to high-quality JPEG to minimize memory and transmission overhead
+    Lightweight, zero-dependency .env loader that reloads on demand.
+    Checks server_side_agent/.env and project root .env.
+    """
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env"),
+    ]
+    for env_path in candidates:
+        if os.path.exists(env_path):
+            try:
+                with open(env_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip('"').strip("'")
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+_load_env_file()
+
+# Provider Configuration
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+OPENROUTER_URL = os.getenv("OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
+
+def get_vlm_provider() -> str:
+    _load_env_file()
+    return os.getenv("VLM_PROVIDER", "ollama").lower()
+
+def get_openrouter_api_key() -> str:
+    _load_env_file()
+    return os.getenv("OPENROUTER_API_KEY", "").strip()
+
+def get_model_for_provider(provider: str = None) -> str:
+    _load_env_file()
+    prov = (provider or get_vlm_provider()).lower()
+    if prov == "openrouter":
+        return os.getenv("VLM_MODEL_OPENROUTER", "qwen/qwen2.5-vl-72b-instruct")
+    return os.getenv("VLM_MODEL_OLLAMA", "qwen3-vl:2b")
+
+# Strict Action Schema enforced across Ollama and OpenRouter
+# Note: additionalProperties: False is mandatory for OpenAI-compatible strict structured output APIs
+STRICT_ACTION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "reasoning": {
+            "type": "string",
+            "description": "1-2 brief plain language sentences explaining the action"
+        },
+        "confidence": {
+            "type": "number",
+            "description": "Confidence score between 0.0 and 1.0"
+        },
+        "action": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "type": {
+                    "type": "string",
+                    "enum": ["click", "type", "scroll", "select", "wait", "ask_user", "done"]
+                },
+                "targetElementId": {
+                    "type": ["string", "null"],
+                    "description": "The exact elementId from the available DOM list, or null"
+                },
+                "value": {
+                    "type": ["string", "null"],
+                    "description": "Text value to type/select, or null"
+                },
+                "scrollDirection": {
+                    "type": ["string", "null"],
+                    "enum": ["up", "down", None]
+                }
+            },
+            "required": ["type", "targetElementId", "value", "scrollDirection"]
+        },
+        "assumptions": {
+            "type": "array",
+            "items": {"type": "string"}
+        },
+        "needsClarification": {
+            "type": "boolean"
+        }
+    },
+    "required": ["reasoning", "confidence", "action", "assumptions", "needsClarification"]
+}
+
+def optimize_image_b64(b64_str: str, max_dimension: int = 1152) -> str:
+    """
+    Optimizes base64 screenshot for VLM consumption while preserving PNG fidelity:
+    - Uses lossless PNG exclusively to prevent JPEG DCT ringing artifacts around UI text and redactions.
+    - If image is already <= max_dimension and in PNG format, passes it directly through.
+    - If resizing or palette normalization is needed, resizes with LANCZOS and re-encodes as lossless PNG.
     """
     if not b64_str:
         return ""
     try:
-        # Strip data URL header if present
         clean_b64 = b64_str.split(",", 1)[1] if "," in b64_str and b64_str.startswith("data:") else b64_str
         raw_bytes = base64.b64decode(clean_b64)
         img = Image.open(io.BytesIO(raw_bytes))
-        
-        # Convert RGBA / palette to RGB
+        w, h = img.size
+
+        # If already within bounds and in PNG format, pass clean data directly
+        if max(w, h) <= max_dimension and getattr(img, "format", "").upper() == "PNG":
+            return clean_b64
+
+        # Convert palette / RGBA to RGB for standard VLM consumption
         if img.mode in ("RGBA", "P", "LA"):
             background = Image.new("RGB", img.size, (255, 255, 255))
             if img.mode == "P":
@@ -30,42 +124,42 @@ def optimize_image_b64(b64_str: str, max_dimension: int = 512) -> str:
             img = background
         elif img.mode != "RGB":
             img = img.convert("RGB")
-            
-        w, h = img.size
+
         if max(w, h) > max_dimension:
             scale = max_dimension / max(w, h)
             new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
             img = img.resize(new_size, Image.Resampling.LANCZOS)
-            
+
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=85, optimize=True)
+        img.save(buffer, format="PNG", optimize=True)
         return base64.b64encode(buffer.getvalue()).decode("utf-8")
     except Exception as e:
         print(f"[!] Warning: Image optimization failed: {e}. Using raw image.")
         return b64_str.split(",", 1)[1] if "," in b64_str and b64_str.startswith("data:") else b64_str
 
-def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: int = 40) -> str:
+def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: int = 20) -> str:
     """
     Formats the sanitized DOM context into structured text lines containing
-    elementIds, tags, labels, and text so the model grounds actions in exact DOM IDs.
+    elementIds, coarse positional tags [pos: ...], tags, labels, and text.
     """
     if not sanitized_dom:
         return "(No DOM elements available)"
     if isinstance(sanitized_dom, str):
         return sanitized_dom[:2500]
-    
+
     lines = []
     for el in sanitized_dom[:max_elements]:
         el_id = el.get("elementId") or el.get("id") or "unknown"
         tag = el.get("tag") or "elem"
+        pos = f" [pos: {el.get('pos')}]" if el.get("pos") else ""
         role = f" role=\"{el.get('role')}\"" if el.get("role") else ""
         label = f" label=\"{el.get('label')}\"" if el.get("label") else ""
         text = f" text=\"{el.get('text')}\"" if el.get("text") else ""
         attrs = el.get("attributes") or {}
         val = f" value=\"{attrs.get('value')}\"" if attrs.get("value") else ""
         inp_type = f" type=\"{attrs.get('type')}\"" if attrs.get("type") else ""
-        lines.append(f"- elementId: \"{el_id}\" | <{tag}{inp_type}{role}{label}{val}>{text}</{tag}>")
-        
+        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{val}>{text}</{tag}>")
+
     return "\n".join(lines)
 
 def build_reasoning_prompt(
@@ -78,9 +172,15 @@ def build_reasoning_prompt(
     """
     Constructs the system prompt following the Privamon Server-Side Reasoning Agent specification.
     """
-    dom_text = format_dom_for_prompt(sanitized_dom)
+    dom_text = format_dom_for_prompt(sanitized_dom, max_elements=20)
     det_text = json.dumps(detection_summary) if detection_summary else "None"
-    prior_text = json.dumps(prior_actions) if prior_actions else "None"
+    
+    if prior_actions and isinstance(prior_actions, list):
+        prior_text = "\n".join(f"- {act}" for act in prior_actions)
+    elif prior_actions:
+        prior_text = str(prior_actions)
+    else:
+        prior_text = "None"
 
     return f"""You are the server-side reasoning agent for Privamon. You receive a sanitized, redacted screen context (image + DOM) from a browser extension that has already stripped all PII locally. You do not receive raw pixels, passwords, or personal data — some regions of the image are solid black, and some DOM text is replaced with tokens like [REDACTED: email]. Your job is to understand the user's task, reason about the sanitized screen state, and return a structured, executable action for the browser client to carry out. You never see anything the client didn't choose to send you, so you must reason well despite missing information, not pretend it isn't missing.
 
@@ -93,7 +193,7 @@ AVAILABLE SANITIZED DOM ELEMENTS (target ONLY these elementId values):
 DETECTION SUMMARY:
 {det_text}
 
-PRIOR ACTIONS:
+PRIOR ACTIONS & OUTCOMES:
 {prior_text}
 
 HOW TO REASON UNDER REDACTION:
@@ -102,13 +202,15 @@ HOW TO REASON UNDER REDACTION:
 3. Use black boxes in the image as landmarks, not obstacles: A solid black box indicates a profile photo or credential field; use it to understand page layout.
 4. One action per response, always: Don't return multi-step plans. Return one atomic executable action.
 5. Calibrate confidence honestly (0.0 to 1.0): Below 0.5, prefer action type "ask_user". Reserve "done" for when the task is verifiably complete.
-6. State every assumption explicitly in the assumptions list.
-7. Don't hallucinate content behind a redaction.
+6. Check prior action outcomes: If a prior action has outcome 'no_change_detected', DO NOT repeat that action unchanged; adapt your strategy.
+7. Keep reasoning brief: 1 to 2 concise sentences maximum.
+8. State every assumption explicitly in the assumptions list.
+9. Don't hallucinate content behind a redaction.
 
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
 {{
-  "reasoning": "1-3 sentences, plain language, no chain-of-thought dump",
+  "reasoning": "1-2 sentences, plain language, no chain-of-thought dump",
   "confidence": 0.95,
   "action": {{
     "type": "click",
@@ -116,39 +218,114 @@ You must return ONLY a single valid JSON object strictly matching this schema wi
     "value": null,
     "scrollDirection": null
   }},
-  "assumptions": ["inferred primary action button based on role"],
+  "assumptions": ["inferred primary action button based on role and position"],
   "needsClarification": false
 }}
 (Valid action types: click, type, scroll, select, wait, ask_user, done. For scroll, scrollDirection can be "up" or "down".)
 """
 
-def call_ollama(prompt: str, image_b64: str) -> tuple[str, str]:
+def build_format_param(provider: str, schema: dict) -> dict:
     """
-    Sends request to Ollama with streaming response support.
+    Envelopes the JSON schema according to provider specifications:
+    - Ollama: raw schema dictionary in 'format' (activates llama.cpp grammar-constrained sampling)
+    - OpenRouter/OpenAI: 'response_format' with type 'json_schema'
     """
-    payload = {
-        "model": MODEL_NAME,
-        "prompt": prompt,
-        "format": "json",
-        "stream": True,
-        "options": {
-            "num_ctx": 4096,
-            "num_predict": 512,
-            "temperature": 0.2
+    prov = (provider or "ollama").lower()
+    if prov == "ollama":
+        return {"format": schema}
+    else:
+        return {
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "action_response",
+                    "strict": True,
+                    "schema": schema
+                }
+            }
         }
-    }
-    if image_b64:
-        payload["images"] = [image_b64]
 
-    print(f"[*] Sending request to Ollama ({MODEL_NAME}) with context size 4096...")
+def build_request_payload(
+    provider: str,
+    prompt: str,
+    image_b64: str = "",
+    schema: dict = None,
+    model: str = None,
+    stream: bool = False,
+    options: dict = None
+) -> dict:
+    """
+    Constructs provider-specific HTTP request body:
+    - Ollama: flat {prompt, images: [b64], format: schema, options: {...}}
+    - OpenRouter/OpenAI: nested messages with text + image_url blocks and response_format
+    """
+    prov = (provider or "ollama").lower()
+    schema = schema or STRICT_ACTION_SCHEMA
+    options = options or {}
+    temp = options.get("temperature", 0.2)
+    max_tokens = options.get("num_predict", 512)
+    resolved_model = model or get_model_for_provider(prov)
+
+    if prov == "ollama":
+        payload = {
+            "model": resolved_model,
+            "prompt": prompt,
+            "stream": stream,
+            "options": {
+                "num_ctx": options.get("num_ctx", 4096),
+                "num_predict": max_tokens,
+                "temperature": temp
+            }
+        }
+        payload.update(build_format_param("ollama", schema))
+        if image_b64:
+            payload["images"] = [image_b64]
+        return payload
+    else:
+        # OpenRouter / OpenAI chat completions shape
+        content = [{"type": "text", "text": prompt}]
+        if image_b64:
+            url = image_b64 if image_b64.startswith("data:") else f"data:image/png;base64,{image_b64}"
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": url}
+            })
+        payload = {
+            "model": resolved_model,
+            "messages": [
+                {"role": "user", "content": content}
+            ],
+            "temperature": temp,
+            "max_tokens": max_tokens,
+            "stream": stream
+        }
+        payload.update(build_format_param("openrouter", schema))
+        return payload
+
+def call_ollama(prompt: str, image_b64: str, schema: dict = None) -> tuple[str, str]:
+    """
+    Sends request to Ollama with streaming response support and grammar enforcement.
+    """
+    model = get_model_for_provider("ollama")
+    payload = build_request_payload(
+        provider="ollama",
+        prompt=prompt,
+        image_b64=image_b64,
+        schema=schema or STRICT_ACTION_SCHEMA,
+        model=model,
+        stream=True,
+        options={"num_ctx": 4096, "num_predict": 512, "temperature": 0.2}
+    )
+
+    print(f"[*] Sending request to Ollama ({model}) with strict schema grammar...")
     resp = requests.post(OLLAMA_URL, json=payload, stream=True, timeout=180)
-    
+
     if resp.status_code != 200:
         raise Exception(f"Ollama API error {resp.status_code}: {resp.text}")
-        
+
     full_response = ""
     full_thinking = ""
-    
+
     for line in resp.iter_lines():
         if line:
             chunk = json.loads(line)
@@ -158,9 +335,76 @@ def call_ollama(prompt: str, image_b64: str) -> tuple[str, str]:
             if "response" in chunk and chunk["response"]:
                 full_response += chunk["response"]
                 print(f"\033[92m{chunk['response']}\033[0m", end="", flush=True)
-                
+
     print("\n[*] Finished generation.")
     return full_response.strip(), full_thinking.strip()
+
+def call_openrouter(prompt: str, image_b64: str, schema: dict = None, max_network_retries: int = 2) -> tuple[str, str]:
+    """
+    Sends request to OpenRouter API with network-level exponential backoff
+    for transient errors (429 rate limits, 502/503/504 gateways, timeouts).
+    """
+    api_key = get_openrouter_api_key()
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY is not set. Please set OPENROUTER_API_KEY in server_side_agent/.env or as an environment variable.")
+
+    model = get_model_for_provider("openrouter")
+    payload = build_request_payload(
+        provider="openrouter",
+        prompt=prompt,
+        image_b64=image_b64,
+        schema=schema or STRICT_ACTION_SCHEMA,
+        model=model,
+        stream=False,
+        options={"num_predict": 512, "temperature": 0.2}
+    )
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "HTTP-Referer": "https://privamon.local",
+        "X-Title": "Privamon Reasoning Agent",
+        "Content-Type": "application/json"
+    }
+
+    for attempt in range(max_network_retries + 1):
+        try:
+            print(f"[*] Sending request to OpenRouter ({model}) [Attempt {attempt + 1}/{max_network_retries + 1}]...")
+            resp = requests.post(OPENROUTER_URL, json=payload, headers=headers, timeout=120)
+
+            # Handle rate limiting (429) or transient gateway errors (502, 503, 504)
+            if resp.status_code in (429, 502, 503, 504) and attempt < max_network_retries:
+                wait_time = 1.5 * (2 ** attempt)
+                print(f"[!] OpenRouter HTTP {resp.status_code} received. Backing off for {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                continue
+
+            if resp.status_code != 200:
+                raise Exception(f"OpenRouter API error {resp.status_code}: {resp.text[:300]}")
+
+            data = resp.json()
+            choice = data.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            content = message.get("content", "")
+            thinking = message.get("reasoning", "") or ""
+            return content.strip(), thinking.strip()
+
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as net_err:
+            if attempt < max_network_retries:
+                wait_time = 1.5 * (2 ** attempt)
+                print(f"[!] OpenRouter network error ({net_err}). Retrying in {wait_time:.1f}s...")
+                time.sleep(wait_time)
+            else:
+                raise Exception(f"OpenRouter connection failed after {max_network_retries + 1} attempts: {net_err}")
+
+def call_vlm(prompt: str, image_b64: str, provider: str = None, schema: dict = None) -> tuple[str, str]:
+    """
+    Dispatches to the active VLM provider (Ollama for local testing, OpenRouter for cloud).
+    """
+    prov = (provider or get_vlm_provider()).lower()
+    if prov == "openrouter":
+        return call_openrouter(prompt, image_b64, schema=schema)
+    else:
+        return call_ollama(prompt, image_b64, schema=schema)
 
 def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Optional[str]]:
     """
@@ -324,7 +568,7 @@ def run_inference(
     Returns: (validated_response, latency_ms, retried_boolean)
     """
     start_time = time.perf_counter()
-    optimized_image = optimize_image_b64(image_b64, max_dimension=1024) if image_b64 else ""
+    optimized_image = optimize_image_b64(image_b64, max_dimension=1152) if image_b64 else ""
 
     prompt = build_reasoning_prompt(
         task=task,
@@ -334,8 +578,8 @@ def run_inference(
         conversation_state=conversation_state
     )
 
-    # First attempt
-    raw_output, thinking = call_ollama(prompt, optimized_image)
+    # First attempt via active provider (Ollama / OpenRouter)
+    raw_output, thinking = call_vlm(prompt, optimized_image)
     validated, error = parse_and_validate(raw_output)
     if not validated and thinking:
         val_from_thinking, err_thinking = parse_and_validate(thinking)
@@ -358,10 +602,10 @@ def run_inference(
         f"{prompt}\n\n"
         f"CRITICAL ERROR: Your previous response failed schema validation: {error}\n"
         f"Fix the error and output ONLY a valid JSON object matching the exact schema:\n"
-        f'{{"reasoning": "1-3 sentences", "confidence": 0.85, "action": {{"type": "click", "targetElementId": "exact_element_id_or_null", "value": null, "scrollDirection": null}}, "assumptions": [], "needsClarification": false}}\n'
+        f'{{"reasoning": "1-2 sentences", "confidence": 0.85, "action": {{"type": "click", "targetElementId": "exact_element_id_or_null", "value": null, "scrollDirection": null}}, "assumptions": [], "needsClarification": false}}\n'
     )
 
-    raw_retry, thinking_retry = call_ollama(retry_prompt, image_b64="")
+    raw_retry, thinking_retry = call_vlm(retry_prompt, image_b64="")
     validated_retry, error_retry = parse_and_validate(raw_retry)
     if not validated_retry and thinking_retry:
         val_from_retry_thinking, err_retry = parse_and_validate(thinking_retry)

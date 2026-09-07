@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from schemas import InterpretRequest, InterpretResponse
-from model_client import run_inference
+from model_client import run_inference, get_vlm_provider, get_model_for_provider
 from audit_logger import log_turn
 
 app = FastAPI(title="Privamon Server-Side Reasoning Agent")
@@ -60,8 +60,10 @@ async def interpret(req: InterpretRequest):
 
 @app.get("/health")
 async def health():
+    provider = get_vlm_provider()
     return {
         "status": "ok",
         "agent": "Privamon Server-Side Reasoning Agent",
-        "model": "qwen3-vl:2b"
+        "provider": provider,
+        "model": get_model_for_provider(provider)
     }
