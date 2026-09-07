@@ -677,10 +677,12 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
     }, {})
   };
 
+  const serverImg = result.serverScreenshot || result.sanitizedScreenshot;
+
   const payload = {
     task: task,
-    sanitizedScreenshot: result.sanitizedScreenshot,
-    image_b64: result.sanitizedScreenshot,
+    sanitizedScreenshot: serverImg,
+    image_b64: serverImg,
     sanitizedDom: structuredDom,
     sanitized_dom: sanitized_dom_str,
     detectionSummary: detectionSummary,

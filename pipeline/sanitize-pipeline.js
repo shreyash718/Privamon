@@ -460,12 +460,36 @@ Privamon.SanitizePipeline = (() => {
     timings.domSanitization = Math.round(performance.now() - tDomSanStart);
     progress('sanitizeDom', 'done');
 
+    // ── 10. Stage: Pre-Transmission Screenshot Downscaling (for Server) ──
+    progress('downscale', 'active', 'Optimizing sanitized screenshot for reasoning agent...');
+    const tDownscaleStart = performance.now();
+    let serverScreenshot = finalScreenshot;
+    let downscaleMetadata = null;
+
+    try {
+      if (Privamon.ImageResizer && typeof Privamon.ImageResizer.prepareServerScreenshot === 'function') {
+        const verifiedCanvas = redactionResult.canvas;
+        const dpr = domData.viewportInfo?.devicePixelRatio || 1;
+        const serverRes = await Privamon.ImageResizer.prepareServerScreenshot(verifiedCanvas, dpr);
+        serverScreenshot = serverRes.serverDataUrl || finalScreenshot;
+        downscaleMetadata = serverRes.metadata;
+      }
+    } catch (downscaleErr) {
+      console.warn('[Pipeline] Server downscaling failed; safely falling back to full-resolution screenshot:', downscaleErr.message);
+      warnings.push(`Downscaling fallback: ${downscaleErr.message}`);
+      serverScreenshot = finalScreenshot;
+    }
+
+    timings.downscaling = Math.round(performance.now() - tDownscaleStart);
+    progress('downscale', 'done');
+
     // ── Final Timings & Contract Compliance ──
     timings.total = Math.round(performance.now() - pipelineStart);
 
     return {
       // ── RedactionResult Core Contract ──
-      sanitizedScreenshot: finalScreenshot,
+      sanitizedScreenshot: finalScreenshot, // Full resolution: preserved for local review & Results dashboard
+      serverScreenshot: serverScreenshot,   // Downscaled: DPR normalized & capped at 1152px for server transmission
       detections: fusionResult.detections,
       verificationPassed: verificationResult.verificationPassed,
       reRedactedCount: verificationResult.reRedactedCount,
@@ -488,7 +512,8 @@ Privamon.SanitizePipeline = (() => {
         domStats: domData.stats,
         verificationPassed: verificationResult.verificationPassed,
         reRedactedCount: verificationResult.reRedactedCount,
-        warnings
+        warnings,
+        downscaling: downscaleMetadata
       }
     };
   }
