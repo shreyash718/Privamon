@@ -109,6 +109,17 @@ function setupEventListeners() {
     submitChatQuery(taskInput.value.trim());
   });
 
+  // Input bar reactivity
+  if (taskInput) {
+    taskInput.addEventListener('input', () => {
+      const hasVal = taskInput.value.trim().length > 0;
+      const container = document.querySelector('.input-bar-container');
+      if (container) {
+        container.classList.toggle('has-input-text', hasVal);
+      }
+    });
+  }
+
   // Prompt suggestion chips
   promptChips.forEach(chip => {
     chip.addEventListener('click', () => {
@@ -438,6 +449,7 @@ async function submitChatQuery(query) {
 
   // UI state
   taskInput.value = '';
+  document.querySelector('.input-bar-container')?.classList.remove('has-input-text');
   taskInput.disabled = true;
   sendBtn.disabled = true;
   activeProgressCard.classList.remove('hidden');

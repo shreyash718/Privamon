@@ -13,12 +13,12 @@
       <div class="header-brand">
         <div class="brand-icon">
           <svg width="24" height="24" viewBox="0 0 28 28" fill="none">
-            <rect width="28" height="28" rx="7" fill="url(#brandGrad)"/>
+            <rect width="28" height="28" rx="7" fill="url(#brandGrad)" stroke="rgba(255, 255, 255, 0.16)" stroke-width="1"/>
             <path d="M14 7C10.13 7 7 10.13 7 14s3.13 7 7 7 7-3.13 7-7-3.13-7-7-7zm0 2.5a2 2 0 110 4 2 2 0 010-4zm0 9.5c-2.5 0-4.71-1.28-6-3.22.03-1.99 4-3.08 6-3.08s5.97 1.09 6 3.08A7.46 7.46 0 0114 19z" fill="white" opacity="0.95"/>
             <defs>
               <linearGradient id="brandGrad" x1="0" y1="0" x2="28" y2="28">
-                <stop stop-color="#6366f1"/>
-                <stop offset="1" stop-color="#a855f7"/>
+                <stop stop-color="#2a2a32"/>
+                <stop offset="1" stop-color="#111115"/>
               </linearGradient>
             </defs>
           </svg>
@@ -112,30 +112,49 @@
       </div>
     </section>
 
-    <!-- Bottom Query Input Box ("What to do?") -->
+    <!-- Bottom Query Input Box ("Ask me anything to do") -->
     <section class="bottom-input-box" id="bottomInputBox">
       <!-- Prompt Suggestions -->
       <div class="prompt-chips">
-        <button class="chip-btn" data-prompt="What should I do on this page?">What to do here?</button>
-        <button class="chip-btn" data-prompt="Guide me through the main action on this screen">Guide next step</button>
-        <button class="chip-btn" data-prompt="Analyze the form fields and buttons">Inspect form</button>
+        <button class="chip-btn" data-prompt="What should I do on this page?">
+          <span class="chip-icon">✦</span>
+          <span>What to do here?</span>
+        </button>
+        <button class="chip-btn" data-prompt="Guide me through the main action on this screen">
+          <span class="chip-icon">⚡</span>
+          <span>Guide next step</span>
+        </button>
+        <button class="chip-btn" data-prompt="Analyze the form fields and buttons">
+          <span class="chip-icon">🔍</span>
+          <span>Inspect form</span>
+        </button>
       </div>
 
       <form id="chatForm" class="input-form">
-        <div class="input-bar">
-          <input
-            type="text"
-            id="taskInput"
-            placeholder="Ask agent what to do... (e.g. How to login?)"
-            autocomplete="off"
-            spellcheck="false"
-          >
-          <button type="submit" id="sendBtn" class="send-btn" title="Send to Agent">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <line x1="22" y1="2" x2="11" y2="13"></line>
-              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-            </svg>
-          </button>
+        <div class="input-bar-container">
+          <div class="input-bar">
+            <div class="input-ai-glyph" title="Vision Agent Ready">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3v3m0 12v3M3 12h3m12 0h3m-2.93-6.07l-2.12 2.12m-7.78 7.78l-2.12 2.12m0-12.02l2.12 2.12m7.78 7.78l2.12 2.12"/>
+              </svg>
+            </div>
+            <input
+              type="text"
+              id="taskInput"
+              placeholder="Ask me anything to do..."
+              autocomplete="off"
+              spellcheck="false"
+            >
+            <div class="input-right-cluster">
+              <span class="input-kbd-pill" title="Press Enter to send">↵ Enter</span>
+              <button type="submit" id="sendBtn" class="send-btn" title="Send to Agent" aria-label="Send query">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="22" y1="2" x2="11" y2="13"></line>
+                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+              </button>
+            </div>
+          </div>
         </div>
       </form>
     </section>
