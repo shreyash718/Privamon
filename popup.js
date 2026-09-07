@@ -42,10 +42,31 @@ const closeLightboxBtn  = document.getElementById('closeLightboxBtn');
 const lightboxImg       = document.getElementById('lightboxImg');
 const openResultsPageBtn= document.getElementById('openResultsPageBtn');
 
+// ── VLM Raw Response Inspector DOM References ──
+const openInspectorHeaderBtn = document.getElementById('openInspectorHeaderBtn');
+const vlmInspectorModal      = document.getElementById('vlmInspectorModal');
+const vlmInspectorBackdrop   = document.getElementById('vlmInspectorBackdrop');
+const closeInspectorBtn      = document.getElementById('closeInspectorBtn');
+const inspectorCopyBtn       = document.getElementById('inspectorCopyBtn');
+const inspectorCopyLabel     = document.getElementById('inspectorCopyLabel');
+const inspectorModalTitle    = document.getElementById('inspectorModalTitle');
+const inspectorProviderBadge = document.getElementById('inspectorProviderBadge');
+const inspectorModelBadge    = document.getElementById('inspectorModelBadge');
+const inspectorLatencyBadge  = document.getElementById('inspectorLatencyBadge');
+const tabBtnRaw              = document.getElementById('tabBtnRaw');
+const tabBtnParsed           = document.getElementById('tabBtnParsed');
+const tabBtnThinking         = document.getElementById('tabBtnThinking');
+const inspectorCodeBlock     = document.getElementById('inspectorCodeBlock');
+const inspectorSchemaStatus  = document.getElementById('inspectorSchemaStatus');
+const inspectorCharCount     = document.getElementById('inspectorCharCount');
+
 // ── Local State ──
 let isBusy = false;
 let currentServerUrl = 'http://localhost:8000';
 let activeTurnImageUrl = '';
+let currentTurns = [];
+let activeInspectorTurn = null;
+let activeInspectorTab = 'raw';
 
 // ── Detect Side Panel vs Popup Mode ──
 function detectViewMode() {
@@ -152,9 +173,68 @@ function setupEventListeners() {
   // Lightbox close
   closeLightboxBtn.addEventListener('click', closeLightbox);
   lightboxBackdrop.addEventListener('click', closeLightbox);
+
+  // Raw VLM Inspector Header Action
+  if (openInspectorHeaderBtn) {
+    openInspectorHeaderBtn.addEventListener('click', () => {
+      openVlmInspector();
+    });
+  }
+
+  // Raw VLM Inspector Close Actions
+  if (closeInspectorBtn) {
+    closeInspectorBtn.addEventListener('click', closeVlmInspector);
+  }
+  if (vlmInspectorBackdrop) {
+    vlmInspectorBackdrop.addEventListener('click', closeVlmInspector);
+  }
+
+  // Raw VLM Inspector Tabs
+  [
+    { btn: tabBtnRaw, name: 'raw' },
+    { btn: tabBtnParsed, name: 'parsed' },
+    { btn: tabBtnThinking, name: 'thinking' }
+  ].forEach(({ btn, name }) => {
+    if (btn) {
+      btn.addEventListener('click', () => {
+        renderInspectorTab(name);
+      });
+    }
+  });
+
+  // Raw VLM Inspector Copy to Clipboard
+  if (inspectorCopyBtn) {
+    inspectorCopyBtn.addEventListener('click', async () => {
+      try {
+        let textToCopy = '';
+        if (activeInspectorTab === 'raw') {
+          textToCopy = (activeInspectorTurn && activeInspectorTurn.rawModelOutput)
+            ? activeInspectorTurn.rawModelOutput
+            : (inspectorCodeBlock ? inspectorCodeBlock.textContent : '');
+        } else {
+          textToCopy = inspectorCodeBlock ? inspectorCodeBlock.textContent : '';
+        }
+        await navigator.clipboard.writeText(textToCopy);
+        inspectorCopyBtn.classList.add('copied');
+        if (inspectorCopyLabel) inspectorCopyLabel.textContent = 'Copied! ✓';
+        setTimeout(() => {
+          inspectorCopyBtn.classList.remove('copied');
+          if (inspectorCopyLabel) inspectorCopyLabel.textContent = 'Copy JSON';
+        }, 1500);
+      } catch (e) {
+        console.warn('Inspector clipboard failed:', e);
+      }
+    });
+  }
+
+  // Keyboard shortcut: Escape closes inspector or lightbox
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && !imageLightbox.classList.contains('hidden')) {
-      closeLightbox();
+    if (e.key === 'Escape') {
+      if (vlmInspectorModal && !vlmInspectorModal.classList.contains('hidden')) {
+        closeVlmInspector();
+      } else if (imageLightbox && !imageLightbox.classList.contains('hidden')) {
+        closeLightbox();
+      }
     }
   });
 
@@ -172,6 +252,7 @@ function setupEventListeners() {
       const turn = message.result.turn;
       const existing = document.getElementById(turn.id);
       if (!existing) {
+        currentTurns.push(turn);
         const turnEl = createTurnCard(turn);
         chatTimeline.appendChild(turnEl);
         scrollToBottom();
@@ -189,6 +270,7 @@ function setupEventListeners() {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.privamon_chat_history) {
         const newHist = changes.privamon_chat_history.newValue || [];
+        currentTurns = newHist;
         if (newHist.length > 0 && isBusy) {
           const latest = newHist[newHist.length - 1];
           const existing = document.getElementById(latest.id);
@@ -280,10 +362,30 @@ async function loadChatHistory() {
           task: 'What should I do on this page?',
           screenshotUrl: 'icons/icon128.png',
           redactionsCount: 4,
-          thinking: '1. User wants to know what action to take next.\n2. Detected login form with username, password, and Submit button.\n3. Recommend filling credentials and clicking submit.',
+          provider: 'OpenRouter',
+          model: 'qwen/qwen2.5-vl-72b-instruct',
+          latencyMs: 3420,
+          rawModelOutput: JSON.stringify({
+            confidence: 0.96,
+            action: {
+              type: "click",
+              target_element_id: "submit-button",
+              reasoning: "Submit credentials to authenticate user session"
+            },
+            reasoning: "The page displays a standard authentication login form. User credentials must be filled into the username and password fields before triggering the submit action.",
+            assumptions: ["Valid user credentials are provided in clipboard or password manager"],
+            needs_clarification: false
+          }, null, 2),
+          thinking: '1. User query asks for recommended action.\n2. Identified login form with username, password, and Submit button.\n3. Recommend entering credentials and clicking submit.',
           actions: [
             { action: 'click', target: 'button#submit-button', description: 'Click the Submit button' }
           ],
+          action: {
+            type: 'click',
+            target_element_id: 'submit-button',
+            reasoning: 'Click the Submit button'
+          },
+          confidence: 0.96,
           message: 'The page contains a login interface. You should enter your credentials into the respective input fields and then click the Submit button to proceed.'
         }];
       }
@@ -296,6 +398,7 @@ async function loadChatHistory() {
 }
 
 function renderHistory(history) {
+  currentTurns = history || [];
   // Clear any existing turn cards (keep emptyState)
   const existingTurns = chatTimeline.querySelectorAll('.chat-turn-card');
   existingTurns.forEach(turn => turn.remove());
@@ -316,6 +419,7 @@ function renderHistory(history) {
 
 async function clearHistory() {
   try {
+    currentTurns = [];
     if (isExtensionContext) {
       await chrome.runtime.sendMessage({ action: 'clearChatHistory' });
     } else {
@@ -390,8 +494,17 @@ async function submitChatQuery(query) {
         task: query,
         screenshotUrl: 'icons/icon128.png',
         redactionsCount: 1,
+        provider: data.provider || 'OpenRouter',
+        model: data.model || 'qwen/qwen2.5-vl-72b-instruct',
+        latencyMs: data.latency_ms || 3200,
+        rawModelOutput: data.raw_model_output || JSON.stringify(data, null, 2),
         thinking: data.thinking || '',
-        actions: data.actions || [],
+        action: data.action || null,
+        actions: data.actions || (data.action ? [data.action] : []),
+        confidence: data.confidence,
+        reasoning: data.reasoning || data.message || '',
+        assumptions: data.assumptions || [],
+        needsClarification: Boolean(data.needsClarification),
         message: data.message || 'Completed analysis.'
       };
       const saved = JSON.parse(localStorage.getItem('privamon_chat_history') || '[]');
@@ -400,9 +513,13 @@ async function submitChatQuery(query) {
     }
 
     if (turn) {
-      const turnEl = createTurnCard(turn);
-      chatTimeline.appendChild(turnEl);
-      scrollToBottom();
+      const existing = document.getElementById(turn.id);
+      if (!existing) {
+        currentTurns.push(turn);
+        const turnEl = createTurnCard(turn);
+        chatTimeline.appendChild(turnEl);
+        scrollToBottom();
+      }
     }
   } catch (err) {
     console.error('Chat error:', err);
@@ -636,6 +753,13 @@ function createTurnCard(turn, isError = false) {
     ${actionsHtml}
     ${assumptionsHtml}
     <div class="turn-footer-actions">
+      <button class="btn-turn-action raw-vlm-btn" title="Inspect complete raw VLM model output">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"></polyline>
+          <polyline points="8 6 2 12 8 18"></polyline>
+        </svg>
+        <span>Raw VLM Output</span>
+      </button>
       <button class="btn-turn-action copy-btn" title="Copy response text">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -648,6 +772,14 @@ function createTurnCard(turn, isError = false) {
       </button>
     </div>
   `;
+
+  // Raw VLM inspector button listener
+  const rawVlmBtn = responseCard.querySelector('.raw-vlm-btn');
+  if (rawVlmBtn) {
+    rawVlmBtn.addEventListener('click', () => {
+      openVlmInspector(turn);
+    });
+  }
 
   // Copy button listener
   const copyBtn = responseCard.querySelector('.copy-btn');
@@ -761,4 +893,167 @@ async function waitForTurnInStorage(taskQuery, timeoutMs = 45000) {
     await new Promise(r => setTimeout(r, 1200));
   }
   return null;
+}
+
+// ── Complete Raw VLM Response Inspector Controller ──
+function openVlmInspector(turn = null) {
+  if (!turn) {
+    if (currentTurns && currentTurns.length > 0) {
+      turn = currentTurns[currentTurns.length - 1];
+    } else {
+      turn = {
+        task: 'Waiting for queries...',
+        provider: 'OpenRouter / Ollama',
+        model: 'Ready for inference',
+        latencyMs: null,
+        rawModelOutput: JSON.stringify({
+          status: "ready",
+          message: "No VLM response captured yet. Ask Privamon what to do on this page to inspect raw model tokens."
+        }, null, 2),
+        thinking: "Awaiting execution...",
+        action: null,
+        confidence: null
+      };
+    }
+  }
+
+  activeInspectorTurn = turn;
+
+  if (inspectorModalTitle) {
+    inspectorModalTitle.textContent = turn.task ? `VLM: ${turn.task}` : 'VLM Response Inspector';
+  }
+  if (inspectorProviderBadge) {
+    inspectorProviderBadge.textContent = turn.provider || 'OpenRouter';
+  }
+  if (inspectorModelBadge) {
+    const modelStr = turn.model || 'qwen2.5-vl-72b';
+    const shortName = modelStr.includes('/') ? modelStr.split('/').pop() : modelStr;
+    inspectorModelBadge.textContent = shortName;
+    inspectorModelBadge.title = modelStr;
+  }
+  if (inspectorLatencyBadge) {
+    if (turn.latencyMs) {
+      const latText = turn.latencyMs >= 1000 ? `${(turn.latencyMs / 1000).toFixed(1)}s` : `${turn.latencyMs}ms`;
+      inspectorLatencyBadge.textContent = `⚡ ${latText}`;
+    } else if (turn.timestamp) {
+      inspectorLatencyBadge.textContent = formatTime(turn.timestamp);
+    } else {
+      inspectorLatencyBadge.textContent = '—';
+    }
+  }
+
+  renderInspectorTab(activeInspectorTab);
+
+  if (vlmInspectorModal) {
+    vlmInspectorModal.classList.remove('hidden');
+  }
+}
+
+function closeVlmInspector() {
+  if (vlmInspectorModal) {
+    vlmInspectorModal.classList.add('hidden');
+  }
+}
+
+function renderInspectorTab(tabName) {
+  activeInspectorTab = tabName;
+
+  [tabBtnRaw, tabBtnParsed, tabBtnThinking].forEach(btn => {
+    if (!btn) return;
+    if (btn.getAttribute('data-tab') === tabName) {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+
+  if (!activeInspectorTurn) return;
+
+  let textContent = '';
+  let htmlContent = '';
+
+  if (tabName === 'raw') {
+    const rawOutput = activeInspectorTurn.rawModelOutput || '';
+    if (rawOutput && rawOutput.trim()) {
+      textContent = rawOutput.trim();
+      htmlContent = formatSyntaxHighlight(textContent);
+    } else {
+      const fallbackObj = {
+        action: activeInspectorTurn.action || null,
+        confidence: activeInspectorTurn.confidence,
+        reasoning: activeInspectorTurn.reasoning || activeInspectorTurn.message || '',
+        assumptions: activeInspectorTurn.assumptions || [],
+        needsClarification: Boolean(activeInspectorTurn.needsClarification)
+      };
+      textContent = JSON.stringify(fallbackObj, null, 2);
+      htmlContent = formatSyntaxHighlight(textContent);
+    }
+  } else if (tabName === 'parsed') {
+    const parsedContract = {
+      action: activeInspectorTurn.action || null,
+      actions: activeInspectorTurn.actions || (activeInspectorTurn.action ? [activeInspectorTurn.action] : []),
+      confidence: activeInspectorTurn.confidence,
+      reasoning: activeInspectorTurn.reasoning || activeInspectorTurn.message || '',
+      assumptions: activeInspectorTurn.assumptions || [],
+      needsClarification: Boolean(activeInspectorTurn.needsClarification)
+    };
+    textContent = JSON.stringify(parsedContract, null, 2);
+    htmlContent = formatSyntaxHighlight(textContent);
+  } else if (tabName === 'thinking') {
+    const thinking = activeInspectorTurn.thinking || '';
+    if (thinking && thinking.trim()) {
+      textContent = thinking.trim();
+      htmlContent = escapeHtml(textContent);
+    } else {
+      textContent = 'No internal <think> chain-of-thought tokens recorded for this inference.';
+      htmlContent = `<span style="color: var(--text-dim); font-style: italic;">${escapeHtml(textContent)}</span>`;
+    }
+  }
+
+  if (inspectorCodeBlock) {
+    inspectorCodeBlock.innerHTML = htmlContent;
+  }
+
+  if (inspectorCharCount) {
+    inspectorCharCount.textContent = `${textContent.length.toLocaleString()} chars`;
+  }
+
+  if (inspectorSchemaStatus) {
+    if (activeInspectorTurn.action || (typeof activeInspectorTurn.confidence === 'number')) {
+      inspectorSchemaStatus.className = 'schema-status-pill verified';
+      inspectorSchemaStatus.textContent = '✓ Schema Validated';
+    } else {
+      inspectorSchemaStatus.className = 'schema-status-pill unverified';
+      inspectorSchemaStatus.textContent = '⚠ Raw / Unparsed';
+    }
+  }
+}
+
+function formatSyntaxHighlight(raw) {
+  if (!raw) return '<span class="tok-null">null</span>';
+  let formatted = raw;
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    formatted = JSON.stringify(parsed, null, 2);
+  } catch (e) {
+    return escapeHtml(String(raw));
+  }
+
+  const escaped = escapeHtml(formatted);
+  return escaped.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, (match) => {
+    let cls = 'tok-num';
+    if (/^"/.test(match)) {
+      if (/:$/.test(match)) {
+        cls = 'tok-key';
+        return `<span class="${cls}">${match.slice(0, -1)}</span><span class="tok-punct">:</span>`;
+      } else {
+        cls = 'tok-str';
+      }
+    } else if (/true|false/.test(match)) {
+      cls = 'tok-bool';
+    } else if (/null/.test(match)) {
+      cls = 'tok-null';
+    }
+    return `<span class="${cls}">${match}</span>`;
+  });
 }

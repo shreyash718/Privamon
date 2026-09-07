@@ -488,6 +488,9 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
       needsClarification: Boolean(agentResp.needsClarification),
       message: agentResp.message || agentResp.reasoning || 'Analysis complete.',
       rawModelOutput: agentResp.raw_model_output || '',
+      provider: agentResp.provider || '',
+      model: agentResp.model || '',
+      latencyMs: agentResp.latency_ms || null,
       pageUrl: tab.url || '',
       pageTitle: tab.title || 'Web Page'
     };

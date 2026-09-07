@@ -56,3 +56,6 @@ class InterpretResponse(BaseModel):
     message: Optional[str] = None
     thinking: Optional[str] = None
     raw_model_output: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    latency_ms: Optional[float] = None

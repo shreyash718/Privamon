@@ -44,6 +44,12 @@ async def interpret(req: InterpretRequest):
         print(f"[!] Server Error in /interpret: {e}")
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
+    # Attach runtime metadata for frontend inspection
+    prov = get_vlm_provider()
+    response.provider = prov
+    response.model = get_model_for_provider(prov)
+    response.latency_ms = latency_ms
+
     # Audit logging for evaluation compliance
     log_turn(
         task=req.task,
