@@ -168,7 +168,44 @@ function setupEventListeners() {
     if (message.type === 'pipelineProgress' && isBusy) {
       updateProgressUI(message.statusText || 'Processing page...', message.stageId);
     }
+    if (message.type === 'pipelineComplete' && message.result && message.result.turn && isBusy) {
+      const turn = message.result.turn;
+      const existing = document.getElementById(turn.id);
+      if (!existing) {
+        const turnEl = createTurnCard(turn);
+        chatTimeline.appendChild(turnEl);
+        scrollToBottom();
+      }
+      isBusy = false;
+      activeProgressCard.classList.add('hidden');
+      taskInput.disabled = false;
+      sendBtn.disabled = false;
+      taskInput.focus();
+    }
   });
+
+  // Real-time synchronization when background saves new turns to storage
+  if (isExtensionContext && chrome.storage && chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'local' && changes.privamon_chat_history) {
+        const newHist = changes.privamon_chat_history.newValue || [];
+        if (newHist.length > 0 && isBusy) {
+          const latest = newHist[newHist.length - 1];
+          const existing = document.getElementById(latest.id);
+          if (!existing) {
+            const turnEl = createTurnCard(latest);
+            chatTimeline.appendChild(turnEl);
+            scrollToBottom();
+            isBusy = false;
+            activeProgressCard.classList.add('hidden');
+            taskInput.disabled = false;
+            sendBtn.disabled = false;
+            taskInput.focus();
+          }
+        }
+      }
+    });
+  }
 }
 
 // ── Helpers for Extension vs Standalone Preview ──
@@ -308,16 +345,31 @@ async function submitChatQuery(query) {
   try {
     let turn = null;
     if (isExtensionContext) {
-      const response = await chrome.runtime.sendMessage({
-        action: 'chatWithAgent',
-        task: query,
-        serverUrl: currentServerUrl
-      });
+      try {
+        const response = await chrome.runtime.sendMessage({
+          action: 'chatWithAgent',
+          task: query,
+          serverUrl: currentServerUrl
+        });
 
-      if (response && response.error) {
-        throw new Error(response.error);
+        if (response && response.error) {
+          throw new Error(response.error);
+        }
+        turn = response && response.turn;
+      } catch (sendErr) {
+        const errMsg = sendErr.message || '';
+        // If message channel closed because inference was long or worker restarted, poll storage
+        if (errMsg.includes('message channel closed') || errMsg.includes('Receiving end does not exist')) {
+          console.warn('[Popup] Message channel closed during inference; waiting on storage for result...');
+          updateProgressUI('Inference running on server... waiting for agent response', 'server');
+          turn = await waitForTurnInStorage(query, 45000);
+          if (!turn) {
+            throw new Error('Inference on server timed out. Please check your Ollama terminal.');
+          }
+        } else {
+          throw sendErr;
+        }
       }
-      turn = response && response.turn;
     } else {
       // In standalone browser preview, query the server agent directly
       const res = await fetch(`${currentServerUrl.replace(/\/+$/, '')}/interpret`, {
@@ -489,19 +541,70 @@ function createTurnCard(turn, isError = false) {
   const responseCard = document.createElement('div');
   responseCard.className = 'action-response-card';
 
+  // Confidence Badge
+  let confidenceHtml = '';
+  if (typeof turn.confidence === 'number' && !isNaN(turn.confidence)) {
+    const confVal = turn.confidence <= 1.0 ? turn.confidence : turn.confidence / 100;
+    const confPct = Math.round(confVal * 100);
+    const confLevel = confVal >= 0.8 ? 'high' : (confVal >= 0.5 ? 'medium' : 'low');
+    confidenceHtml = `<span class="confidence-badge ${confLevel}" title="Model confidence: ${confPct}%">${confPct}% Conf</span>`;
+  }
+
+  // Clarification Banner
+  let clarificationHtml = '';
+  if (turn.needsClarification) {
+    clarificationHtml = `
+      <div class="clarification-banner">
+        <span>⚠️ Clarification needed: UI state is ambiguous or missing required information</span>
+      </div>
+    `;
+  }
+
+  // Assumptions Box
+  let assumptionsHtml = '';
+  if (Array.isArray(turn.assumptions) && turn.assumptions.length > 0) {
+    assumptionsHtml = `
+      <div class="assumptions-box">
+        <div class="assumptions-title">Assumptions:</div>
+        <ul class="assumptions-list">
+          ${turn.assumptions.map(as => `<li>${escapeHtml(as)}</li>`).join('')}
+        </ul>
+      </div>
+    `;
+  }
+
+  // Actions List (supports both single atomic action and legacy action array)
   let actionsHtml = '';
-  if (Array.isArray(turn.actions) && turn.actions.length > 0) {
-    const validActions = turn.actions.map(act => {
+  const actionList = [];
+  if (turn.action && typeof turn.action === 'object') {
+    actionList.push(turn.action);
+  } else if (Array.isArray(turn.actions) && turn.actions.length > 0) {
+    actionList.push(...turn.actions);
+  }
+
+  if (actionList.length > 0) {
+    const validActions = actionList.map(act => {
       const actionType = (act.type || act.action || 'action').toLowerCase();
       let target = act.reasoning || act.description || act.target || act.element || '';
-      if (!target) {
-        if (act.value) {
-          target = `Enter "${act.value}"`;
-        } else if (act.target_bbox && Array.isArray(act.target_bbox) && act.target_bbox.length === 4) {
-          target = `Target bbox [${act.target_bbox.join(', ')}]`;
+      if (act.targetElementId) {
+        target = `#${act.targetElementId}` + (target ? ` — ${target}` : '');
+      }
+      if (act.scrollDirection) {
+        target = `Scroll ${act.scrollDirection}` + (target ? ` (${target})` : '');
+      }
+      if (act.value) {
+        if (target) {
+          target = `${target} [value: "${act.value}"]`;
+        } else {
+          target = `"${act.value}"`;
         }
-      } else if (act.value && !target.includes(act.value)) {
-        target = `"${act.value}" — ${target}`;
+      }
+      if (!target) {
+        if (act.target_bbox && Array.isArray(act.target_bbox) && act.target_bbox.length === 4) {
+          target = `Target bbox [${act.target_bbox.join(', ')}]`;
+        } else {
+          target = actionType;
+        }
       }
       return { actionType, target: target.trim() };
     }).filter(a => a.target.length > 0);
@@ -521,14 +624,17 @@ function createTurnCard(turn, isError = false) {
   }
 
   responseCard.innerHTML = `
+    ${clarificationHtml}
     <div class="response-header">
       <div class="response-title-wrap">
         <div class="response-avatar">✦</div>
         <span class="response-title">Response: What you should do</span>
       </div>
+      ${confidenceHtml}
     </div>
-    <div class="response-body">${formatMessageBody(turn.message || 'No response details provided.')}</div>
+    <div class="response-body">${formatMessageBody(turn.message || turn.reasoning || 'No response details provided.')}</div>
     ${actionsHtml}
+    ${assumptionsHtml}
     <div class="turn-footer-actions">
       <button class="btn-turn-action copy-btn" title="Copy response text">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -636,4 +742,23 @@ function scrollToBottom() {
   requestAnimationFrame(() => {
     chatTimeline.scrollTop = chatTimeline.scrollHeight;
   });
+}
+
+// ── Storage Fallback Helper ──
+async function waitForTurnInStorage(taskQuery, timeoutMs = 45000) {
+  const startTime = Date.now();
+  while (Date.now() - startTime < timeoutMs) {
+    try {
+      const data = await chrome.storage.local.get(['privamon_chat_history']);
+      const history = data.privamon_chat_history || [];
+      if (history.length > 0) {
+        const latest = history[history.length - 1];
+        if (latest && (latest.timestamp >= startTime - 10000 || latest.task === taskQuery)) {
+          return latest;
+        }
+      }
+    } catch (e) { /* ignore */ }
+    await new Promise(r => setTimeout(r, 1200));
+  }
+  return null;
 }

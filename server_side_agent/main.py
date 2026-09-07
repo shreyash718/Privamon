@@ -1,13 +1,14 @@
-import json, re
+import os
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from schemas import InterpretRequest, InterpretResponse, Action
+from schemas import InterpretRequest, InterpretResponse
 from model_client import run_inference
+from audit_logger import log_turn
 
-app = FastAPI(title="Vision Agent Server")
+app = FastAPI(title="Privamon Server-Side Reasoning Agent")
 
-# Allow CORS for browser extension and local tools
+# Allow CORS for Chrome extensions and local tools
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,93 +17,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve the static dummy frontend at the root URL
-app.mount("/static", StaticFiles(directory="static", html=True), name="static")
+# Serve static directory if present
+static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.exists(static_dir):
+    app.mount("/static", StaticFiles(directory=static_dir, html=True), name="static")
 
 @app.post("/interpret", response_model=InterpretResponse)
 async def interpret(req: InterpretRequest):
+    """
+    Core reasoning agent endpoint:
+    - Receives sanitized screenshot, DOM context, detection summary, and prior actions.
+    - Executes reasoning pipeline with self-validation and internal retry.
+    - Logs confidence, assumptions, and action to audit_log.jsonl.
+    - Returns strictly valid InterpretResponse contract.
+    """
     try:
-        raw_output, thinking = run_inference(
-            req.image_b64,
-            req.task,
-            [r.model_dump() for r in req.redacted_regions],
-            req.sanitized_dom
+        response, latency_ms, retried = run_inference(
+            image_b64=req.get_screenshot(),
+            task=req.task,
+            sanitized_dom=req.get_sanitized_dom(),
+            detection_summary=req.get_detection_summary(),
+            prior_actions=req.priorActions,
+            conversation_state=req.conversationState
         )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        print(f"[!] Server Error in /interpret: {e}")
+        raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}")
 
-    actions = []
-    message = None
-
-    # Clean markdown json blocks if present
-    clean_json = raw_output.strip()
-    if clean_json.startswith("```"):
-        clean_json = re.sub(r"^```(?:json)?\s*", "", clean_json)
-        clean_json = re.sub(r"\s*```$", "", clean_json)
-
-    try:
-        parsed = json.loads(clean_json)
-        if isinstance(parsed, dict):
-            raw_actions = []
-            if "actions" in parsed and isinstance(parsed["actions"], list):
-                raw_actions = parsed["actions"]
-            elif "type" in parsed or "action" in parsed:
-                raw_actions = [parsed]
-
-            for a in raw_actions:
-                if isinstance(a, dict):
-                    action_type = a.get("type") or a.get("action") or "click"
-                    reason = a.get("reasoning") or a.get("description") or a.get("target") or ""
-                    actions.append(Action(
-                        type=action_type,
-                        target_bbox=a.get("target_bbox"),
-                        value=a.get("value"),
-                        reasoning=reason,
-                        description=a.get("description"),
-                        target=a.get("target")
-                    ))
-            
-            if "reasoning" in parsed and not thinking:
-                thinking = str(parsed["reasoning"])
-            if "message" in parsed:
-                message = str(parsed["message"])
-        elif isinstance(parsed, list):
-            for a in parsed:
-                if isinstance(a, dict):
-                    action_type = a.get("type") or a.get("action") or "click"
-                    reason = a.get("reasoning") or a.get("description") or a.get("target") or ""
-                    actions.append(Action(
-                        type=action_type,
-                        target_bbox=a.get("target_bbox"),
-                        value=a.get("value"),
-                        reasoning=reason,
-                        description=a.get("description"),
-                        target=a.get("target")
-                    ))
-    except Exception:
-        # Model returned natural language text instead of JSON
-        pass
-
-    # Synthesize clean user message if not already set
-    if not message:
-        if actions:
-            step_descs = []
-            for i, act in enumerate(actions, 1):
-                loc = f" at {act.target_bbox}" if act.target_bbox else ""
-                val = f' with value "{act.value}"' if act.value else ""
-                why = f" ({act.reasoning})" if act.reasoning else ""
-                step_descs.append(f"{i}. {act.type.upper()}{loc}{val}{why}")
-            message = "Recommended actions:\n" + "\n".join(step_descs)
-        elif raw_output:
-            message = raw_output
-
-    return InterpretResponse(
-        actions=actions,
-        raw_model_output=raw_output,
-        thinking=thinking or None,
-        message=message
+    # Audit logging for evaluation compliance
+    log_turn(
+        task=req.task,
+        action=response.action.model_dump(),
+        confidence=response.confidence,
+        assumptions=response.assumptions,
+        needs_clarification=response.needsClarification,
+        reasoning=response.reasoning,
+        latency_ms=latency_ms,
+        retried=retried
     )
+
+    return response
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "agent": "Privamon Server-Side Reasoning Agent",
+        "model": "qwen3-vl:2b"
+    }

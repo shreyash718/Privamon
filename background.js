@@ -139,8 +139,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Conversational agent query with automatic screenshot, redaction, server consultation, and history
   if (message.action === 'chatWithAgent') {
     handleChatWithAgent(message.task, message.serverUrl)
-      .then(response => sendResponse(response))
-      .catch(err => sendResponse({ error: err.message }));
+      .then(response => {
+        try {
+          sendResponse(response);
+        } catch (e) {
+          console.warn('[Background] Message channel already closed when sending response (popup may have closed):', e.message);
+        }
+      })
+      .catch(err => {
+        try {
+          sendResponse({ error: err.message });
+        } catch (e) {}
+      });
     return true; // Async response
   }
 
@@ -386,135 +396,149 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
   const queryText = (task && task.trim()) ? task.trim() : 'Analyze screen and recommend what to do';
   console.log('[Background] Chat with agent requested. Query:', queryText);
 
-  // Get active tab
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) throw new Error('No active tab found');
+  // Keep MV3 service worker active while awaiting privacy pipeline and model inference
+  const keepAliveInterval = setInterval(() => {
+    chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 3500);
 
-  // Step 1: Capture screenshot
-  forwardToPopup({
-    type: 'pipelineProgress',
-    stageId: 'capture',
-    status: 'active',
-    statusText: 'Capturing screen...',
-  });
-
-  const screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
-
-  // Step 2: Extract DOM
-  forwardToPopup({
-    type: 'pipelineProgress',
-    stageId: 'dom',
-    status: 'active',
-    statusText: 'Extracting DOM context...',
-  });
-
-  const domResults = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
-  });
-  const domData = domResults[0]?.result;
-  if (!domData) throw new Error('DOM extraction returned no data');
-
-  // Step 3: Ensure offscreen document & run privacy pipeline
-  forwardToPopup({
-    type: 'pipelineProgress',
-    stageId: 'redaction',
-    status: 'active',
-    statusText: 'Redacting PII and detecting faces locally...',
-  });
-
-  await ensureOffscreenDocument();
-  const pipelineResult = await runPipelineAsync(screenshot, domData, queryText);
-
-  // Step 4: Transmit sanitized screenshot to server side agent
-  forwardToPopup({
-    type: 'pipelineProgress',
-    stageId: 'server',
-    status: 'active',
-    statusText: 'Consulting vision agent on server...',
-  });
-
-  let agentResp = { actions: [], message: '', thinking: '', raw_model_output: '' };
   try {
-    agentResp = await sendToServerAgent(pipelineResult, queryText, serverUrl);
-  } catch (serverErr) {
-    console.warn('[Background] Server side agent query failed:', serverErr.message);
-    agentResp = {
-      actions: [],
-      message: `Server Error: ${serverErr.message}. Ensure 'uvicorn main:app --reload --port 8000' is running.`,
-      thinking: '',
-      raw_model_output: ''
+    // Get active tab
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab) throw new Error('No active tab found');
+
+    // Step 1: Capture screenshot
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'capture',
+      status: 'active',
+      statusText: 'Capturing screen...',
+    });
+
+    const screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+
+    // Step 2: Extract DOM
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'dom',
+      status: 'active',
+      statusText: 'Extracting DOM context...',
+    });
+
+    const domResults = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
+    });
+    const domData = domResults[0]?.result;
+    if (!domData) throw new Error('DOM extraction returned no data');
+
+    // Step 3: Ensure offscreen document & run privacy pipeline
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'redaction',
+      status: 'active',
+      statusText: 'Redacting PII and detecting faces locally...',
+    });
+
+    await ensureOffscreenDocument();
+    const pipelineResult = await runPipelineAsync(screenshot, domData, queryText);
+
+    // Step 4: Transmit sanitized screenshot to server side agent
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'server',
+      status: 'active',
+      statusText: 'Consulting vision agent on server (Ollama)...',
+    });
+
+    let agentResp = { actions: [], message: '', thinking: '', raw_model_output: '' };
+    try {
+      agentResp = await sendToServerAgent(pipelineResult, queryText, serverUrl);
+    } catch (serverErr) {
+      console.warn('[Background] Server side agent query failed:', serverErr.message);
+      agentResp = {
+        actions: [],
+        message: `Server Error: ${serverErr.message}. Ensure 'uvicorn main:app --reload --port 8000' is running.`,
+        thinking: '',
+        raw_model_output: ''
+      };
+    }
+
+    // Step 5: Construct chat turn conforming to Reasoning Agent contract
+    const turn = {
+      id: 'turn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+      timestamp: Date.now(),
+      task: queryText,
+      screenshotUrl: pipelineResult.sanitizedScreenshot,
+      redactionsCount: (pipelineResult.redactions || []).length,
+      redactedRegions: (pipelineResult.redactions || []).map(r => ({
+        bbox: [
+          Math.round(r.bbox.x),
+          Math.round(r.bbox.y),
+          Math.round(r.bbox.x + r.bbox.width),
+          Math.round(r.bbox.y + r.bbox.height)
+        ],
+        reason: r.type || r.reason || 'redacted_pii'
+      })),
+      reasoning: agentResp.reasoning || agentResp.message || '',
+      thinking: agentResp.thinking || agentResp.reasoning || '',
+      confidence: typeof agentResp.confidence === 'number' ? agentResp.confidence : 1.0,
+      action: agentResp.action || (agentResp.actions && agentResp.actions[0]) || null,
+      actions: agentResp.actions || (agentResp.action ? [agentResp.action] : []),
+      assumptions: agentResp.assumptions || [],
+      needsClarification: Boolean(agentResp.needsClarification),
+      message: agentResp.message || agentResp.reasoning || 'Analysis complete.',
+      rawModelOutput: agentResp.raw_model_output || '',
+      pageUrl: tab.url || '',
+      pageTitle: tab.title || 'Web Page'
     };
-  }
 
-  // Step 5: Construct chat turn
-  const turn = {
-    id: 'turn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-    timestamp: Date.now(),
-    task: queryText,
-    screenshotUrl: pipelineResult.sanitizedScreenshot,
-    redactionsCount: (pipelineResult.redactions || []).length,
-    redactedRegions: (pipelineResult.redactions || []).map(r => ({
-      bbox: [
-        Math.round(r.bbox.x),
-        Math.round(r.bbox.y),
-        Math.round(r.bbox.x + r.bbox.width),
-        Math.round(r.bbox.y + r.bbox.height)
-      ],
-      reason: r.type || r.reason || 'redacted_pii'
-    })),
-    thinking: agentResp.thinking || '',
-    actions: agentResp.actions || [],
-    message: agentResp.message || agentResp.raw_model_output || 'Analysis complete.',
-    rawModelOutput: agentResp.raw_model_output || '',
-    pageUrl: tab.url || '',
-    pageTitle: tab.title || 'Web Page'
-  };
+    // Step 6: Append to persistent chat history in chrome.storage.local
+    try {
+      const data = await chrome.storage.local.get(['privamon_chat_history']);
+      const history = data.privamon_chat_history || [];
+      history.push(turn);
+      // Keep up to 30 past turns
+      const trimmed = history.slice(-30);
+      await chrome.storage.local.set({ privamon_chat_history: trimmed });
+      console.log(`[Background] Saved turn ${turn.id} to chat history. Total turns: ${trimmed.length}`);
+    } catch (storeErr) {
+      console.error('[Background] Failed to save chat turn:', storeErr);
+    }
 
-  // Step 6: Append to persistent chat history in chrome.storage.local
-  try {
-    const data = await chrome.storage.local.get(['privamon_chat_history']);
-    const history = data.privamon_chat_history || [];
-    history.push(turn);
-    // Keep up to 30 past turns
-    const trimmed = history.slice(-30);
-    await chrome.storage.local.set({ privamon_chat_history: trimmed });
-    console.log(`[Background] Saved turn ${turn.id} to chat history. Total turns: ${trimmed.length}`);
-  } catch (storeErr) {
-    console.error('[Background] Failed to save chat turn:', storeErr);
-  }
+    // Also save to session storage for results page
+    try {
+      await chrome.storage.session.set({
+        privamon_result: {
+          sanitizedScreenshot: pipelineResult.sanitizedScreenshot,
+          detections: pipelineResult.detections,
+          allCandidates: pipelineResult.allCandidates || pipelineResult.detections,
+          redactions: pipelineResult.redactions || [],
+          reviews: pipelineResult.reviews || [],
+          kept: pipelineResult.kept || [],
+          ocrWords: pipelineResult.ocrWords || [],
+          detectionSummary: pipelineResult.detectionSummary,
+          sanitizedDom: pipelineResult.sanitizedDom,
+          ocrRawText: pipelineResult.ocrRawText,
+          timings: pipelineResult.timings,
+          metadata: pipelineResult.metadata,
+          timestamp: Date.now(),
+        }
+      });
+    } catch (e) { /* ignore */ }
 
-  // Also save to session storage for results page
-  try {
-    await chrome.storage.session.set({
-      privamon_result: {
-        sanitizedScreenshot: pipelineResult.sanitizedScreenshot,
-        detections: pipelineResult.detections,
-        allCandidates: pipelineResult.allCandidates || pipelineResult.detections,
-        redactions: pipelineResult.redactions || [],
-        reviews: pipelineResult.reviews || [],
-        kept: pipelineResult.kept || [],
-        ocrWords: pipelineResult.ocrWords || [],
+    forwardToPopup({
+      type: 'pipelineComplete',
+      result: {
         detectionSummary: pipelineResult.detectionSummary,
-        sanitizedDom: pipelineResult.sanitizedDom,
-        ocrRawText: pipelineResult.ocrRawText,
         timings: pipelineResult.timings,
-        metadata: pipelineResult.metadata,
-        timestamp: Date.now(),
+        turn: turn
       }
     });
-  } catch (e) { /* ignore */ }
 
-  forwardToPopup({
-    type: 'pipelineComplete',
-    result: {
-      detectionSummary: pipelineResult.detectionSummary,
-      timings: pipelineResult.timings,
-      turn: turn
-    }
-  });
-
-  return { success: true, turn };
+    return { success: true, turn };
+  } finally {
+    clearInterval(keepAliveInterval);
+  }
 }
 
 /**
@@ -597,27 +621,72 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
     reason: r.type || r.reason || 'redacted_pii'
   }));
 
-  // Format concise sanitized DOM context
-  let sanitized_dom = '';
-  if (Array.isArray(result.sanitizedDom) && result.sanitizedDom.length > 0) {
-    const lines = [];
-    for (const el of result.sanitizedDom.slice(0, 40)) {
-      const tag = el.tag || 'elem';
-      const text = el.text ? ` text="${el.text.slice(0, 60)}"` : '';
-      const label = el.label ? ` label="${el.label.slice(0, 60)}"` : '';
-      const val = el.value ? ` value="${el.value}"` : '';
-      const type = el.inputType ? ` type="${el.inputType}"` : '';
-      const b = el.bbox ? ` bbox="[${el.bbox.x},${el.bbox.y},${el.bbox.x + el.bbox.width},${el.bbox.y + el.bbox.height}]"` : '';
-      lines.push(`<${tag}${type}${label}${text}${val}${b}/>`);
-    }
-    sanitized_dom = lines.join('\n');
+  // Format structured sanitized DOM elements with elementIds for precise action targeting
+  const structuredDom = (Array.isArray(result.sanitizedDom) && result.sanitizedDom.length > 0)
+    ? result.sanitizedDom.slice(0, 45).map((el, idx) => ({
+        elementId: el.elementId || el.id || `dom-tok-${idx}`,
+        tag: (el.tag || 'elem').toLowerCase(),
+        role: el.role || null,
+        label: el.label || null,
+        text: el.text ? el.text.slice(0, 80) : null,
+        bbox: el.bbox ? {
+          x: Math.round(el.bbox.x),
+          y: Math.round(el.bbox.y),
+          width: Math.round(el.bbox.width),
+          height: Math.round(el.bbox.height)
+        } : null,
+        attributes: {
+          type: el.inputType || null,
+          placeholder: el.placeholder || null,
+          value: el.value ? String(el.value).slice(0, 40) : null
+        }
+      }))
+    : [];
+
+  // Concise text string format fallback
+  let sanitized_dom_str = '';
+  if (structuredDom.length > 0) {
+    sanitized_dom_str = structuredDom.map(el => {
+      const type = el.attributes?.type ? ` type="${el.attributes.type}"` : '';
+      const label = el.label ? ` label="${el.label}"` : '';
+      const val = el.attributes?.value ? ` val="${el.attributes.value}"` : '';
+      const text = el.text ? ` text="${el.text}"` : '';
+      return `<${el.tag} id="${el.elementId}"${type}${label}${val}${text}/>`;
+    }).join('\n');
   }
 
+  // Retrieve past turn actions for priorActions grounding
+  let priorActions = [];
+  try {
+    const histData = await chrome.storage.local.get(['privamon_chat_history']);
+    const pastTurns = histData.privamon_chat_history || [];
+    priorActions = pastTurns.slice(-3).map(t => {
+      if (t.action) {
+        const target = t.action.targetElementId || t.action.value || '';
+        return `${t.action.type} ${target}`.trim();
+      }
+      return `"${t.task}"`;
+    });
+  } catch (e) { /* ignore */ }
+
+  const detectionSummary = result.detectionSummary || {
+    total: redacted_regions.length,
+    byType: redacted_regions.reduce((acc, r) => {
+      acc[r.reason] = (acc[r.reason] || 0) + 1;
+      return acc;
+    }, {})
+  };
+
   const payload = {
-    image_b64: result.sanitizedScreenshot,
     task: task,
+    sanitizedScreenshot: result.sanitizedScreenshot,
+    image_b64: result.sanitizedScreenshot,
+    sanitizedDom: structuredDom,
+    sanitized_dom: sanitized_dom_str,
+    detectionSummary: detectionSummary,
     redacted_regions: redacted_regions,
-    sanitized_dom: sanitized_dom
+    priorActions: priorActions,
+    conversationState: {}
   };
 
   const response = await fetch(endpoint, {

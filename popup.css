@@ -683,6 +683,68 @@ html.is-sidepanel #openSidePanelBtn {
   letter-spacing: -0.1px;
 }
 
+.confidence-badge {
+  font-size: 9.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  margin-left: auto;
+}
+
+.confidence-badge.medium {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.confidence-badge.low {
+  background: rgba(239, 68, 68, 0.15);
+  color: #f87171;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.clarification-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: var(--radius-xs);
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #fde68a;
+  margin-bottom: 6px;
+}
+
+.assumptions-box {
+  background: rgba(0, 0, 0, 0.25);
+  border-left: 2px solid rgba(99, 102, 241, 0.5);
+  padding: 4px 8px;
+  margin-top: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  border-radius: 0 4px 4px 0;
+}
+
+.assumptions-title {
+  font-weight: 600;
+  color: #cbd5e1;
+  margin-bottom: 2px;
+  font-size: 10.5px;
+}
+
+.assumptions-list {
+  padding-left: 14px;
+  margin: 0;
+}
+
+.assumptions-list li {
+  margin-bottom: 2px;
+}
+
 .response-body {
   font-size: 12px;
   line-height: 1.5;

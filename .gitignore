@@ -6,6 +6,7 @@ lib/onnx/*
 .DS_Store
 Thumbs.db
 *.log
+*.jsonl
 .env
 dist/
 *.crx
