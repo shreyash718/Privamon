@@ -60,8 +60,12 @@ const inspectorCodeBlock     = document.getElementById('inspectorCodeBlock');
 const inspectorSchemaStatus  = document.getElementById('inspectorSchemaStatus');
 const inspectorCharCount     = document.getElementById('inspectorCharCount');
 
+// ── Auto-Pilot Toggle DOM Reference ──
+const autopilotToggle = document.getElementById('autopilotToggle');
+
 // ── Local State ──
 let isBusy = false;
+let isAutopilotEnabled = false;
 let currentServerUrl = 'http://localhost:8000';
 let activeTurnImageUrl = '';
 let currentTurns = [];
@@ -254,6 +258,19 @@ function setupEventListeners() {
     chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
   });
 
+  // Auto-pilot toggle
+  if (autopilotToggle) {
+    // Load saved state
+    chrome.storage.local.get(['privamon_autopilot'], (data) => {
+      isAutopilotEnabled = Boolean(data.privamon_autopilot);
+      autopilotToggle.checked = isAutopilotEnabled;
+    });
+    autopilotToggle.addEventListener('change', () => {
+      isAutopilotEnabled = autopilotToggle.checked;
+      chrome.storage.local.set({ privamon_autopilot: isAutopilotEnabled });
+    });
+  }
+
   // Listen for pipeline progress from background service worker
   chrome.runtime.onMessage.addListener((message) => {
     if (message.type === 'pipelineProgress' && isBusy) {
@@ -268,6 +285,28 @@ function setupEventListeners() {
         chatTimeline.appendChild(turnEl);
         scrollToBottom();
       }
+      isBusy = false;
+      activeProgressCard.classList.add('hidden');
+      taskInput.disabled = false;
+      sendBtn.disabled = false;
+      taskInput.focus();
+    }
+    // Action execution feedback
+    if (message.type === 'actionExecuted' && message.result) {
+      const r = message.result;
+      console.log(`[Popup] Action executed: ${r.actionType} -> ${r.success ? 'OK' : 'FAIL'}: ${r.message}`);
+    }
+    // Auto-pilot progress
+    if (message.type === 'autopilotProgress') {
+      updateProgressUI(message.message || 'Auto-pilot running...', 'autopilot');
+      if (message.status === 'done' || message.status === 'paused' || message.status === 'error') {
+        isBusy = false;
+        activeProgressCard.classList.add('hidden');
+        taskInput.disabled = false;
+        sendBtn.disabled = false;
+      }
+    }
+    if (message.type === 'autopilotComplete') {
       isBusy = false;
       activeProgressCard.classList.add('hidden');
       taskInput.disabled = false;
@@ -532,6 +571,34 @@ async function submitChatQuery(query) {
         chatTimeline.appendChild(turnEl);
         scrollToBottom();
       }
+
+      // Auto-pilot: if enabled and high confidence, auto-execute and loop
+      if (isAutopilotEnabled && turn.action && turn.action.type !== 'done' && turn.action.type !== 'ask_user' && !turn.needsClarification) {
+        const conf = typeof turn.confidence === 'number' ? turn.confidence : 1.0;
+        if (conf >= 0.5) {
+          // Launch auto-pilot loop via background
+          activeProgressCard.classList.remove('hidden');
+          progressHeadline.textContent = 'Auto-Pilot: Executing...';
+          progressSub.textContent = `Executing ${turn.action.type} on ${turn.action.targetElementId || 'page'}`;
+          isBusy = true;
+          taskInput.disabled = true;
+          sendBtn.disabled = true;
+
+          chrome.runtime.sendMessage({
+            action: 'executeActionLoop',
+            task: query,
+            serverUrl: currentServerUrl,
+            maxSteps: 10
+          }).catch(err => {
+            console.warn('[Popup] Auto-pilot loop error:', err);
+            isBusy = false;
+            activeProgressCard.classList.add('hidden');
+            taskInput.disabled = false;
+            sendBtn.disabled = false;
+          });
+          return; // Don't finish the submit flow — auto-pilot takes over
+        }
+      }
     }
   } catch (err) {
     console.error('Chat error:', err);
@@ -589,6 +656,8 @@ function updateProgressUI(statusText, stageId) {
     progressSub.textContent = 'Running local OCR, NER, and face detection blur';
   } else if (stageId === 'server') {
     progressSub.textContent = 'Querying local vision agent model via Ollama/vLLM';
+  } else if (stageId === 'autopilot') {
+    progressSub.textContent = 'Auto-pilot: executing actions and re-analyzing...';
   }
 }
 
@@ -741,10 +810,14 @@ function createTurnCard(turn, isError = false) {
     if (validActions.length > 0) {
       actionsHtml = `
         <div class="action-items-list">
-          ${validActions.map(act => `
-            <div class="action-pill">
+          ${validActions.map((act, idx) => `
+            <div class="action-pill" data-action-idx="${idx}">
               <span class="action-type ${escapeHtml(act.actionType)}">${escapeHtml(act.actionType)}</span>
               <span class="action-target">${escapeHtml(act.target)}</span>
+              <button class="btn-execute-action" data-action-idx="${idx}" title="Execute this action on the page">
+                <span class="exec-icon">▶</span>
+                <span class="exec-label">Execute</span>
+              </button>
             </div>
           `).join('')}
         </div>
@@ -792,6 +865,63 @@ function createTurnCard(turn, isError = false) {
       openVlmInspector(turn);
     });
   }
+
+  // Execute action button listeners
+  const execBtns = responseCard.querySelectorAll('.btn-execute-action');
+  execBtns.forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const idx = parseInt(btn.getAttribute('data-action-idx'), 10);
+      const actionToExecute = actionList[idx] || turn.action;
+      if (!actionToExecute) return;
+
+      const labelSpan = btn.querySelector('.exec-label');
+      const iconSpan = btn.querySelector('.exec-icon');
+
+      // Show executing state
+      btn.disabled = true;
+      btn.classList.add('executing');
+      if (iconSpan) iconSpan.textContent = '⟳';
+      if (labelSpan) labelSpan.textContent = 'Running...';
+
+      try {
+        const result = await chrome.runtime.sendMessage({
+          action: 'executeAction',
+          payload: {
+            type: actionToExecute.type || actionToExecute.action || 'click',
+            targetElementId: actionToExecute.targetElementId || actionToExecute.target || null,
+            value: actionToExecute.value || null,
+            scrollDirection: actionToExecute.scrollDirection || null
+          }
+        });
+
+        if (result && result.success) {
+          btn.classList.remove('executing');
+          btn.classList.add('executed-success');
+          if (iconSpan) iconSpan.textContent = '✓';
+          if (labelSpan) labelSpan.textContent = 'Done';
+        } else {
+          btn.classList.remove('executing');
+          btn.classList.add('executed-fail');
+          if (iconSpan) iconSpan.textContent = '✗';
+          if (labelSpan) labelSpan.textContent = (result && result.message) ? result.message.slice(0, 25) : 'Failed';
+        }
+      } catch (err) {
+        btn.classList.remove('executing');
+        btn.classList.add('executed-fail');
+        if (iconSpan) iconSpan.textContent = '✗';
+        if (labelSpan) labelSpan.textContent = 'Error';
+        console.warn('[Popup] Execute action error:', err);
+      }
+
+      // Reset button after 3s
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.classList.remove('executing', 'executed-success', 'executed-fail');
+        if (iconSpan) iconSpan.textContent = '▶';
+        if (labelSpan) labelSpan.textContent = 'Execute';
+      }, 3000);
+    });
+  });
 
   // Copy button listener
   const copyBtn = responseCard.querySelector('.copy-btn');

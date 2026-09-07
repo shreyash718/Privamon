@@ -188,6 +188,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Execute a single action on the active tab
+  if (message.action === 'executeAction') {
+    handleExecuteAction(message.payload)
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  // Auto-pilot loop: execute → re-capture → re-analyze → execute (repeat)
+  if (message.action === 'executeActionLoop') {
+    handleActionLoop(message.task, message.serverUrl, message.maxSteps || 10)
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
   // From offscreen: offscreen document loaded and ready
   if (message.type === 'offscreenReady') {
     offscreenReady = true;
@@ -831,5 +847,164 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
   return await response.json();
 }
 
+/**
+ * Execute a single action on the active tab by injecting the action executor content script.
+ */
+async function handleExecuteAction(actionPayload) {
+  if (!actionPayload || !actionPayload.type) {
+    return { success: false, actionType: 'unknown', message: 'No action payload provided' };
+  }
+
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) throw new Error('No active tab found');
+
+  // For non-page actions, handle directly
+  if (actionPayload.type === 'done') {
+    return { success: true, actionType: 'done', targetElementId: null, message: 'Task marked as complete.' };
+  }
+  if (actionPayload.type === 'ask_user') {
+    return { success: true, actionType: 'ask_user', targetElementId: null, message: actionPayload.value || 'Agent needs clarification.' };
+  }
+  if (actionPayload.type === 'wait') {
+    await new Promise(r => setTimeout(r, 1500));
+    return { success: true, actionType: 'wait', targetElementId: null, message: 'Waited 1.5 seconds.' };
+  }
+
+  console.log(`[Background] Executing action: ${actionPayload.type} on ${actionPayload.targetElementId || 'page'}`);
+
+  // Inject the action payload as a global, then execute the action executor script
+  const results = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    func: (action) => {
+      window.__privamon_action = action;
+    },
+    args: [actionPayload]
+  });
+
+  // Now inject the action executor
+  const execResults = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['content/action-executor.js']
+  });
+
+  const result = execResults[0]?.result;
+  if (!result) {
+    return { success: false, actionType: actionPayload.type, message: 'Action executor returned no result' };
+  }
+
+  console.log(`[Background] Action result:`, result);
+
+  // Notify popup of execution result
+  forwardToPopup({
+    type: 'actionExecuted',
+    result: result
+  });
+
+  return result;
+}
+
+/**
+ * Auto-pilot loop: execute the current action, wait, re-capture, re-analyze, repeat.
+ * Stops when: action type is 'done', 'ask_user', confidence < 0.5, or maxSteps reached.
+ */
+async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000', maxSteps = 10) {
+  const task = initialTask || 'Continue the current task';
+  const steps = [];
+
+  // Keep MV3 service worker alive during the loop
+  const keepAliveInterval = setInterval(() => {
+    chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 3500);
+
+  try {
+    for (let step = 0; step < maxSteps; step++) {
+      console.log(`[Background] Auto-pilot step ${step + 1}/${maxSteps}`);
+
+      forwardToPopup({
+        type: 'autopilotProgress',
+        step: step + 1,
+        maxSteps,
+        status: 'analyzing',
+        message: `Step ${step + 1}: Capturing & analyzing screen...`
+      });
+
+      // Run the full chat-with-agent pipeline (capture → redact → server query)
+      let chatResult;
+      try {
+        chatResult = await handleChatWithAgent(task, serverUrl);
+      } catch (err) {
+        steps.push({ step: step + 1, error: err.message });
+        break;
+      }
+
+      if (!chatResult || !chatResult.turn) {
+        steps.push({ step: step + 1, error: 'No turn returned from agent' });
+        break;
+      }
+
+      const turn = chatResult.turn;
+      const action = turn.action;
+      const confidence = turn.confidence;
+
+      // Check stopping conditions
+      if (!action || action.type === 'done') {
+        steps.push({ step: step + 1, action: action || { type: 'done' }, result: 'Task complete', stopped: 'done' });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'done', message: 'Task complete!' });
+        break;
+      }
+
+      if (action.type === 'ask_user' || turn.needsClarification) {
+        steps.push({ step: step + 1, action, result: 'Needs clarification', stopped: 'clarification' });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Agent needs your input' });
+        break;
+      }
+
+      if (typeof confidence === 'number' && confidence < 0.5) {
+        steps.push({ step: step + 1, action, confidence, result: 'Low confidence', stopped: 'low_confidence' });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: `Paused: confidence too low (${Math.round(confidence * 100)}%)` });
+        break;
+      }
+
+      // Execute the action
+      forwardToPopup({
+        type: 'autopilotProgress',
+        step: step + 1,
+        maxSteps,
+        status: 'executing',
+        message: `Step ${step + 1}: Executing ${action.type} on ${action.targetElementId || 'page'}...`
+      });
+
+      let execResult;
+      try {
+        execResult = await handleExecuteAction(action);
+      } catch (err) {
+        steps.push({ step: step + 1, action, error: `Execution failed: ${err.message}` });
+        break;
+      }
+
+      steps.push({ step: step + 1, action, execResult, confidence });
+
+      if (!execResult.success) {
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'error', message: `Action failed: ${execResult.message}` });
+        break;
+      }
+
+      // Wait for page to settle after action (navigation, AJAX, etc.)
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    forwardToPopup({
+      type: 'autopilotComplete',
+      steps,
+      totalSteps: steps.length
+    });
+
+    return { success: true, steps, totalSteps: steps.length };
+  } finally {
+    clearInterval(keepAliveInterval);
+  }
+}
+
 console.log('[Background] Privamon service worker initialized');
+
 

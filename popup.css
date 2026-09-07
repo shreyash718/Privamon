@@ -1583,3 +1583,158 @@ html.is-sidepanel #openSidePanelBtn {
   align-items: center;
   gap: 4px;
 }
+
+/* ── Execute Action Button ── */
+.btn-execute-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  color: #e4e4e7;
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.3) 0%, rgba(79, 70, 229, 0.3) 100%);
+  border: 1px solid rgba(124, 58, 237, 0.4);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.btn-execute-action:hover {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.5) 0%, rgba(79, 70, 229, 0.5) 100%);
+  border-color: rgba(139, 92, 246, 0.6);
+  color: #ffffff;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.25);
+}
+
+.btn-execute-action:active {
+  transform: translateY(0);
+}
+
+.btn-execute-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.btn-execute-action.executing {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: rgba(245, 158, 11, 0.4);
+  color: #fbbf24;
+  animation: execPulse 1.2s ease-in-out infinite;
+}
+
+.btn-execute-action.executed-success {
+  background: rgba(16, 185, 129, 0.2);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: #34d399;
+}
+
+.btn-execute-action.executed-fail {
+  background: rgba(244, 63, 94, 0.15);
+  border-color: rgba(244, 63, 94, 0.3);
+  color: #fb7185;
+}
+
+.exec-icon {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.exec-label {
+  font-size: 10px;
+}
+
+@keyframes execPulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+/* ── Action Pill layout with Execute button ── */
+.action-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+/* ── Settings Divider ── */
+.settings-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 10px 0;
+}
+
+/* ── Toggle Switch ── */
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 22px;
+  transition: all 0.3s ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background: #71717a;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background: linear-gradient(135deg, rgba(124, 58, 237, 0.4) 0%, rgba(79, 70, 229, 0.4) 100%);
+  border-color: rgba(139, 92, 246, 0.5);
+}
+
+.toggle-switch input:checked + .toggle-slider::before {
+  transform: translateX(18px);
+  background: #a78bfa;
+}
+
+/* ── Auto-Pilot Row ── */
+.autopilot-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.autopilot-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.autopilot-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+

@@ -49,6 +49,7 @@
         "lib/onnx/*",
         "lib/onnx/*.mjs",
         "lib/transformers/*",
+        "content/action-executor.js",
         "*.traineddata"
       ],
       "matches": ["<all_urls>"]
