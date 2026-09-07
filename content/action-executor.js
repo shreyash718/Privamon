@@ -43,7 +43,23 @@
 
     // Strategy 1: Direct DOM id
     let el = document.getElementById(elementId);
-    if (el) return el;
+    if (el) {
+      const allWithId = document.querySelectorAll(`#${CSS.escape(elementId)}`);
+      if (allWithId.length > 1) {
+        for (const candidate of allWithId) {
+          const container = candidate.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer');
+          const isMembersOnly = container && (
+            container.querySelector('.badge-style-type-members-only') ||
+            /members\s*only/i.test(container.textContent || '')
+          );
+          const rect = candidate.getBoundingClientRect();
+          if (!isMembersOnly && rect.width > 5 && rect.height > 5 && rect.top >= 0 && rect.bottom <= window.innerHeight * 1.5) {
+            return candidate;
+          }
+        }
+      }
+      return el;
+    }
 
     // Strategy 2: data-privamon-id attribute
     el = document.querySelector(`[data-privamon-id="${elementId}"]`);
@@ -216,7 +232,7 @@
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
-    const eventOpts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0 };
+    const eventOpts = { bubbles: true, cancelable: true, clientX: x, clientY: y, button: 0, composed: true };
 
     el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, clientX: x, clientY: y }));
     el.dispatchEvent(new MouseEvent('mousedown', eventOpts));
@@ -225,6 +241,22 @@
 
     // Focus for inputs
     if (el.focus) el.focus();
+
+    // Native .click() invocation for anchor or button elements
+    if (typeof el.click === 'function') {
+      el.click();
+    }
+
+    // YouTube SPA Video click fallback: If clicking a video title/link (id="video-title" or href*="/watch")
+    const href = el.href || el.getAttribute('href') || el.closest('a')?.href || el.closest('a')?.getAttribute('href');
+    if (window.location.hostname.includes('youtube.com') && href && href.includes('/watch')) {
+      setTimeout(() => {
+        if (!window.location.pathname.startsWith('/watch')) {
+          console.log('[Privamon ActionExecutor] Executing YouTube video navigation fallback to:', href);
+          window.location.href = href;
+        }
+      }, 400);
+    }
 
     // Visual feedback — brief highlight
     const origOutline = el.style.outline;
@@ -264,52 +296,184 @@
       };
     }
 
-    // Focus and clear
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.focus();
-
-    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
-      // Select all existing text and replace
-      el.select();
-      el.value = value;
-    } else if (el.isContentEditable) {
-      el.textContent = value;
+    // If target is a wrapper/container or accidentally targeted button, locate the real editable input
+    let targetNode = el;
+    const isButton = targetNode.tagName === 'BUTTON' || targetNode.getAttribute('role') === 'button';
+    if (isButton || (!targetNode.isContentEditable && targetNode.tagName !== 'INPUT' && targetNode.tagName !== 'TEXTAREA')) {
+      const editableChild = targetNode.querySelector?.('[contenteditable="true"], input, textarea');
+      if (editableChild) {
+        targetNode = editableChild;
+      } else if (isButton) {
+        // Find adjacent or global message input on page
+        const nearbyInput = targetNode.closest('footer, form, div')?.querySelector?.('[contenteditable="true"], [role="textbox"], input, textarea')
+          || document.querySelector('div[contenteditable="true"][role="textbox"], div[contenteditable="true"], [role="textbox"], textarea, input[type="text"]:not([type="hidden"])');
+        if (nearbyInput) {
+          targetNode = nearbyInput;
+        } else {
+          return {
+            success: false,
+            actionType: 'type',
+            targetElementId: targetId,
+            message: `Target element is a button, not an editable text input: "${targetId}".`
+          };
+        }
+      }
     }
 
-    // Dispatch events to trigger React/Vue/Angular change detection
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', bubbles: true }));
-    el.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+    // Focus and scroll
+    targetNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    targetNode.focus();
 
-    // For React controlled components — use native setter
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLInputElement.prototype, 'value'
-    )?.set;
-    const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype, 'value'
-    )?.set;
+    const isContentEditable = targetNode.isContentEditable || targetNode.getAttribute('contenteditable') === 'true';
 
-    if (el.tagName === 'INPUT' && nativeInputValueSetter) {
-      nativeInputValueSetter.call(el, value);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (el.tagName === 'TEXTAREA' && nativeTextareaValueSetter) {
-      nativeTextareaValueSetter.call(el, value);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+    if (isContentEditable) {
+      // Robust rich-text editor typing (Lexical for WhatsApp Web, Draft.js, ProseMirror, Slate)
+      try {
+        // 1. Select all existing text inside editable element so we replace cleanly
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(targetNode);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        // 2. Native document.execCommand — Chromium automatically fires native beforeinput and input events.
+        // DO NOT add synchronous textContent fallbacks here, as modern frameworks (Lexical/React)
+        // update their internal DOM state asynchronously, which would falsely trigger the fallback and duplicate text!
+        document.execCommand('insertText', false, value);
+      } catch (e) {
+        console.warn('[Privamon ActionExecutor] ContentEditable typing error:', e);
+        targetNode.textContent = value;
+        targetNode.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      targetNode.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (targetNode.tagName === 'INPUT' || targetNode.tagName === 'TEXTAREA') {
+      // Select all existing text and replace
+      targetNode.select();
+      targetNode.value = value;
+
+      // For React controlled components — invoke prototype setter
+      const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype, 'value'
+      )?.set;
+      const nativeTextareaValueSetter = Object.getOwnPropertyDescriptor(
+        window.HTMLTextAreaElement.prototype, 'value'
+      )?.set;
+
+      if (targetNode.tagName === 'INPUT' && nativeInputValueSetter) {
+        nativeInputValueSetter.call(targetNode, value);
+      } else if (targetNode.tagName === 'TEXTAREA' && nativeTextareaValueSetter) {
+        nativeTextareaValueSetter.call(targetNode, value);
+      }
+
+      targetNode.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      targetNode.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    }
+
+    // Auto-submit detection for Search inputs (YouTube, Google, GitHub, etc.)
+    const nameAttr = (targetNode.getAttribute('name') || '').toLowerCase();
+    const idAttr = (targetNode.id || '').toLowerCase();
+    const roleAttr = (targetNode.getAttribute('role') || '').toLowerCase();
+    const placeholderAttr = (targetNode.getAttribute('placeholder') || '').toLowerCase();
+    const isSearchInput = (
+      idAttr === 'search' ||
+      nameAttr === 'search_query' ||
+      nameAttr === 'q' ||
+      targetNode.type === 'search' ||
+      roleAttr === 'searchbox' ||
+      (roleAttr === 'combobox' && /search/i.test(placeholderAttr + ' ' + ariaLabel + ' ' + idAttr)) ||
+      /search|find|query/i.test(placeholderAttr + ' ' + ariaLabel + ' ' + nameAttr + ' ' + idAttr)
+    );
+
+    if (isSearchInput) {
+      // Dispatch Enter key sequence to trigger search
+      setTimeout(() => {
+        const enterOpts = {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          charCode: 13,
+          bubbles: true,
+          cancelable: true,
+          composed: true
+        };
+        targetNode.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+        targetNode.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
+        targetNode.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+
+        // Locate and click dedicated Search button (YouTube #search-icon-legacy, etc.)
+        setTimeout(() => {
+          const searchBtnCandidates = [
+            targetNode.closest('form, ytd-searchbox, [role="search"], div')?.querySelector(
+              'button#search-icon-legacy, button[aria-label="Search"], button[title="Search"], button[type="submit"]'
+            ),
+            document.querySelector('button#search-icon-legacy, button[aria-label="Search"], button[title="Search"]')
+          ];
+          for (const btn of searchBtnCandidates) {
+            if (btn) {
+              const btnLabel = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
+              if (/voice|mic|audio|record/i.test(btnLabel)) continue;
+              btn.click();
+              break;
+            }
+          }
+
+          // YouTube SPA Fallback: If still on homepage after 350ms, navigate directly to search results
+          if (window.location.hostname.includes('youtube.com')) {
+            setTimeout(() => {
+              if (!window.location.pathname.startsWith('/results')) {
+                console.log('[Privamon ActionExecutor] Executing YouTube search results navigation fallback for:', value);
+                window.location.href = `/results?search_query=${encodeURIComponent(value)}`;
+              }
+            }, 350);
+          }
+        }, 80);
+      }, 60);
+    } else if (isChatOrMessageInput) {
+      // Dispatch Enter key sequence for instant send
+      setTimeout(() => {
+        const enterOpts = {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          charCode: 13,
+          bubbles: true,
+          cancelable: true
+        };
+        targetNode.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+        targetNode.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
+        targetNode.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+
+        // Also check if a dedicated Send button appeared (strictly send, never voice/ptt/mic!)
+        setTimeout(() => {
+          const candidates = document.querySelectorAll(
+            'button[aria-label="Send"], span[data-icon="send"], [data-icon="send"], button[title="Send"]'
+          );
+          for (const btn of candidates) {
+            const clickTarget = btn.closest('button') || btn;
+            const label = (clickTarget.getAttribute('aria-label') || clickTarget.getAttribute('title') || '').toLowerCase();
+            const icon = (clickTarget.getAttribute('data-icon') || clickTarget.querySelector?.('[data-icon]')?.getAttribute('data-icon') || '').toLowerCase();
+            if (/voice|mic|ptt|audio|record/i.test(label) || icon === 'ptt') {
+              continue;
+            }
+            clickTarget.click();
+            break;
+          }
+        }, 120);
+      }, 60);
     }
 
     // Visual feedback
-    const origOutline = el.style.outline;
-    el.style.outline = '3px solid #60a5fa';
-    setTimeout(() => { el.style.outline = origOutline; }, 1200);
+    const origOutline = targetNode.style.outline;
+    targetNode.style.outline = '3px solid #60a5fa';
+    setTimeout(() => { targetNode.style.outline = origOutline; }, 1200);
 
     return {
       success: true,
       actionType: 'type',
       targetElementId: targetId,
-      message: `Typed "${value.length > 50 ? value.slice(0, 50) + '...' : value}" into "${targetId}"`
+      message: `Typed "${value.length > 50 ? value.slice(0, 50) + '...' : value}" into "${targetId}"${isChatOrMessageInput ? ' and sent message' : ''}`
     };
   }
 

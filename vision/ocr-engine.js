@@ -91,12 +91,23 @@ Privamon.OCREngine = (() => {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        let scale = 1.0;
-        if (img.width < 1200 || img.height < 1200) {
-          scale = Math.max(2.5, Math.min(3.0, 2400 / Math.max(img.width, img.height, 1)));
+        const minDim = Math.min(img.width, img.height);
+        const maxDim = Math.max(img.width, img.height);
+
+        // Skip non-text slices, thin borders/dividers, or tiny graphics that trigger Leptonica scaling warnings
+        if (minDim < 25 || img.width < 50 || (maxDim / Math.max(minDim, 1)) > 8) {
+          resolve({ dataUrl, scale: 1.0, pad: 0, skipped: true });
+          return;
         }
 
-        const pad = 25; // 25px boundary margin for Tesseract line segmenter
+        let scale = 1.0;
+        if (maxDim < 500) {
+          scale = Math.min(2.0, 900 / maxDim);
+        } else if (maxDim > 1200) {
+          scale = 1200 / maxDim; // Downscale large images to keep OCR fast and responsive
+        }
+
+        const pad = 30; // 30px boundary margin for Tesseract line segmenter
         const canvas = document.createElement('canvas');
         canvas.width = Math.round(img.width * scale) + pad * 2;
         canvas.height = Math.round(img.height * scale) + pad * 2;
@@ -111,9 +122,10 @@ Privamon.OCREngine = (() => {
           dataUrl: canvas.toDataURL('image/png'),
           scale: scale,
           pad: pad,
+          skipped: false,
         });
       };
-      img.onerror = () => resolve({ dataUrl, scale: 1.0, pad: 0 });
+      img.onerror = () => resolve({ dataUrl, scale: 1.0, pad: 0, skipped: true });
       img.src = dataUrl;
     });
   }
@@ -156,6 +168,14 @@ Privamon.OCREngine = (() => {
           workerBlobURL: false,
           gzip: false,
           cacheMethod: 'none',
+          errorHandler: (err) => {
+            // Suppress non-fatal internal Leptonica scaling warnings from flooding the console
+            const errStr = String(err?.message || err || '');
+            if (errStr.includes('too small to scale') || errStr.includes('cannot be recognized')) {
+              return;
+            }
+            console.warn('[OCREngine Worker]', err);
+          },
         };
 
         let createdWorker = null;
@@ -192,6 +212,8 @@ Privamon.OCREngine = (() => {
 
     try {
       const preprocessed = await preprocessCropForOCR(regionDataUrl);
+      if (preprocessed.skipped) return [];
+
       const invScale = 1.0 / (preprocessed.scale || 1.0);
       const pad = preprocessed.pad || 0;
 
@@ -199,7 +221,7 @@ Privamon.OCREngine = (() => {
       await w.setParameters({ tessedit_pageseg_mode: '6' });
 
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OCR Timeout')), 8000)
+        setTimeout(() => reject(new Error('OCR Timeout')), 15000)
       );
 
       const result = await Promise.race([
@@ -252,7 +274,18 @@ Privamon.OCREngine = (() => {
           source: 'ocr',
         }));
     } catch (err) {
-      console.warn('[OCREngine] Recognition failed:', err.message);
+      console.warn('[OCREngine] Recognition failed or timed out:', err.message);
+      // If timed out, terminate hung worker so subsequent OCR calls do not stall
+      if (err.message && err.message.includes('Timeout')) {
+        try {
+          if (worker && typeof worker.terminate === 'function') {
+            worker.terminate().catch(() => {});
+          }
+        } catch (tErr) {}
+        worker = null;
+        isInitialized = false;
+        initPromise = null;
+      }
       return [];
     }
   }
@@ -694,7 +727,11 @@ Privamon.OCREngine = (() => {
           height: Math.round(rawMapped.height),
         };
 
-        if (screenshotBbox.width < 20 || screenshotBbox.height < 10) continue;
+        const minDim = Math.min(screenshotBbox.width, screenshotBbox.height);
+        const maxDim = Math.max(screenshotBbox.width, screenshotBbox.height);
+        if (minDim < 25 || screenshotBbox.width < 50 || (maxDim / Math.max(minDim, 1)) > 8) {
+          continue; // Skip thin lines, dividers, or tiny graphics that trigger Leptonica scaling warnings
+        }
 
         const cropDataUrl = await Privamon.Redactor.extractRegion(screenshotDataUrl, screenshotBbox);
         const ocrResults = await recognizeRegion(cropDataUrl, screenshotBbox);

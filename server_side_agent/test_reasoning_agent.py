@@ -45,4 +45,21 @@ assert v5.action.targetElementId == 'btn-5'
 assert v5.reasoning is not None and len(v5.reasoning) > 0
 print("✓ Test 5 (String action shorthand & auto reasoning default) passed")
 
-print("\nAll 5 reasoning agent validation tests PASSED!")
+# Test 6: Search query auto-normalization from click on search bar to type
+from model_client import extract_search_query, _normalize_search_action
+q1 = extract_search_query("search Indias got latent and play most viewed video")
+assert q1 == "Indias got latent", f"Query extraction failed: {q1}"
+q2 = extract_search_query('On this site search "Khat" and play first video that appears')
+assert q2 == "Khat", f"Query extraction failed: {q2}"
+
+# Simulate model returning click on search bar for search task
+t6 = '{"reasoning": "To search for \'Indias got latent\', I need to click on the search bar to enter the query.", "confidence": 0.95, "action": {"type": "click", "targetElementId": "dom-tok-18", "value": null, "scrollDirection": null}, "assumptions": ["Search bar active"], "needsClarification": false}'
+v6, _ = parse_and_validate(t6)
+sanitized_dom_mock = [{"elementId": "dom-tok-18", "tag": "input", "id": "search", "placeholder": "Search", "role": "combobox"}]
+v6_norm = _normalize_search_action(v6, "search Indias got latent and play most viewed video", sanitized_dom_mock)
+assert v6_norm.action.type == "type", f"Search action normalization failed: {v6_norm.action.type}"
+assert v6_norm.action.value == "Indias got latent", f"Search query value failed: {v6_norm.action.value}"
+assert v6_norm.action.targetElementId == "dom-tok-18"
+print("✓ Test 6 (Search query extraction and click-to-type search normalization) passed")
+
+print("\nAll 6 reasoning agent validation tests PASSED!")

@@ -123,10 +123,28 @@
         <div class="progress-headline" id="progressHeadline">Processing Screen...</div>
         <div class="progress-sub" id="progressSub">Capturing and applying local PII & face redaction</div>
       </div>
+      <button type="button" class="btn-stop-loop hidden" id="stopLoopBtn" title="Stop the running loop">
+        <span>⏹ Stop</span>
+      </button>
     </section>
 
     <!-- Bottom Query Input Box ("Ask me anything to do") -->
     <section class="bottom-input-box" id="bottomInputBox">
+      <!-- Input Mode Controls: Auto-Pilot Loop -->
+      <div class="input-controls-row">
+        <div class="loop-toggle-wrap" title="Autonomous Loop: The agent executes actions, inspects outcomes, and keeps trying until the final task is verified complete.">
+          <label class="toggle-switch small" for="loopModeToggle">
+            <input type="checkbox" id="loopModeToggle">
+            <span class="slider"></span>
+          </label>
+          <label class="loop-toggle-label" for="loopModeToggle">
+            <span class="loop-glyph">⚡</span>
+            <span class="loop-title">Auto-Pilot Loop</span>
+          </label>
+        </div>
+        <span class="loop-hint-pill" id="loopHintPill">Single Step Mode</span>
+      </div>
+
       <!-- Prompt Suggestions -->
       <div class="prompt-chips">
         <button class="chip-btn" data-prompt="What should I do on this page?">

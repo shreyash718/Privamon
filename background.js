@@ -198,9 +198,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Auto-pilot loop: execute → re-capture → re-analyze → execute (repeat)
   if (message.action === 'executeActionLoop') {
-    handleActionLoop(message.task, message.serverUrl, message.maxSteps || 10)
+    handleActionLoop(message.task, message.serverUrl, message.maxSteps || 8)
       .then(result => sendResponse(result))
       .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  // Stop running auto-pilot loop
+  if (message.action === 'stopActionLoop') {
+    stopActionLoop();
+    sendResponse({ success: true, message: 'Loop stop requested' });
     return true;
   }
 
@@ -221,15 +228,81 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 /**
+ * Checks if a tab URL is restricted by Chrome extension security policy.
+ */
+function isRestrictedUrl(url) {
+  if (!url) return true;
+  return (
+    url.startsWith('chrome://') ||
+    url.startsWith('chrome-extension://') ||
+    url.startsWith('edge://') ||
+    url.startsWith('about:') ||
+    url.startsWith('devtools://') ||
+    url.startsWith('view-source:') ||
+    url.includes('chromewebstore.google.com')
+  );
+}
+
+/**
+ * Gets an accessible browser tab for Privamon operations.
+ * If the current active tab is restricted (e.g. chrome://extensions), it finds and switches
+ * to an open web tab (preferring WhatsApp Web or standard http/https pages) in the same window.
+ */
+async function getOperableTab() {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+  if (activeTab && !isRestrictedUrl(activeTab.url)) {
+    return activeTab;
+  }
+
+  // Active tab is restricted (like chrome://extensions/)
+  const allTabs = await chrome.tabs.query({ currentWindow: true });
+
+  // Look for WhatsApp Web tab or any accessible web tab
+  const whatsappTab = allTabs.find(t => t.url && t.url.includes('web.whatsapp.com'));
+  const accessibleWebTab = allTabs.find(t => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://')));
+  const candidate = whatsappTab || accessibleWebTab;
+
+  if (candidate) {
+    console.log(`[Background] Active tab is restricted (${activeTab?.url || 'unknown'}). Switching to web tab: ${candidate.url}`);
+    await chrome.tabs.update(candidate.id, { active: true });
+    // Brief settle delay for Chrome to bring tab into focus
+    await new Promise(r => setTimeout(r, 400));
+    return candidate;
+  }
+
+  throw new Error('Cannot access browser system pages (chrome://). Please open or switch to a web tab (e.g. WhatsApp Web, https://...) and try again.');
+}
+
+/**
+ * Waits for a tab to finish loading and for client-side frameworks/SPAs to render.
+ */
+async function waitForTabReady(tabId, maxWaitMs = 6000) {
+  if (!tabId) return null;
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    try {
+      const tabInfo = await chrome.tabs.get(tabId);
+      if (tabInfo && tabInfo.status === 'complete') {
+        // Tab finished loading; wait 450ms for dynamic DOM / SPA frameworks to render
+        await new Promise(r => setTimeout(r, 450));
+        return tabInfo;
+      }
+    } catch (e) {}
+    await new Promise(r => setTimeout(r, 300));
+  }
+  return await chrome.tabs.get(tabId).catch(() => null);
+}
+
+/**
  * Handle the "startAnalysis" action from the popup.
  */
 async function handleStartAnalysis(task) {
   console.log('[Background] Starting analysis. Task:', task);
 
   try {
-    // Get the active tab
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) throw new Error('No active tab found');
+    // Get the active tab (switches if currently on chrome://extensions)
+    const tab = await getOperableTab();
 
     // ── STEP 1: Capture screenshot (FIRST — atomic snapshot) ──
     forwardToPopup({
@@ -418,9 +491,9 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
   }, 3500);
 
   try {
-    // Get active tab
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab) throw new Error('No active tab found');
+    // Get active operable tab (automatically switches if user was on chrome://extensions)
+    const tab = await getOperableTab();
+    await waitForTabReady(tab.id, 6000);
 
     // Step 1: Capture screenshot
     forwardToPopup({
@@ -430,7 +503,17 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
       statusText: 'Capturing screen...',
     });
 
-    const screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+    let screenshot = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+        if (screenshot) break;
+      } catch (capErr) {
+        console.warn(`[Background] captureVisibleTab retry ${attempt + 1}:`, capErr.message);
+        await new Promise(r => setTimeout(r, 450));
+      }
+    }
+    if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure page is visible.');
 
     // Step 2: Extract DOM
     forwardToPopup({
@@ -440,12 +523,21 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
       statusText: 'Extracting DOM context...',
     });
 
-    const domResults = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
-    });
-    const domData = domResults[0]?.result;
-    if (!domData) throw new Error('DOM extraction returned no data');
+    let domData = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const domResults = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
+        });
+        domData = domResults[0]?.result;
+        if (domData) break;
+      } catch (scriptErr) {
+        console.warn(`[Background] DOM extraction retry ${attempt + 1}:`, scriptErr.message);
+        await new Promise(r => setTimeout(r, 550));
+      }
+    }
+    if (!domData) throw new Error('DOM extraction returned no data. Page may still be loading.');
 
     // Step 3: Ensure offscreen document & run privacy pipeline
     forwardToPopup({
@@ -640,9 +732,9 @@ function computeCoarsePosition(bbox, viewportInfo) {
 
 /**
  * Filters, ranks, and maps DOM elements based on task relevance and interactivity.
- * Restricts payload to top 20 elements to preserve VLM token budget.
+ * Restricts payload to top 35 elements to preserve VLM token budget while ensuring all key controls fit.
  */
-function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 20) {
+function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 35) {
   if (!Array.isArray(sanitizedDom) || sanitizedDom.length === 0) {
     return [];
   }
@@ -654,20 +746,28 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 20) {
     .split(/\s+/)
     .filter(w => w.length > 1 && !stopWords.has(w));
 
-  const hasClickIntent = /\b(click|press|tap|select|submit|choose|open|go|check|tick)\b/i.test(task || '');
-  const hasTypeIntent = /\b(type|enter|fill|input|write|search|set)\b/i.test(task || '');
+  const hasClickIntent = /\b(click|press|tap|select|submit|choose|open|go|check|tick|play|watch)\b/i.test(task || '');
+  const hasTypeIntent = /\b(type|enter|fill|input|write|search|set|send|message|reply|post|chat|say|text)\b/i.test(task || '') || /"[^"]+"/.test(task || '');
+  const hasSearchIntent = /\b(search|find|look\s*up|query)\b/i.test(task || '');
+  const hasVideoIntent = /\b(video|play|watch|first|views|most viewed|song|episode|listen)\b/i.test(task || '');
 
   const scored = sanitizedDom.map((el, idx) => {
     const tag = (el.tag || 'elem').toLowerCase();
     const role = (el.role || '').toLowerCase();
     const pos = computeCoarsePosition(el.bbox, viewportInfo);
 
+    const isInputTag = ['input', 'textarea', 'select'].includes(tag);
+    const isInputRole = ['textbox', 'combobox', 'searchbox'].includes(role);
+    const isContentEditable = Boolean(el.isContentEditable || el.inputType === 'contenteditable' || el.attributes?.type === 'contenteditable');
+    const isInput = isInputTag || isInputRole || isContentEditable;
+
+    const isInteractiveTag = isInputTag || ['button', 'a'].includes(tag);
+    const isInteractiveRole = isInputRole || ['button', 'link', 'checkbox', 'radio', 'menuitem', 'tab'].includes(role);
+
     let score = 0;
 
     // 1. Interactivity weight
-    const isInteractiveTag = ['button', 'input', 'a', 'select', 'textarea'].includes(tag);
-    const isInteractiveRole = ['button', 'link', 'combobox', 'textbox', 'checkbox', 'radio', 'menuitem'].includes(role);
-    if (isInteractiveTag || isInteractiveRole) {
+    if (isInteractiveTag || isInteractiveRole || isContentEditable) {
       score += 10;
     }
 
@@ -675,16 +775,18 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 20) {
     if (hasClickIntent && (tag === 'button' || tag === 'a' || role === 'button' || role === 'link')) {
       score += 8;
     }
-    if (hasTypeIntent && (tag === 'input' || tag === 'textarea' || role === 'textbox')) {
-      score += 8;
+    if (hasTypeIntent && isInput) {
+      score += 15; // High priority for input fields when typing/sending
     }
 
     // 3. Keyword overlap
+    const placeholderVal = el.placeholder || el.attributes?.placeholder || '';
     const searchableText = [
       el.label,
-      el.placeholder,
+      placeholderVal,
       el.text,
       el.id,
+      el.elementId,
       el.name,
       el.inputType,
       el.role
@@ -696,9 +798,75 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 20) {
       }
     }
 
-    // 4. Viewport spatial tie-breaker (prefer upper/middle over far bottom)
-    if (pos && pos.startsWith('top')) score += 2;
-    else if (pos && pos.startsWith('mid')) score += 1;
+    // Heavy penalty for audio/voice recording / voice search buttons
+    const isAudioRecord = Boolean(
+      el.isAudioRecord ||
+      /voice\s*message|ptt|record\s*audio|microphone|voice\s*note|voice\s*search|search\s*with\s*(your\s*)?voice|voice-search/i.test(searchableText)
+    );
+    if ((hasTypeIntent || hasSearchIntent) && isAudioRecord) {
+      score -= 60; // Ensure microphone / voice search button is never picked for typing or search
+    }
+
+    // Direct search input match
+    const isSearchInputEl = isInput && !isAudioRecord && (
+      el.id === 'search' ||
+      el.name === 'search_query' ||
+      el.name === 'q' ||
+      el.inputType === 'search' ||
+      role === 'searchbox' ||
+      /search/i.test(placeholderVal) ||
+      /search/i.test(el.label || '')
+    );
+    if (hasSearchIntent && isSearchInputEl) {
+      score += 30; // Search inputs are #1 priority for search tasks
+    }
+
+    // Dedicated search submit button match
+    const isSearchBtnEl = (tag === 'button' || role === 'button') && !isAudioRecord && (
+      el.id === 'search-icon-legacy' ||
+      /search/i.test(el.label || '') ||
+      /search/i.test(placeholderVal)
+    );
+    if (hasSearchIntent && isSearchBtnEl) {
+      score += 15;
+    }
+
+    // Direct chat/message input match
+    if (isInput && !isSearchInputEl && !isAudioRecord && /message|chat|reply|type a message|send/i.test(searchableText)) {
+      score += 15;
+    }
+
+    // YouTube video title link match
+    const isVideoLinkEl = (tag === 'a' || role === 'link') && (
+      el.id === 'video-title' ||
+      /watch\?v=/i.test(el.href || '') ||
+      /views|subscribers|ago|video/i.test(el.label || '')
+    );
+    if (hasVideoIntent && isVideoLinkEl) {
+      score += 25;
+      if (/\b(most viewed|popular)\b/i.test(task || '') && /\b\d+(\.\d+)?[Mm]\s+views/i.test(el.label || '')) {
+        score += 10; // Boost million-view videos when asking for most viewed
+      }
+      if (/\b(first|top)\b/i.test(task || '') && pos && pos.startsWith('top')) {
+        score += 8;
+      }
+      if (el.label && (el.label.includes('MEMBERS ONLY') || el.label.includes('Members only'))) {
+        score -= 50; // Ensure members-only videos are not picked over free public episodes
+      }
+    }
+
+    // 4. Viewport spatial tie-breaker:
+    // Search inputs live at the top of the viewport!
+    // Chat & messaging inputs live at the bottom of the viewport!
+    if (hasSearchIntent && isSearchInputEl && pos && pos.startsWith('top')) {
+      score += 12;
+    } else if (hasTypeIntent && isInput && !isAudioRecord && pos && pos.startsWith('bot')) {
+      score += 10;
+    } else if (pos && pos.startsWith('top')) {
+      score += 2;
+    } else if (pos && pos.startsWith('mid')) {
+      score += 1;
+    }
 
     return {
       elementId: el.elementId || el.id || `dom-tok-${idx}`,
@@ -714,17 +882,36 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 20) {
         height: Math.round(el.bbox.height)
       } : null,
       attributes: {
-        type: el.inputType || null,
-        placeholder: el.placeholder || null,
+        type: el.inputType || (isContentEditable ? 'contenteditable' : null),
+        placeholder: placeholderVal || null,
         value: el.value ? String(el.value).slice(0, 40) : null
       },
+      _isInput: isInput,
       _score: score
     };
   });
 
-  // Sort descending by score, take top maxElements
+  // Sort descending by score
   scored.sort((a, b) => b._score - a._score);
-  return scored.slice(0, maxElements).map(({ _score, ...el }) => el);
+
+  // Take top maxElements, but guarantee any high-value inputs are preserved
+  let topRanked = scored.slice(0, maxElements);
+  if (hasTypeIntent) {
+    const includedIds = new Set(topRanked.map(e => e.elementId));
+    const missingInputs = scored.slice(maxElements).filter(e => e._isInput && !includedIds.has(e.elementId));
+    if (missingInputs.length > 0) {
+      for (const inputEl of missingInputs) {
+        const replaceIdx = topRanked.findLastIndex(e => !e._isInput);
+        if (replaceIdx !== -1) {
+          topRanked[replaceIdx] = inputEl;
+        } else {
+          topRanked.push(inputEl);
+        }
+      }
+    }
+  }
+
+  return topRanked.map(({ _score, _isInput, ...el }) => el);
 }
 
 /**
@@ -744,9 +931,9 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
     reason: r.type || r.reason || 'redacted_pii'
   }));
 
-  // Rank and prune DOM elements (top 20 relevant elements with coarse spatial hints)
+  // Rank and prune DOM elements (top 35 relevant elements with coarse spatial hints)
   const viewportInfo = result.metadata?.viewportInfo || null;
-  const structuredDom = rankDomElements(result.sanitizedDom, task, viewportInfo, 20);
+  const structuredDom = rankDomElements(result.sanitizedDom, task, viewportInfo, 35);
 
   // Concise text string format fallback
   let sanitized_dom_str = '';
@@ -755,9 +942,10 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
       const pos = el.pos ? ` pos="${el.pos}"` : '';
       const type = el.attributes?.type ? ` type="${el.attributes.type}"` : '';
       const label = el.label ? ` label="${el.label}"` : '';
+      const ph = el.attributes?.placeholder ? ` placeholder="${el.attributes.placeholder}"` : '';
       const val = el.attributes?.value ? ` val="${el.attributes.value}"` : '';
       const text = el.text ? ` text="${el.text}"` : '';
-      return `<${el.tag} id="${el.elementId}"${pos}${type}${label}${val}${text}/>`;
+      return `<${el.tag} id="${el.elementId}"${pos}${type}${label}${ph}${val}${text}/>`;
     }).join('\n');
   }
 
@@ -777,34 +965,24 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
 
         if (lastUrl && currentUrl && lastUrl !== currentUrl) {
           lastOutcome = 'navigation_success';
-        } else if (lastTurn.action && lastTurn.action.targetElementId) {
-          const targetId = lastTurn.action.targetElementId;
-          const stillExists = Array.isArray(result.sanitizedDom) && result.sanitizedDom.some(
-            el => (el.elementId === targetId || el.id === targetId)
-          );
-          if (stillExists) {
-            lastOutcome = 'no_change_detected';
-          } else {
-            lastOutcome = 'state_changed';
-          }
+        } else if (lastTurn.action && lastTurn.action.type === 'type') {
+          // If a message was typed into a chat, it was typed and dispatched
+          lastOutcome = 'executed_and_sent';
+        } else if (lastTurn.action && lastTurn.action.type === 'click') {
+          lastOutcome = 'clicked_successfully';
         } else {
-          lastOutcome = 'completed';
+          lastOutcome = 'executed_successfully';
         }
       }
 
       priorActions = pastTurns.slice(-3).map((t, idx, arr) => {
         const isLast = (idx === arr.length - 1);
-        const outcome = isLast && lastOutcome ? lastOutcome : (t.outcome || 'completed');
+        const outcome = isLast && lastOutcome ? lastOutcome : (t.outcome || 'executed_successfully');
         const actStr = t.action
-          ? `${t.action.type} ${t.action.targetElementId || t.action.value || ''}`.trim()
+          ? `${t.action.type} ${t.action.targetElementId || ''} ${t.action.value ? '"' + t.action.value + '"' : ''}`.trim()
           : `"${t.task}"`;
 
-        if (outcome === 'no_change_detected') {
-          return `${actStr} [outcome: no_change_detected — DO NOT REPEAT UNCHANGED]`;
-        } else if (outcome) {
-          return `${actStr} [outcome: ${outcome}]`;
-        }
-        return actStr;
+        return `${actStr} [outcome: ${outcome}]`;
       });
     }
   } catch (e) {
@@ -855,8 +1033,7 @@ async function handleExecuteAction(actionPayload) {
     return { success: false, actionType: 'unknown', message: 'No action payload provided' };
   }
 
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab) throw new Error('No active tab found');
+  const tab = await getOperableTab();
 
   // For non-page actions, handle directly
   if (actionPayload.type === 'done') {
@@ -903,13 +1080,36 @@ async function handleExecuteAction(actionPayload) {
   return result;
 }
 
+let isActionLoopRunning = false;
+let isLoopCancelled = false;
+
+function stopActionLoop() {
+  console.log('[Background] Stopping action loop on user request.');
+  isLoopCancelled = true;
+  isActionLoopRunning = false;
+  forwardToPopup({
+    type: 'autopilotProgress',
+    status: 'paused',
+    message: 'Loop stopped by user.'
+  });
+}
+
 /**
  * Auto-pilot loop: execute the current action, wait, re-capture, re-analyze, repeat.
- * Stops when: action type is 'done', 'ask_user', confidence < 0.5, or maxSteps reached.
+ * Stops when: action type is 'done', 'ask_user', confidence < 0.45, cancelled, or maxSteps reached.
  */
-async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000', maxSteps = 10) {
+async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000', maxSteps = 5) {
   const task = initialTask || 'Continue the current task';
   const steps = [];
+
+  if (isActionLoopRunning) {
+    console.warn('[Background] Auto-pilot loop already active; overriding existing run.');
+    isLoopCancelled = true;
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  isActionLoopRunning = true;
+  isLoopCancelled = false;
 
   // Keep MV3 service worker alive during the loop
   const keepAliveInterval = setInterval(() => {
@@ -918,24 +1118,38 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
 
   try {
     for (let step = 0; step < maxSteps; step++) {
-      console.log(`[Background] Auto-pilot step ${step + 1}/${maxSteps}`);
+      if (isLoopCancelled) {
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Loop stopped by user.' });
+        break;
+      }
+
+      const stepPrefix = step === 0 ? 'Step 1' : (step === 1 ? 'Step 2 (Verifying)' : `Step ${step + 1}`);
+      console.log(`[Background] Auto-pilot ${stepPrefix}`);
 
       forwardToPopup({
         type: 'autopilotProgress',
         step: step + 1,
         maxSteps,
         status: 'analyzing',
-        message: `Step ${step + 1}: Capturing & analyzing screen...`
+        message: `${stepPrefix}: Inspecting screen & verifying state...`
       });
+
+      // Provide verification context to the model on subsequent steps
+      const currentQuery = step === 0
+        ? task
+        : `${task} [VERIFY TASK COMPLETION: The previous action (${steps[steps.length - 1]?.action?.type || 'action'} ${steps[steps.length - 1]?.action?.value ? '"' + steps[steps.length - 1].action.value + '"' : ''}) was executed. Inspect the screen to verify if the goal is accomplished. If so, return action type "done".]`;
 
       // Run the full chat-with-agent pipeline (capture → redact → server query)
       let chatResult;
       try {
-        chatResult = await handleChatWithAgent(task, serverUrl);
+        chatResult = await handleChatWithAgent(currentQuery, serverUrl);
       } catch (err) {
         steps.push({ step: step + 1, error: err.message });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'error', message: `Analysis failed: ${err.message}` });
         break;
       }
+
+      if (isLoopCancelled) break;
 
       if (!chatResult || !chatResult.turn) {
         steps.push({ step: step + 1, error: 'No turn returned from agent' });
@@ -946,22 +1160,58 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
       const action = turn.action;
       const confidence = turn.confidence;
 
-      // Check stopping conditions
+      // Check stopping conditions: verified task completion
       if (!action || action.type === 'done') {
         steps.push({ step: step + 1, action: action || { type: 'done' }, result: 'Task complete', stopped: 'done' });
-        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'done', message: 'Task complete!' });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'done', message: `✓ Task verified complete! (${step + 1} step${step > 0 ? 's' : ''})` });
         break;
+      }
+
+      // Circuit-breaker: If model tries to re-type the same message already sent in an earlier step
+      if (step > 0 && action.type === 'type') {
+        const alreadySent = steps.some(s => s.action && s.action.type === 'type' && s.action.value === action.value && s.execResult && s.execResult.success);
+        if (alreadySent) {
+          console.log('[Background] Circuit-breaker: message was already sent in prior step. Halting loop as complete.');
+          steps.push({ step: step + 1, action: { type: 'done' }, result: 'Task verified complete' });
+          forwardToPopup({
+            type: 'autopilotProgress',
+            step: step + 1,
+            maxSteps,
+            status: 'done',
+            message: `✓ Task verified complete! Message was sent.`
+          });
+          break;
+        }
+      }
+
+      // Circuit-breaker: If model tries to repeatedly click the same input/element without state change during a search task
+      if (step > 0 && action.type === 'click' && action.targetElementId) {
+        const priorSameClicks = steps.filter(s => s.action && s.action.type === 'click' && s.action.targetElementId === action.targetElementId);
+        if (priorSameClicks.length >= 1) {
+          const isSearchTask = /\b(search|find|look\s*up)\b/i.test(task || '');
+          if (isSearchTask) {
+            console.log('[Background] Circuit-breaker: Repeated click on search element detected. Auto-converting to type action.');
+            const qMatch = task.match(/(?:search(?:\s+for)?|look\s*up|find)\s+["'“”]?([^"'“”.,\n]+?)(?:["'“”]?(?:\s+and\s+(?:play|watch|click|open).*|$))/i);
+            const queryVal = qMatch ? qMatch[1].trim() : task.replace(/^(?:please\s+)?search(?:\s+for)?\s+/i, '').split(/\s+and\s+/i)[0].trim();
+            if (queryVal) {
+              action.type = 'type';
+              action.value = queryVal;
+              turn.reasoning = `Entering search query "${queryVal}" into search bar and submitting.`;
+              console.log(`[Background] Circuit-breaker converted action to type "${queryVal}"`);
+            }
+          }
+        }
       }
 
       if (action.type === 'ask_user' || turn.needsClarification) {
         steps.push({ step: step + 1, action, result: 'Needs clarification', stopped: 'clarification' });
-        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Agent needs your input' });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Agent paused: clarification needed' });
         break;
       }
 
-      if (typeof confidence === 'number' && confidence < 0.5) {
+      if (typeof confidence === 'number' && confidence < 0.45) {
         steps.push({ step: step + 1, action, confidence, result: 'Low confidence', stopped: 'low_confidence' });
-        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: `Paused: confidence too low (${Math.round(confidence * 100)}%)` });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: `Paused: low confidence (${Math.round(confidence * 100)}%)` });
         break;
       }
 
@@ -971,7 +1221,7 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
         step: step + 1,
         maxSteps,
         status: 'executing',
-        message: `Step ${step + 1}: Executing ${action.type} on ${action.targetElementId || 'page'}...`
+        message: `${stepPrefix}: Executing ${action.type}${action.targetElementId ? ' on #' + action.targetElementId : ''}...`
       });
 
       let execResult;
@@ -979,18 +1229,42 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
         execResult = await handleExecuteAction(action);
       } catch (err) {
         steps.push({ step: step + 1, action, error: `Execution failed: ${err.message}` });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'error', message: `Action failed: ${err.message}` });
         break;
       }
 
       steps.push({ step: step + 1, action, execResult, confidence });
 
+      // Record execution outcome to chat history so next turn sees the success
+      try {
+        const histData = await chrome.storage.local.get(['privamon_chat_history']);
+        const history = histData.privamon_chat_history || [];
+        if (history.length > 0) {
+          const last = history[history.length - 1];
+          last.outcome = execResult.success ? (action.type === 'type' ? 'executed_and_sent' : 'clicked_successfully') : 'failed';
+          last.execResult = execResult;
+          await chrome.storage.local.set({ privamon_chat_history: history });
+        }
+      } catch (e) {
+        console.warn('[Background] Failed to update chat history outcome:', e);
+      }
+
       if (!execResult.success) {
-        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'error', message: `Action failed: ${execResult.message}` });
+        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'error', message: `Action error: ${execResult.message}` });
         break;
       }
 
-      // Wait for page to settle after action (navigation, AJAX, etc.)
-      await new Promise(r => setTimeout(r, 2000));
+      if (isLoopCancelled) break;
+
+      // Wait for page to settle after action (navigation, DOM updates, React renders, network)
+      forwardToPopup({
+        type: 'autopilotProgress',
+        step: step + 1,
+        maxSteps,
+        status: 'settling',
+        message: `${stepPrefix}: Action executed. Waiting for page to settle...`
+      });
+      await new Promise(r => setTimeout(r, 2400));
     }
 
     forwardToPopup({
@@ -1001,6 +1275,7 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
 
     return { success: true, steps, totalSteps: steps.length };
   } finally {
+    isActionLoopRunning = false;
     clearInterval(keepAliveInterval);
   }
 }

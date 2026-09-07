@@ -137,15 +137,15 @@ def optimize_image_b64(b64_str: str, max_dimension: int = 1152) -> str:
         print(f"[!] Warning: Image optimization failed: {e}. Using raw image.")
         return b64_str.split(",", 1)[1] if "," in b64_str and b64_str.startswith("data:") else b64_str
 
-def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: int = 20) -> str:
+def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: int = 40) -> str:
     """
     Formats the sanitized DOM context into structured text lines containing
-    elementIds, coarse positional tags [pos: ...], tags, labels, and text.
+    elementIds, coarse positional tags [pos: ...], tags, labels, placeholders, and text.
     """
     if not sanitized_dom:
         return "(No DOM elements available)"
     if isinstance(sanitized_dom, str):
-        return sanitized_dom[:2500]
+        return sanitized_dom[:3500]
 
     lines = []
     for el in sanitized_dom[:max_elements]:
@@ -156,9 +156,11 @@ def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: i
         label = f" label=\"{el.get('label')}\"" if el.get("label") else ""
         text = f" text=\"{el.get('text')}\"" if el.get("text") else ""
         attrs = el.get("attributes") or {}
+        placeholder = attrs.get("placeholder") or el.get("placeholder")
+        ph = f" placeholder=\"{placeholder}\"" if placeholder else ""
         val = f" value=\"{attrs.get('value')}\"" if attrs.get("value") else ""
         inp_type = f" type=\"{attrs.get('type')}\"" if attrs.get("type") else ""
-        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{val}>{text}</{tag}>")
+        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}>{text}</{tag}>")
 
     return "\n".join(lines)
 
@@ -172,7 +174,7 @@ def build_reasoning_prompt(
     """
     Constructs the system prompt following the Privamon Server-Side Reasoning Agent specification.
     """
-    dom_text = format_dom_for_prompt(sanitized_dom, max_elements=20)
+    dom_text = format_dom_for_prompt(sanitized_dom, max_elements=40)
     det_text = json.dumps(detection_summary) if detection_summary else "None"
     
     if prior_actions and isinstance(prior_actions, list):
@@ -207,6 +209,57 @@ HOW TO REASON UNDER REDACTION:
 8. State every assumption explicitly in the assumptions list.
 9. Don't hallucinate content behind a redaction.
 
+SPECIAL GUIDANCE FOR CHAT & MESSAGING:
+- When the user's task asks to send a message, write a message, or type into a chat (e.g. "send message to chat which is open ...", "say ..."):
+  1. Identify the open chat's message input or textbox (look for elements with role="textbox", contenteditable, or placeholder/label like "Type a message", "Message", or positioned at the bottom of the active conversation pane).
+  2. Use action type "type" targeting that element's exact elementId.
+  3. Extract the requested message text (e.g. text inside quotes, like "Hie") and place it into the "value" field.
+  4. DO NOT click sidebar chats, contact list items, or header buttons when the chat conversation is already open on screen.
+  5. CRITICAL: NEVER target a microphone or voice recording button (labeled "Voice message", "Microphone", "PTT", or "(Microphone / Voice Record Button - NOT A TEXTBOX)") for text tasks or "type" actions. A voice message button records audio from the microphone, it CANNOT accept typed text. Always target the actual TEXTBOX (labeled "Type a message", role="textbox", contenteditable).
+
+SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS (e.g. YouTube, Google, etc.):
+- When the user asks to search for something, find a video/song/topic, or look up information (e.g. "search Indias got latent and play most viewed video", "search 'Khat' and play first video", "search for ..."):
+  1. ALWAYS use action type "type" targeting the search input box (look for elements with placeholder/label "Search", id="search", name="search_query", or role="combobox" / type="text" at the top of the page).
+  2. DO NOT emit action type "click" on the search input box before typing. The browser client automatically focuses, types, and submits the search when you return action type "type". Emitting "click" first causes a redundant action and an infinite click loop.
+  3. Extract ONLY the clean search query into the "value" field (e.g. for "search Indias got latent and play most viewed video", value is "Indias got latent"; for "search 'Khat' and play first video", value is "Khat").
+  4. CRITICAL: NEVER click microphone or voice search buttons (labeled "Search with your voice", "Microphone", or "(Microphone / Voice Search / Audio Record Button)") for text search tasks.
+  5. Multi-Step Search & Video/Result Navigation:
+     - Step 1 (Search bar is empty or user is on home/start page): Emit action type "type" with the search query targeting the search input.
+     - Step 2 (Search results page is loaded with video listings/results): Emit action type "click" targeting the requested video title link or first result (look for <a> elements with video titles, e.g. id="video-title" or containing view count info). ALWAYS choose free public videos; DO NOT click videos labeled [MEMBERS ONLY] unless the user explicitly asked for members-only content.
+     - Step 3 (Requested video is open and playing without membership gates or blocking prompts): The task is complete! Return action type "done" immediately. If a membership prompt or blocking overlay appears, click another available public video.
+
+VERIFYING TASK COMPLETION IN MULTI-STEP LOOPS (CRITICAL):
+- If prior actions or user task context indicate an action was executed (e.g. text typed and sent, button clicked, form submitted):
+  1. Inspect the screen and DOM to verify if the goal has been achieved.
+  2. For messaging: If the requested message (e.g. "Hie" or "hie") is visible in the chat history/bubbles, OR the chat input is cleared/empty after sending, THE TASK IS COMPLETE! Return action type "done" immediately:
+     {{
+       "reasoning": "The requested message was successfully sent to the open chat. Task is verified complete.",
+       "confidence": 0.98,
+       "action": {{
+         "type": "done",
+         "targetElementId": null,
+         "value": null,
+         "scrollDirection": null
+       }},
+       "assumptions": ["Message is delivered and visible in the active conversation."],
+       "needsClarification": false
+     }}
+  3. For search & video tasks (e.g. "search X and play Y"): If the video watch page (/watch?v=...) is open on screen, or video is playing, THE TASK IS COMPLETE! Return action type "done" immediately:
+     {{
+       "reasoning": "The requested video is open and playing. Task is verified complete.",
+       "confidence": 0.98,
+       "action": {{
+         "type": "done",
+         "targetElementId": null,
+         "value": null,
+         "scrollDirection": null
+       }},
+       "assumptions": ["Video watch page is loaded and active."],
+       "needsClarification": false
+     }}
+  4. NEVER re-type or re-send the same message if prior actions show it was already executed. Repeating the message will spam the user's contacts. Return "done".
+  5. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button.
+
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
 {{
@@ -214,7 +267,7 @@ You must return ONLY a single valid JSON object strictly matching this schema wi
   "confidence": 0.95,
   "action": {{
     "type": "click",
-    "targetElementId": "dom-tok-12",
+    "targetElementId": "<exact_elementId_from_list>",
     "value": null,
     "scrollDirection": null
   }},
@@ -272,7 +325,7 @@ def build_request_payload(
             "prompt": prompt,
             "stream": stream,
             "options": {
-                "num_ctx": options.get("num_ctx", 4096),
+                "num_ctx": options.get("num_ctx", 8192),
                 "num_predict": max_tokens,
                 "temperature": temp
             }
@@ -314,7 +367,7 @@ def call_ollama(prompt: str, image_b64: str, schema: dict = None) -> tuple[str, 
         schema=schema or STRICT_ACTION_SCHEMA,
         model=model,
         stream=True,
-        options={"num_ctx": 4096, "num_predict": 512, "temperature": 0.2}
+        options={"num_ctx": 8192, "num_predict": 512, "temperature": 0.2}
     )
 
     print(f"[*] Sending request to Ollama ({model}) with strict schema grammar...")
@@ -517,6 +570,77 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
     except ValidationError as ve:
         return None, f"Schema validation error: {ve}"
 
+def extract_search_query(task: str) -> Optional[str]:
+    """
+    Extracts the clean search query term from user tasks like:
+    - 'search Indias got latent and play most viewed video' -> 'Indias got latent'
+    - 'search "Khat" and play first video that appears' -> 'Khat'
+    - 'On this site search "Khat" and play first video that appears' -> 'Khat'
+    - 'search lo fi songs on youtube' -> 'lo fi songs'
+    """
+    if not task:
+        return None
+    cleaned = re.sub(r"^(?:on this (?:site|page|tab)\s*,?\s*|please\s*)", "", task.strip(), flags=re.I)
+
+    # 1. Quoted query
+    m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+["\'\u201c\u201d]([^"\'\u201c\u201d]+)["\'\u201c\u201d]', cleaned, re.I)
+    if m:
+        return m.group(1).strip()
+    # 2. Compound task with "and play/watch/click/open/select"
+    m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+(.+?)\s+and\s+(?:play|watch|click|open|select)', cleaned, re.I)
+    if m:
+        return m.group(1).strip()
+    # 3. Simple search with trailing platform mention
+    m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+(.+?)(?:\s+(?:on|in)\s+(?:youtube|google|site|page|web))?$', cleaned, re.I)
+    if m:
+        q = m.group(1).strip()
+        q = re.sub(r'\s+(?:on|in)\s+(?:youtube|google|site|page|web)$', '', q, flags=re.I)
+        return q.strip()
+    return None
+
+def _normalize_search_action(resp: InterpretResponse, task: str, sanitized_dom: Union[list, str, None]) -> InterpretResponse:
+    """
+    Ensures that if the user's task is a search task and the model returned 'click' on a search input,
+    the action is seamlessly normalized to 'type' with the clean extracted query.
+    """
+    if not resp or not resp.action or resp.action.type != "click" or not resp.action.targetElementId:
+        return resp
+
+    has_search_intent = bool(re.search(r'\b(search|find|look\s*up)\b', task, re.I))
+    if not has_search_intent:
+        return resp
+
+    query = extract_search_query(task)
+    if not query:
+        return resp
+
+    is_search_bar = False
+    reasoning_lower = (resp.reasoning or "").lower()
+    if "search" in reasoning_lower and any(w in reasoning_lower for w in ("bar", "input", "box", "enter", "query")):
+        is_search_bar = True
+    elif isinstance(sanitized_dom, list):
+        for el in sanitized_dom:
+            el_id = el.get("elementId") or el.get("id")
+            if el_id == resp.action.targetElementId:
+                tag = (el.get("tag") or "").lower()
+                role = (el.get("role") or "").lower()
+                attrs = el.get("attributes") or {}
+                ph = (el.get("placeholder") or attrs.get("placeholder") or "").lower()
+                name = (el.get("name") or "").lower()
+                elem_id_str = str(el.get("id") or "").lower()
+                if tag in ("input", "textarea") or role in ("combobox", "searchbox", "textbox") or "search" in ph or "search" in name or elem_id_str == "search":
+                    is_search_bar = True
+                break
+
+    if is_search_bar:
+        print(f"[*] Auto-normalizing search action: converted 'click' on search bar {resp.action.targetElementId} to 'type' with query '{query}'")
+        resp.action.type = "type"
+        resp.action.value = query
+        resp.reasoning = f"Entering search query '{query}' into search bar and submitting."
+        resp.confidence = max(resp.confidence, 0.95)
+
+    return resp
+
 def _populate_backward_compat(resp: InterpretResponse) -> None:
     """
     Populates legacy helper fields (actions, message, thinking) for backwards
@@ -593,6 +717,7 @@ def run_inference(
         latency = round((time.perf_counter() - start_time) * 1000, 2)
         validated.raw_model_output = raw_output or thinking
         validated.thinking = thinking
+        _normalize_search_action(validated, task, sanitized_dom)
         _populate_backward_compat(validated)
         return validated, latency, False
 
@@ -619,6 +744,7 @@ def run_inference(
     if validated_retry:
         validated_retry.raw_model_output = raw_retry or thinking_retry
         validated_retry.thinking = thinking_retry or thinking
+        _normalize_search_action(validated_retry, task, sanitized_dom)
         _populate_backward_compat(validated_retry)
         return validated_retry, latency, True
 

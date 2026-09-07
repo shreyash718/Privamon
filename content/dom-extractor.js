@@ -370,13 +370,26 @@
    */
   function buildElementEntry(el, rect) {
     const tag = el.tagName;
-    const isInput = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT');
+    const isContentEditable = el.isContentEditable || el.getAttribute('contenteditable') === 'true';
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const isRoleInput = (role === 'textbox' || role === 'combobox' || role === 'searchbox');
+    const isInput = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || isContentEditable || isRoleInput);
+
     let isPixel = PIXEL_TAGS.has(tag);
-    if (!isPixel && (el.getAttribute('role') === 'img' || (el.style && el.style.backgroundImage && el.style.backgroundImage.includes('url(')))) {
+    if (!isPixel && (role === 'img' || (el.style && el.style.backgroundImage && el.style.backgroundImage.includes('url(')))) {
       isPixel = true;
     }
 
+    // Stamp unique, stable identifier on the live DOM element for precision execution
+    const privamonId = `dom-tok-${elementCount}`;
+    try {
+      el.setAttribute('data-privamon-id', privamonId);
+    } catch (e) {
+      // Ignore if element is read-only
+    }
+
     const entry = {
+      elementId: privamonId,
       tag: tag.toLowerCase(),
       bbox: {
         x: Math.round(rect.left - offsetLeft),
@@ -387,8 +400,12 @@
       isPixelContent: isPixel,
     };
 
-    // Check if this is a layout container holding child block elements
-    const isContainer = isStructuralContainer(el);
+    // Check if this is a layout container holding child block elements.
+    // Inputs, buttons, and contenteditable elements must never be suppressed as containers.
+    let isContainer = isStructuralContainer(el);
+    if (isInput || tag === 'BUTTON' || role === 'button') {
+      isContainer = false;
+    }
     entry.isContainer = isContainer;
     entry.isHeader = (tag === 'TH');
 
@@ -405,13 +422,12 @@
           entry.tokens = res.tokens;
         }
       } else {
-        const text = getDirectText(el);
-        if (text) entry.text = text;
+        const text = isContentEditable ? (el.innerText || getDirectText(el)) : getDirectText(el);
+        if (text) entry.text = text.slice(0, TEXT_MAX_LENGTH);
       }
     }
 
     // Role & interaction
-    const role = el.getAttribute('role');
     if (role) entry.role = role;
 
     // Stable identifier (prefer data-testid, then id)
@@ -421,19 +437,70 @@
     if (el.className) entry.className = String(el.className);
 
     // Associated label / table column / preceding context (for all elements)
-    const label = findContextLabel(el);
+    let label = findContextLabel(el);
+
+    // Audio/Voice/Microphone recording button detection (e.g. WhatsApp Web voice note button, YouTube voice search)
+    const ariaLabel = (el.getAttribute('aria-label') || '').toLowerCase();
+    const titleAttr = (el.getAttribute('title') || '').toLowerCase();
+    const dataIcon = (el.getAttribute('data-icon') || el.querySelector?.('[data-icon]')?.getAttribute('data-icon') || '').toLowerCase();
+    const idAttr = (el.id || '').toLowerCase();
+    const isAudioRecord = /voice\s*message|ptt|record\s*audio|microphone|voice\s*note|voice\s*search|search\s*with\s*(your\s*)?voice|voice-search/i.test(`${ariaLabel} ${titleAttr} ${dataIcon} ${idAttr}`);
+
+    if (isAudioRecord) {
+      entry.isAudioRecord = true;
+      label = (label ? `${label} ` : '') + '(Microphone / Voice Search / Audio Record Button - NOT A TEXTBOX OR SEARCH BUTTON)';
+    }
+
+    // YouTube video title enrichment with metadata (views, channel name, duration, members-only status)
+    if (el.id === 'video-title' || (tag === 'A' && el.closest?.('ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer'))) {
+      const container = el.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer');
+      if (container) {
+        const metadataEl = container.querySelector('#metadata-line');
+        const channelEl = container.querySelector('#channel-name, #channel-info');
+        const channelName = channelEl?.textContent?.trim() || '';
+        const metaText = metadataEl?.textContent?.replace(/\s+/g, ' ')?.trim() || '';
+        const isMembersOnly = Boolean(
+          container.querySelector('.badge-style-type-members-only, [aria-label*="Members only"]') ||
+          /members\s*only/i.test(container.textContent || '')
+        );
+        const membersTag = isMembersOnly ? ' [MEMBERS ONLY - Paid Subscription Required]' : '';
+        const extraInfo = [channelName, metaText].filter(Boolean).join(' • ');
+        if (extraInfo || membersTag) {
+          label = (label || el.textContent?.trim() || 'Video') + ` (${extraInfo})${membersTag}`;
+        }
+      }
+    }
+
     if (label) entry.label = label;
 
-    // Input-specific attributes
-    if (isInput) {
-      const inputType = el.type || 'text';
+    // Input-specific attributes (disqualify voice recording buttons from inputs)
+    if (isInput && !isAudioRecord) {
+      let inputType = 'text';
+      if (tag === 'INPUT') {
+        inputType = el.type || 'text';
+      } else if (tag === 'TEXTAREA') {
+        inputType = 'textarea';
+      } else if (tag === 'SELECT') {
+        inputType = 'select';
+      } else if (isContentEditable) {
+        inputType = 'contenteditable';
+      } else if (isRoleInput) {
+        inputType = role;
+      }
+
       entry.inputType = inputType;
       entry.isSensitiveType = SENSITIVE_INPUT_TYPES.has(inputType);
+      entry.isContentEditable = Boolean(isContentEditable);
 
-      const name = el.name;
+      const name = el.name || el.getAttribute('name');
       if (name) entry.name = name;
 
-      const placeholder = el.placeholder;
+      const placeholder = el.placeholder
+        || el.getAttribute('placeholder')
+        || el.getAttribute('aria-placeholder')
+        || el.getAttribute('data-placeholder')
+        || el.getAttribute('title')
+        || (isContentEditable && el.getAttribute('aria-label') ? el.getAttribute('aria-label') : '');
       if (placeholder) entry.placeholder = placeholder;
 
       entry.sensitiveNameMatch = matchesSensitiveKeyword(name)
@@ -448,7 +515,7 @@
       }
 
       // Capture the current value (will be sanitized later if PII)
-      const value = el.value;
+      const value = isContentEditable ? (el.innerText || el.textContent || '').trim() : (el.value || '');
       if (value) {
         entry.value = value.slice(0, TEXT_MAX_LENGTH);
         entry.tokens = [{

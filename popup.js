@@ -60,12 +60,16 @@ const inspectorCodeBlock     = document.getElementById('inspectorCodeBlock');
 const inspectorSchemaStatus  = document.getElementById('inspectorSchemaStatus');
 const inspectorCharCount     = document.getElementById('inspectorCharCount');
 
-// ── Auto-Pilot Toggle DOM Reference ──
+// ── Auto-Pilot Loop Controls DOM References ──
 const autopilotToggle = document.getElementById('autopilotToggle');
+const loopModeToggle  = document.getElementById('loopModeToggle');
+const loopHintPill    = document.getElementById('loopHintPill');
+const stopLoopBtn     = document.getElementById('stopLoopBtn');
 
 // ── Local State ──
 let isBusy = false;
-let isAutopilotEnabled = false;
+let isAutopilotEnabled = true;
+let isAutopilotRunning = false;
 let currentServerUrl = 'http://localhost:8000';
 let activeTurnImageUrl = '';
 let currentTurns = [];
@@ -258,16 +262,44 @@ function setupEventListeners() {
     chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
   });
 
-  // Auto-pilot toggle
-  if (autopilotToggle) {
-    // Load saved state
-    chrome.storage.local.get(['privamon_autopilot'], (data) => {
-      isAutopilotEnabled = Boolean(data.privamon_autopilot);
-      autopilotToggle.checked = isAutopilotEnabled;
-    });
-    autopilotToggle.addEventListener('change', () => {
-      isAutopilotEnabled = autopilotToggle.checked;
-      chrome.storage.local.set({ privamon_autopilot: isAutopilotEnabled });
+  // Helper to synchronize loop toggle state
+  function updateLoopModeUI(enabled) {
+    isAutopilotEnabled = Boolean(enabled);
+    if (loopModeToggle) loopModeToggle.checked = isAutopilotEnabled;
+    if (autopilotToggle) autopilotToggle.checked = isAutopilotEnabled;
+    if (loopHintPill) {
+      loopHintPill.textContent = isAutopilotEnabled ? '⚡ Autonomous Loop' : 'Single Step Mode';
+      loopHintPill.classList.toggle('active', isAutopilotEnabled);
+    }
+  }
+
+  // Auto-pilot loop toggles (synchronized across header settings and bottom prompt bar)
+  const toggleHandler = async (e) => {
+    const checked = e.target.checked;
+    updateLoopModeUI(checked);
+    if (isExtensionContext) {
+      await chrome.storage.local.set({ privamon_autopilot: checked });
+    } else {
+      localStorage.setItem('privamon_autopilot', checked ? 'true' : 'false');
+    }
+  };
+
+  if (loopModeToggle) loopModeToggle.addEventListener('change', toggleHandler);
+  if (autopilotToggle) autopilotToggle.addEventListener('change', toggleHandler);
+
+  // Stop loop button in progress bar
+  if (stopLoopBtn) {
+    stopLoopBtn.addEventListener('click', async () => {
+      stopLoopBtn.disabled = true;
+      stopLoopBtn.textContent = 'Stopping...';
+      if (isExtensionContext) {
+        await chrome.runtime.sendMessage({ action: 'stopActionLoop' });
+      }
+      setTimeout(() => {
+        stopLoopBtn.disabled = false;
+        stopLoopBtn.innerHTML = '<span>⏹ Stop</span>';
+        stopLoopBtn.classList.add('hidden');
+      }, 500);
     });
   }
 
@@ -298,16 +330,32 @@ function setupEventListeners() {
     }
     // Auto-pilot progress
     if (message.type === 'autopilotProgress') {
+      activeProgressCard.classList.remove('hidden');
+      if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
       updateProgressUI(message.message || 'Auto-pilot running...', 'autopilot');
       if (message.status === 'done' || message.status === 'paused' || message.status === 'error') {
+        isAutopilotRunning = false;
         isBusy = false;
-        activeProgressCard.classList.add('hidden');
+        if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+        if (message.status === 'done') {
+          setTimeout(() => { activeProgressCard.classList.add('hidden'); }, 2500);
+        } else {
+          activeProgressCard.classList.add('hidden');
+        }
         taskInput.disabled = false;
         sendBtn.disabled = false;
+        taskInput.focus();
+      } else {
+        isAutopilotRunning = true;
+        isBusy = true;
+        taskInput.disabled = true;
+        sendBtn.disabled = true;
       }
     }
     if (message.type === 'autopilotComplete') {
+      isAutopilotRunning = false;
       isBusy = false;
+      if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
       activeProgressCard.classList.add('hidden');
       taskInput.disabled = false;
       sendBtn.disabled = false;
@@ -321,18 +369,22 @@ function setupEventListeners() {
       if (area === 'local' && changes.privamon_chat_history) {
         const newHist = changes.privamon_chat_history.newValue || [];
         currentTurns = newHist;
-        if (newHist.length > 0 && isBusy) {
+        if (newHist.length > 0) {
           const latest = newHist[newHist.length - 1];
           const existing = document.getElementById(latest.id);
           if (!existing) {
             const turnEl = createTurnCard(latest);
             chatTimeline.appendChild(turnEl);
             scrollToBottom();
-            isBusy = false;
-            activeProgressCard.classList.add('hidden');
-            taskInput.disabled = false;
-            sendBtn.disabled = false;
-            taskInput.focus();
+
+            // Only reset busy & input if auto-pilot is NOT actively running
+            if (!isAutopilotRunning) {
+              isBusy = false;
+              activeProgressCard.classList.add('hidden');
+              taskInput.disabled = false;
+              sendBtn.disabled = false;
+              taskInput.focus();
+            }
           }
         }
       }
@@ -347,15 +399,24 @@ const isExtensionContext = typeof chrome !== 'undefined' && chrome.runtime && ty
 async function loadSettings() {
   try {
     if (isExtensionContext) {
-      const data = await chrome.storage.local.get(['privamon_server_url']);
+      const data = await chrome.storage.local.get(['privamon_server_url', 'privamon_autopilot']);
       if (data.privamon_server_url) {
         currentServerUrl = data.privamon_server_url;
       }
+      isAutopilotEnabled = data.privamon_autopilot !== undefined ? Boolean(data.privamon_autopilot) : true;
     } else {
       const saved = localStorage.getItem('privamon_server_url');
       if (saved) currentServerUrl = saved;
+      const savedLoop = localStorage.getItem('privamon_autopilot');
+      isAutopilotEnabled = savedLoop !== null ? savedLoop === 'true' : true;
     }
     serverUrlInput.value = currentServerUrl;
+    if (loopModeToggle) loopModeToggle.checked = isAutopilotEnabled;
+    if (autopilotToggle) autopilotToggle.checked = isAutopilotEnabled;
+    if (loopHintPill) {
+      loopHintPill.textContent = isAutopilotEnabled ? '⚡ Autonomous Loop' : 'Single Step Mode';
+      loopHintPill.classList.toggle('active', isAutopilotEnabled);
+    }
   } catch (e) {
     console.warn('Failed to load settings:', e);
   }
@@ -492,10 +553,30 @@ async function submitChatQuery(query) {
   taskInput.disabled = true;
   sendBtn.disabled = true;
   activeProgressCard.classList.remove('hidden');
-  progressHeadline.textContent = 'Capturing & Redacting...';
-  progressSub.textContent = 'Extracting DOM and masking all PII & faces locally';
+  progressHeadline.textContent = 'Privamon Auto-Pilot';
+  progressSub.textContent = 'Step 1: Inspecting screen & executing action...';
   emptyState.classList.add('hidden');
   scrollToBottom();
+
+  if (isExtensionContext && isAutopilotEnabled) {
+    isAutopilotRunning = true;
+    if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
+    chrome.runtime.sendMessage({
+      action: 'executeActionLoop',
+      task: query,
+      serverUrl: currentServerUrl,
+      maxSteps: 5
+    }).catch(err => {
+      console.warn('[Popup] Auto-pilot execution error:', err);
+      updateProgressUI(`Error: ${err.message}`, 'error');
+      isAutopilotRunning = false;
+      isBusy = false;
+      taskInput.disabled = false;
+      sendBtn.disabled = false;
+      if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+    });
+    return;
+  }
 
   try {
     let turn = null;
@@ -575,11 +656,12 @@ async function submitChatQuery(query) {
       // Auto-pilot: if enabled and high confidence, auto-execute and loop
       if (isAutopilotEnabled && turn.action && turn.action.type !== 'done' && turn.action.type !== 'ask_user' && !turn.needsClarification) {
         const conf = typeof turn.confidence === 'number' ? turn.confidence : 1.0;
-        if (conf >= 0.5) {
+        if (conf >= 0.45) {
           // Launch auto-pilot loop via background
           activeProgressCard.classList.remove('hidden');
-          progressHeadline.textContent = 'Auto-Pilot: Executing...';
-          progressSub.textContent = `Executing ${turn.action.type} on ${turn.action.targetElementId || 'page'}`;
+          if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
+          progressHeadline.textContent = 'Auto-Pilot Loop Active';
+          progressSub.textContent = `Executing ${turn.action.type} and verifying task completion...`;
           isBusy = true;
           taskInput.disabled = true;
           sendBtn.disabled = true;
@@ -588,11 +670,12 @@ async function submitChatQuery(query) {
             action: 'executeActionLoop',
             task: query,
             serverUrl: currentServerUrl,
-            maxSteps: 10
+            maxSteps: 8
           }).catch(err => {
             console.warn('[Popup] Auto-pilot loop error:', err);
             isBusy = false;
             activeProgressCard.classList.add('hidden');
+            if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
             taskInput.disabled = false;
             sendBtn.disabled = false;
           });
@@ -612,9 +695,14 @@ async function submitChatQuery(query) {
     const isPipelineTimeout = Boolean(
       msg.includes('timed out') || msg.includes('Offscreen document failed')
     );
+    const isRestrictedBrowserPage = Boolean(
+      msg.includes('chrome://') || msg.includes('Cannot access') || msg.includes('system pages')
+    );
 
     let displayMessage = `Error: ${msg}`;
-    if (isWorkerReloadNeeded) {
+    if (isRestrictedBrowserPage) {
+      displayMessage = `Restricted Browser Page:\n\nChrome security policies prevent extensions from accessing internal browser pages (like chrome://extensions).\n\nPlease switch to an open web tab (such as WhatsApp Web or any https:// page) and try again.`;
+    } else if (isWorkerReloadNeeded) {
       displayMessage = `The background service worker was updated and needs to be reloaded.\n\nClick the "Reload Extension & Worker" button below or the ⟳ icon in the top header, then try again!`;
     } else if (isServerErr) {
       displayMessage = `Server Connection Error: ${msg}\n\nMake sure the server agent is running: 'uvicorn main:app --reload --port 8000'.`;
@@ -814,10 +902,16 @@ function createTurnCard(turn, isError = false) {
             <div class="action-pill" data-action-idx="${idx}">
               <span class="action-type ${escapeHtml(act.actionType)}">${escapeHtml(act.actionType)}</span>
               <span class="action-target">${escapeHtml(act.target)}</span>
-              <button class="btn-execute-action" data-action-idx="${idx}" title="Execute this action on the page">
-                <span class="exec-icon">▶</span>
-                <span class="exec-label">Execute</span>
-              </button>
+              ${act.actionType === 'done' ? `
+                <span class="action-done-pill">✓ Task Complete</span>
+              ` : (turn.outcome ? `
+                <span class="action-executed-pill">✓ Executed</span>
+              ` : `
+                <button class="btn-execute-action" data-action-idx="${idx}" title="Execute this action on the page">
+                  <span class="exec-icon">▶</span>
+                  <span class="exec-label">Execute</span>
+                </button>
+              `)}
             </div>
           `).join('')}
         </div>
@@ -920,6 +1014,47 @@ function createTurnCard(turn, isError = false) {
         if (iconSpan) iconSpan.textContent = '▶';
         if (labelSpan) labelSpan.textContent = 'Execute';
       }, 3000);
+    });
+  });
+
+  // Run loop button listeners (autonomous multi-step execution until verified complete)
+  const runLoopBtns = responseCard.querySelectorAll('.btn-run-loop');
+  runLoopBtns.forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      btn.classList.add('executing');
+      const origText = btn.innerHTML;
+      btn.innerHTML = '<span class="loop-icon">⟳</span><span class="loop-label">Running...</span>';
+
+      activeProgressCard.classList.remove('hidden');
+      if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
+      progressHeadline.textContent = 'Auto-Pilot Loop Started';
+      progressSub.textContent = `Running autonomous verification loop for "${turn.task || 'task'}"...`;
+      isBusy = true;
+      taskInput.disabled = true;
+      sendBtn.disabled = true;
+
+      try {
+        await chrome.runtime.sendMessage({
+          action: 'executeActionLoop',
+          task: turn.task,
+          serverUrl: currentServerUrl,
+          maxSteps: 8
+        });
+      } catch (err) {
+        console.warn('[Popup] Run loop error:', err);
+        isBusy = false;
+        activeProgressCard.classList.add('hidden');
+        if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+        taskInput.disabled = false;
+        sendBtn.disabled = false;
+      }
+
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.classList.remove('executing');
+        btn.innerHTML = origText;
+      }, 4000);
     });
   });
 
