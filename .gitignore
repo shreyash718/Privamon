@@ -10,3 +10,10 @@ Thumbs.db
 dist/
 *.crx
 *.pem
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
