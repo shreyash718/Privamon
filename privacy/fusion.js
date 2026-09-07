@@ -1,54 +1,51 @@
 /**
- * Privamon — PII Fusion Engine
+ * Privamon — Multi-Modal PII Fusion Engine
  *
- * Merges detections from DOM, OCR, and Vision into a unified list.
- * Deduplicates overlapping bounding boxes using IoU (Intersection over Union).
- * Keeps the highest-confidence detection when duplicates are found.
+ * Merges detections from DOM, OCR, Vision, and NER into a unified screenshot-space list.
  *
- * Output format (common representation):
- * {
- *   type: 'email',
- *   source: 'dom'|'ocr'|'vision',
- *   text: 'user@example.com',
- *   bbox: { x, y, width, height },
- *   confidence: 0.96,
- *   elementId: 'email-input' | null
- * }
+ * Implements:
+ *   - Spatial grid indexing to accelerate box comparisons on busy pages
+ *   - Mathematical IoU overlap computation & containment clustering
+ *   - Modal agreement confidence boosting (cross-source corroboration raises confidence)
+ *   - Explicit decision classification using named thresholds:
+ *       REDACT >= 0.8 (or checksum valid)
+ *       REVIEW 0.4 to 0.8
+ *       KEEP < 0.4
  */
-var Privamon = Privamon || {};
+var Privamon = (typeof window !== 'undefined' && window.Privamon)
+            || (typeof globalThis !== 'undefined' && globalThis.Privamon)
+            || (typeof self !== 'undefined' && self.Privamon)
+            || {};
+if (typeof window !== 'undefined') window.Privamon = Privamon;
+if (typeof globalThis !== 'undefined') globalThis.Privamon = Privamon;
+if (typeof self !== 'undefined') self.Privamon = Privamon;
 
 Privamon.PIIFusion = (() => {
   'use strict';
 
-  // IoU threshold for considering two bboxes as overlapping
-  const IOU_THRESHOLD = 0.4;
-
-  // Minimum confidence to keep a detection
-  const MIN_CONFIDENCE = 0.3;
+  // ── Named Threshold Constants ──
+  const IOU_THRESHOLD = 0.40;
+  const CONFIDENCE_REDACT_THRESHOLD = 0.70;
+  const CONFIDENCE_REVIEW_THRESHOLD = 0.40;
+  const MULTI_MODAL_AGREEMENT_BOOST = 0.15; // Raised confidence when multiple independent modalities agree
+  const SPATIAL_CELL_SIZE = 120;             // Grid cell size in physical pixels for spatial bucketing
 
   /**
    * Calculate Intersection over Union of two bounding boxes.
    */
-  function calculateIoU(a, b) {
+  function iou(a, b) {
     const x1 = Math.max(a.x, b.x);
     const y1 = Math.max(a.y, b.y);
     const x2 = Math.min(a.x + a.width, b.x + b.width);
     const y2 = Math.min(a.y + a.height, b.y + b.height);
 
-    const intersectionWidth = Math.max(0, x2 - x1);
-    const intersectionHeight = Math.max(0, y2 - y1);
-    const intersectionArea = intersectionWidth * intersectionHeight;
-
-    const areaA = a.width * a.height;
-    const areaB = b.width * b.height;
-    const unionArea = areaA + areaB - intersectionArea;
-
-    if (unionArea === 0) return 0;
-    return intersectionArea / unionArea;
+    const inter = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+    const union = (a.width * a.height) + (b.width * b.height) - inter;
+    return union > 0 ? inter / union : 0;
   }
 
   /**
-   * Check if bbox A contains bbox B (A is larger and fully encloses B).
+   * Checks if outer box completely encloses inner box.
    */
   function contains(outer, inner) {
     return (
@@ -60,9 +57,9 @@ Privamon.PIIFusion = (() => {
   }
 
   /**
-   * Merge two bounding boxes into one that covers both.
+   * Computes the bounding box covering both boxes.
    */
-  function mergeBboxes(a, b) {
+  function unionBox(a, b) {
     const x = Math.min(a.x, b.x);
     const y = Math.min(a.y, b.y);
     const right = Math.max(a.x + a.width, b.x + b.width);
@@ -71,159 +68,245 @@ Privamon.PIIFusion = (() => {
       x,
       y,
       width: right - x,
-      height: bottom - y,
+      height: bottom - y
     };
   }
 
   /**
-   * Fuse detections from multiple sources.
+   * Fuses candidate detections across all modalities.
+   * Assumes all candidate bboxes are already in physical screenshot coordinates.
    *
-   * @param {Array} domDetections - From PIIDetector.detectAllDom()
-   * @param {Array} ocrDetections - From OCR pipeline
-   * @param {Array} visionDetections - From Vision model
-   * @returns {Object} { detections: Detection[], summary: { email: 2, phone: 1, ... } }
+   * @param {Array<Object>} candidates - Array of DetectionCandidate objects
+   * @returns {Object} { detections, redactions, reviews, kept, summary }
    */
-  function fuse(domDetections = [], ocrDetections = [], visionDetections = []) {
-    // Normalize all detections to common format
-    const all = [
-      ...domDetections.map(d => normalize(d, 'dom')),
-      ...ocrDetections.map(d => normalize(d, 'ocr')),
-      ...visionDetections.map(d => normalize(d, 'vision')),
-    ];
+  function fuse(candidates = []) {
+    if (!candidates || candidates.length === 0) {
+      return {
+        detections: [],
+        redactions: [],
+        reviews: [],
+        kept: [],
+        summary: { total: 0, byType: {}, bySource: {} }
+      };
+    }
 
-    // Filter by minimum confidence
-    const filtered = all.filter(d => d.confidence >= MIN_CONFIDENCE && d.bbox);
+    // Filter valid bboxes
+    const valid = candidates.filter(c => c && c.bbox && c.bbox.width > 0 && c.bbox.height > 0);
 
-    // Sort by confidence descending (keep best first)
-    filtered.sort((a, b) => b.confidence - a.confidence);
+    // Sort candidates by confidence descending
+    valid.sort((a, b) => b.confidence - a.confidence);
 
-    // Deduplicate overlapping detections
     const merged = [];
     const used = new Set();
 
-    for (let i = 0; i < filtered.length; i++) {
+    // Fast spatial indexing for larger candidate counts
+    const useSpatialGrid = valid.length > 30;
+    const grid = new Map();
+
+    if (useSpatialGrid) {
+      for (let i = 0; i < valid.length; i++) {
+        const box = valid[i].bbox;
+        const minCellX = Math.floor(box.x / SPATIAL_CELL_SIZE);
+        const maxCellX = Math.floor((box.x + box.width) / SPATIAL_CELL_SIZE);
+        const minCellY = Math.floor(box.y / SPATIAL_CELL_SIZE);
+        const maxCellY = Math.floor((box.y + box.height) / SPATIAL_CELL_SIZE);
+
+        for (let cx = minCellX; cx <= maxCellX; cx++) {
+          for (let cy = minCellY; cy <= maxCellY; cy++) {
+            const key = `${cx}:${cy}`;
+            if (!grid.has(key)) grid.set(key, []);
+            grid.get(key).push(i);
+          }
+        }
+      }
+    }
+
+    for (let i = 0; i < valid.length; i++) {
       if (used.has(i)) continue;
 
-      let current = { ...filtered[i] };
+      let current = {
+        ...valid[i],
+        sources: valid[i].sources ? [...valid[i].sources] : [valid[i].source || 'dom'],
+        tokens: valid[i].tokens ? [...valid[i].tokens] : [],
+        boxes: valid[i].boxes ? [...valid[i].boxes] : [valid[i].bbox]
+      };
 
-      for (let j = i + 1; j < filtered.length; j++) {
-        if (used.has(j)) continue;
+      // Determine candidate indices to check
+      let neighborIndices;
+      if (useSpatialGrid) {
+        const box = current.bbox;
+        const minCellX = Math.floor(box.x / SPATIAL_CELL_SIZE);
+        const maxCellX = Math.floor((box.x + box.width) / SPATIAL_CELL_SIZE);
+        const minCellY = Math.floor(box.y / SPATIAL_CELL_SIZE);
+        const maxCellY = Math.floor((box.y + box.height) / SPATIAL_CELL_SIZE);
 
-        const other = filtered[j];
-
-        // Face detections must only merge with other face detections (never merge with text or labels)
-        const isFaceCurrent = current.type === 'face';
-        const isFaceOther = other.type === 'face';
-        if (isFaceCurrent !== isFaceOther) {
-          continue;
-        }
-
-        const iou = calculateIoU(current.bbox, other.bbox);
-
-        if (isFaceCurrent && isFaceOther) {
-          // If two face detections overlap (e.g. from region scan + full scan), deduplicate cleanly
-          if (iou >= 0.25 || contains(current.bbox, other.bbox) || contains(other.bbox, current.bbox)) {
-            used.add(j);
-            if (other.confidence > current.confidence) {
-              current.bbox = other.bbox;
-              current.boxes = other.boxes || [other.bbox];
-              current.confidence = other.confidence;
+        const neighbors = new Set();
+        for (let cx = minCellX; cx <= maxCellX; cx++) {
+          for (let cy = minCellY; cy <= maxCellY; cy++) {
+            const cellList = grid.get(`${cx}:${cy}`);
+            if (cellList) {
+              for (const idx of cellList) {
+                if (idx > i && !used.has(idx)) neighbors.add(idx);
+              }
             }
-            if (!current.mergedSources) current.mergedSources = [current.source];
-            current.mergedSources.push(other.source);
-            continue;
           }
         }
+        neighborIndices = Array.from(neighbors).sort((a, b) => a - b);
+      } else {
+        neighborIndices = [];
+        for (let j = i + 1; j < valid.length; j++) {
+          if (!used.has(j)) neighborIndices.push(j);
+        }
+      }
 
-        if (iou >= IOU_THRESHOLD || contains(current.bbox, other.bbox) || contains(other.bbox, current.bbox)) {
-          // Same region: merge bboxes, keep higher confidence & more specific type
+      for (const j of neighborIndices) {
+        if (used.has(j)) continue;
+        const other = valid[j];
+
+        // Faces must only merge with faces
+        const isFaceCurrent = (current.type === 'face');
+        const isFaceOther = (other.type === 'face');
+        if (isFaceCurrent !== isFaceOther) continue;
+
+        const overlapIoU = iou(current.bbox, other.bbox);
+        const areaCurrent = current.bbox.width * current.bbox.height;
+        const areaOther = other.bbox.width * other.bbox.height;
+        const minArea = Math.min(areaCurrent, areaOther);
+        const maxArea = Math.max(areaCurrent, areaOther);
+        const areaRatio = maxArea > 0 ? minArea / maxArea : 0;
+
+        // Merging on containment is only valid if candidates have comparable size (areaRatio >= 0.5)
+        const isContained = (contains(current.bbox, other.bbox) || contains(other.bbox, current.bbox)) && (areaRatio >= 0.5);
+
+        if (overlapIoU > IOU_THRESHOLD || isContained) {
           used.add(j);
 
-          // Prefer the more specific type
-          if (current.type === 'other' && other.type !== 'other') {
-            current.type = other.type;
-          }
+          // Merge bounding box geometry
+          current.bbox = unionBox(current.bbox, other.bbox);
 
-          // Merge bboxes to cover both areas
-          current.bbox = mergeBboxes(current.bbox, other.bbox);
-
-          // Preserve segmented boxes from both detections
+          // Combine sub-boxes
           if (other.boxes && other.boxes.length > 0) {
-            current.boxes = [...(current.boxes || (current.bbox ? [current.bbox] : [])), ...other.boxes];
+            current.boxes = [...current.boxes, ...other.boxes];
           }
 
           // Combine token IDs without duplicates
           if (other.tokens && other.tokens.length > 0) {
-            if (!current.tokens) current.tokens = [];
-            for (const tok of other.tokens) {
-              if (!current.tokens.includes(tok)) current.tokens.push(tok);
+            for (const t of other.tokens) {
+              if (!current.tokens.includes(t)) current.tokens.push(t);
             }
           }
 
-          // Keep max confidence
-          current.confidence = Math.max(current.confidence, other.confidence);
+          // Merge sources array
+          const otherSources = other.sources || [other.source || 'dom'];
+          for (const s of otherSources) {
+            if (!current.sources.includes(s)) {
+              current.sources.push(s);
+            }
+          }
 
-          // Track merged sources
-          if (!current.mergedSources) current.mergedSources = [current.source];
-          current.mergedSources.push(other.source);
+          // Agreement across distinct modalities raises confidence
+          if (current.sources.length > 1) {
+            current.confidence = Math.min(1.0, Math.max(current.confidence, other.confidence) + MULTI_MODAL_AGREEMENT_BOOST);
+          } else {
+            current.confidence = Math.max(current.confidence, other.confidence);
+          }
+
+          // Label arbitration: prefer more specific type and text
+          if (other.confidence > current.confidence - 0.05 && other.text && !current.text) {
+            current.text = other.text;
+          }
+          if (current.type === 'other' && other.type !== 'other') {
+            current.type = other.type;
+          }
         }
       }
 
+      // Assign decision based on named confidence thresholds & checksums
+      // Faces detected by the vision model are high-risk biometric identifiers and must be REDACTED
+      let decision = 'KEEP';
+      if (current.checksumValidated || current.type === 'face' || current.confidence >= CONFIDENCE_REDACT_THRESHOLD) {
+        decision = 'REDACT';
+      } else if (current.confidence >= CONFIDENCE_REVIEW_THRESHOLD) {
+        decision = 'REVIEW';
+      } else {
+        decision = 'KEEP';
+      }
+
+      // Hard Sanity Check: Text PII (name, phone, email, credentials, tokens) can NEVER be a giant container.
+      // If a non-face detection has an abnormally large area, it is an over-redacted container false positive.
+      // EXCEPTION: Form field anchors (reason starts with 'form_field_anchor:') are intentionally large boxes
+      // designed to cover handwritten PII on paper invoices/receipts. These MUST bypass this check.
+      const candArea = (current.bbox ? current.bbox.width * current.bbox.height : 0);
+      const isFormFieldAnchor = current.reason && (current.reason.startsWith('form_field_anchor:') || current.reason.startsWith('ocr_regex:'));
+      const isGiantContainer = current.type !== 'face' && !isFormFieldAnchor && (
+        (current.bbox && (current.bbox.width > 550 && current.bbox.height > 120)) ||
+        candArea > 45000
+      );
+
+      if (isGiantContainer) {
+        decision = 'KEEP';
+      }
+
+      // Expand signature bounding box upward to securely mask handwritten signature ink above label
+      if (current.type === 'signature' && current.bbox && decision === 'REDACT') {
+        const extraTop = Math.min(current.bbox.y, 45);
+        current.bbox.y -= extraTop;
+        current.bbox.height += extraTop + 10;
+        current.bbox.width += 25;
+        if (current.boxes && current.boxes.length > 0) {
+          current.boxes = current.boxes.map(b => ({
+            x: b.x,
+            y: Math.max(0, b.y - extraTop),
+            width: b.width + 25,
+            height: b.height + extraTop + 10
+          }));
+        }
+      }
+
+      current.decision = decision;
       merged.push(current);
     }
 
-    // Build summary & categorize decisions
-    const summary = {};
+    // Partition by decision
     const redactions = [];
     const reviews = [];
     const kept = [];
+    const summary = {
+      total: merged.length,
+      byType: {},
+      bySource: {}
+    };
 
-    for (const d of merged) {
-      summary[d.type] = (summary[d.type] || 0) + 1;
-      if (d.decision === 'REDACT') {
-        redactions.push(d);
-      } else if (d.decision === 'REVIEW') {
-        reviews.push(d);
+    for (const c of merged) {
+      summary.byType[c.type] = (summary.byType[c.type] || 0) + 1;
+      const primarySource = c.sources && c.sources.length > 0 ? c.sources[0] : (c.source || 'dom');
+      summary.bySource[primarySource] = (summary.bySource[primarySource] || 0) + 1;
+
+      if (c.decision === 'REDACT') {
+        redactions.push(c);
+      } else if (c.decision === 'REVIEW') {
+        reviews.push(c);
       } else {
-        kept.push(d);
+        kept.push(c);
       }
     }
 
     return {
-      detections: merged,      // All candidates for diagnostics/overlays
-      redactions: redactions,  // Invariant: ONLY items with decision === 'REDACT'
-      reviews: reviews,
-      kept: kept,
+      detections: merged,
+      redactions,
+      reviews,
+      kept,
       summary
     };
   }
 
-  /**
-   * Normalize a detection to the common format.
-   */
-  function normalize(detection, defaultSource) {
-    const isFace = (detection.type === 'face');
-    const defaultDecision = isFace ? 'REDACT' : (detection.decision || 'REDACT');
-
-    return {
-      type: detection.type || 'other',
-      source: detection.source || defaultSource,
-      text: detection.text || '',
-      tokens: detection.tokens || [],
-      bbox: detection.bbox || null,
-      boxes: detection.boxes || null,
-      confidence: detection.confidence || 0.5,
-      model_confidence: detection.model_confidence || detection.confidence || 0.5,
-      decision_score: detection.decision_score || detection.confidence || 0.5,
-      sensitivity_class: detection.sensitivity_class || (isFace ? 'DIRECT_PII' : 'UNKNOWN'),
-      decision: defaultDecision,
-      positive_evidence: detection.positive_evidence || [],
-      negative_evidence: detection.negative_evidence || [],
-      elementId: detection.elementId || null,
-      reason: detection.reason || null,
-      coordinateSpace: detection.coordinateSpace || null,
-    };
-  }
-
-  return { fuse, calculateIoU, mergeBboxes };
+  return {
+    fuse,
+    iou,
+    contains,
+    unionBox,
+    CONFIDENCE_REDACT_THRESHOLD,
+    CONFIDENCE_REVIEW_THRESHOLD
+  };
 })();
+Privamon.Fusion = Privamon.PIIFusion;

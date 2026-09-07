@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Privamon Full Extension Pipeline Test</title>
+  <!-- Load all Privamon production scripts in exact manifest order -->
+  <script src="/lib/tesseract/tesseract.min.js"></script>
+  <script src="/privacy/pii-detector.js"></script>
+  <script src="/privacy/fusion.js"></script>
+  <script src="/privacy/redactor.js"></script>
+  <script src="/privacy/ner-engine.js"></script>
+  <script src="/vision/ocr-engine.js"></script>
+</head>
+<body>
+  <h1>Privamon Full Pipeline Verification</h1>
+  <div id="results">Running...</div>
+  <script>
+    async function runTest() {
+      const output = { tests: [], success: true };
+
+      try {
+        // Test 1: Verify DOM Extractor modal occlusion logic
+        const modalDiv = document.createElement('div');
+        modalDiv.setAttribute('role', 'dialog');
+        modalDiv.innerHTML = '<div class="inside-modal"><span>Modal Content</span></div>';
+        document.body.appendChild(modalDiv);
+
+        const outsideDiv = document.createElement('div');
+        outsideDiv.innerHTML = '<div class="chat-item"><span>Ramesh Chat</span></div>';
+        document.body.appendChild(outsideDiv);
+
+        const activeModal = document.querySelector('div[role="dialog"]');
+        const insideVisible = activeModal && activeModal.contains(modalDiv.querySelector('.inside-modal'));
+        const outsideVisible = activeModal && activeModal.contains(outsideDiv.querySelector('.chat-item'));
+
+        output.tests.push({
+          name: 'modal_occlusion_filter',
+          passed: insideVisible === true && outsideVisible === false,
+          details: { insideVisible, outsideVisible }
+        });
+
+        // Test 2: Verify Form Field Anchor & OCR on real invoice screenshot
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((resolve, reject) => {
+          img.onload = resolve;
+          img.onerror = reject;
+          img.src = '/scratch/bill.png';
+        });
+
+        const invoiceBbox = { x: 464, y: 0, width: 363, height: 500 };
+        const mockMapper = {
+          mapBbox: (b) => ({ ...b })
+        };
+
+        // Extract and OCR the invoice region
+        const regions = [{
+          regionId: 'invoice_main',
+          bbox: invoiceBbox,
+          tag: 'IMG'
+        }];
+
+        const ocrResult = await Privamon.OCREngine.processRegions('/scratch/bill.png', regions, mockMapper);
+
+        const detections = ocrResult.detections || [];
+        const hasName = detections.some(d => d.type === 'name' && /Customer Name/i.test(d.text));
+        const hasPhone = detections.some(d => d.type === 'phone');
+        const hasIMEI = detections.some(d => d.type === 'device_id' || /imei/i.test(d.text));
+        const hasSignature = detections.some(d => d.type === 'signature');
+
+        output.tests.push({
+          name: 'invoice_field_anchors',
+          passed: hasName && hasPhone && hasIMEI && hasSignature,
+          details: {
+            totalDetections: detections.length,
+            hasName,
+            hasPhone,
+            hasIMEI,
+            hasSignature,
+            items: detections.map(d => ({ type: d.type, text: d.text, bbox: d.bbox, confidence: d.confidence }))
+          }
+        });
+
+        // Test 3: Fuse detections and Redact via Privamon.Redactor
+        const fusionResult = Privamon.PIIFusion.fuse(detections);
+        const redactResult = await Privamon.Redactor.redact('/scratch/bill.png', fusionResult.redactions);
+
+        output.tests.push({
+          name: 'canvas_redaction_quality',
+          passed: redactResult.redactedRegions.length >= 4,
+          details: {
+            redactedCount: redactResult.redactedRegions.length,
+            canvasDimensions: redactResult.dimensions
+          }
+        });
+
+        output.redactedDataUrl = redactResult.sanitizedDataUrl;
+        output.success = output.tests.every(t => t.passed);
+
+        await fetch('http://localhost:8972/results', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(output)
+        });
+
+      } catch (err) {
+        await fetch('http://localhost:8972/results', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ error: err.stack || err.message, success: false })
+        });
+      }
+    }
+
+    window.onload = runTest;
+  </script>
+</body>
+</html>

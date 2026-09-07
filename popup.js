@@ -1,231 +1,639 @@
 /**
- * Privamon Popup — UI Controller
+ * Privamon Popup — Conversational Vision Agent Controller
  *
- * Handles user interaction, sends analysis requests to the background
- * service worker, and displays pipeline progress + results.
+ * Implements persistent chat history matching the user wireframe:
+ * 1. Top input bar: "what to do?"
+ * 2. Automatic screen capture + local redaction (PII + faces)
+ * 3. Transmission to server_side_agent
+ * 4. Cards for:
+ *    - Redacted screenshot preview ("image which is send to server")
+ *    - Reasoning drawer ("Reasoning")
+ *    - Action guidance ("Response: what you should do")
+ * 5. Full storage persistence across sessions.
  */
 
-const PIPELINE_STAGES = [
-  { id: 'capture',    name: 'Screenshot Capture' },
-  { id: 'dom',        name: 'DOM Extraction' },
-  { id: 'domPii',     name: 'DOM PII Detection' },
-  { id: 'pixelId',    name: 'Pixel Region Identification' },
-  { id: 'ocr',        name: 'OCR Processing' },
-  { id: 'vision',     name: 'Vision Analysis' },
-  { id: 'fusion',     name: 'PII Fusion' },
-  { id: 'coordMap',   name: 'Coordinate Mapping' },
-  { id: 'redaction',  name: 'Redaction' },
-  { id: 'verify',     name: 'Verification' },
-  { id: 'sanitizeDom', name: 'DOM Sanitization' },
-];
-
 // ── DOM References ──
-const taskInput     = document.getElementById('taskInput');
-const analyzeBtn    = document.getElementById('analyzeBtn');
-const taskSection   = document.getElementById('taskSection');
-const statusSection = document.getElementById('statusSection');
-const statusText    = document.getElementById('statusText');
-const pipelineEl    = document.getElementById('pipelineStages');
-const resultsSection = document.getElementById('resultsSection');
-const detectionsList = document.getElementById('detectionsList');
-const timingSummary = document.getElementById('timingSummary');
-const viewResultsBtn = document.getElementById('viewResultsBtn');
-const errorSection  = document.getElementById('errorSection');
-const errorText     = document.getElementById('errorText');
-const retryBtn      = document.getElementById('retryBtn');
-const spinner       = document.getElementById('spinner');
+const serverStatusDot   = document.getElementById('serverStatusDot');
+const serverStatusLabel = document.getElementById('serverStatusLabel');
+const openSidePanelBtn  = document.getElementById('openSidePanelBtn');
+const toggleSettingsBtn = document.getElementById('toggleSettingsBtn');
+const clearHistoryBtn   = document.getElementById('clearHistoryBtn');
+const reloadExtensionBtn = document.getElementById('reloadExtensionBtn');
 
-// ── State ──
-let isProcessing = false;
+const settingsDrawer    = document.getElementById('settingsDrawer');
+const serverUrlInput    = document.getElementById('serverUrlInput');
+const saveSettingsBtn   = document.getElementById('saveSettingsBtn');
 
-// ── Initialize ──
-document.addEventListener('DOMContentLoaded', () => {
-  buildPipelineUI();
-  analyzeBtn.addEventListener('click', startAnalysis);
-  viewResultsBtn.addEventListener('click', openResults);
-  retryBtn.addEventListener('click', resetToInput);
-  taskInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') startAnalysis();
-  });
+const chatForm          = document.getElementById('chatForm');
+const taskInput         = document.getElementById('taskInput');
+const sendBtn           = document.getElementById('sendBtn');
+const promptChips       = document.querySelectorAll('.chip-btn');
+
+const activeProgressCard= document.getElementById('activeProgressCard');
+const progressHeadline  = document.getElementById('progressHeadline');
+const progressSub       = document.getElementById('progressSub');
+
+const chatTimeline      = document.getElementById('chatTimeline');
+const emptyState        = document.getElementById('emptyState');
+
+const imageLightbox     = document.getElementById('imageLightbox');
+const lightboxBackdrop  = document.getElementById('lightboxBackdrop');
+const closeLightboxBtn  = document.getElementById('closeLightboxBtn');
+const lightboxImg       = document.getElementById('lightboxImg');
+const openResultsPageBtn= document.getElementById('openResultsPageBtn');
+
+// ── Local State ──
+let isBusy = false;
+let currentServerUrl = 'http://localhost:8000';
+let activeTurnImageUrl = '';
+
+// ── Detect Side Panel vs Popup Mode ──
+function detectViewMode() {
+  const isSidePanel =
+    window.location.search.includes('view=sidepanel') ||
+    window.location.search.includes('mode=sidepanel') ||
+    window.innerWidth > 550;
+
+  if (document.documentElement) {
+    if (isSidePanel) {
+      document.documentElement.classList.add('is-sidepanel');
+    } else {
+      document.documentElement.classList.remove('is-sidepanel');
+    }
+  }
+  if (document.body) {
+    if (isSidePanel) {
+      document.body.classList.add('is-sidepanel');
+    } else {
+      document.body.classList.remove('is-sidepanel');
+    }
+  }
+}
+detectViewMode();
+
+// ── Initialization ──
+document.addEventListener('DOMContentLoaded', async () => {
+  detectViewMode();
+  window.addEventListener('resize', detectViewMode);
+  await loadSettings();
+  await checkServerHealth();
+  await loadChatHistory();
+  setupEventListeners();
 });
 
-function buildPipelineUI() {
-  pipelineEl.innerHTML = PIPELINE_STAGES.map(stage => `
-    <div class="stage-row" id="stage-${stage.id}">
-      <div class="stage-left">
-        <div class="stage-indicator"></div>
-        <span class="stage-name">${stage.name}</span>
-      </div>
-      <span class="stage-time" id="time-${stage.id}">—</span>
-    </div>
-  `).join('');
+function setupEventListeners() {
+  // Chat query submission
+  chatForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitChatQuery(taskInput.value.trim());
+  });
+
+  // Prompt suggestion chips
+  promptChips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      const prompt = chip.getAttribute('data-prompt');
+      if (prompt && !isBusy) {
+        taskInput.value = prompt;
+        submitChatQuery(prompt);
+      }
+    });
+  });
+
+  // Settings drawer toggle
+  toggleSettingsBtn.addEventListener('click', () => {
+    const isHidden = settingsDrawer.classList.toggle('hidden');
+    toggleSettingsBtn.classList.toggle('active', !isHidden);
+  });
+
+  // Save server settings
+  saveSettingsBtn.addEventListener('click', async () => {
+    const url = serverUrlInput.value.trim().replace(/\/+$/, '') || 'http://localhost:8000';
+    currentServerUrl = url;
+    await chrome.storage.local.set({ privamon_server_url: url });
+    settingsDrawer.classList.add('hidden');
+    toggleSettingsBtn.classList.remove('active');
+    checkServerHealth();
+  });
+
+  // Clear history
+  clearHistoryBtn.addEventListener('click', () => {
+    if (confirm('Clear all conversation history and redacted screenshots?')) {
+      clearHistory();
+    }
+  });
+
+  // Reload extension & background service worker
+  if (reloadExtensionBtn) {
+    reloadExtensionBtn.addEventListener('click', () => {
+      reloadExtensionBtn.style.transform = 'rotate(180deg)';
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.reload === 'function') {
+        chrome.runtime.reload();
+      } else {
+        location.reload();
+      }
+    });
+  }
+
+  // Open side panel
+  openSidePanelBtn.addEventListener('click', async () => {
+    try {
+      if (chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
+        const window = await chrome.windows.getCurrent();
+        await chrome.sidePanel.open({ windowId: window.id });
+        window.close();
+      } else {
+        alert('Side panel is available in Chrome 114+ by clicking the side panel icon in your toolbar.');
+      }
+    } catch (e) {
+      console.warn('Could not open side panel:', e);
+    }
+  });
+
+  // Lightbox close
+  closeLightboxBtn.addEventListener('click', closeLightbox);
+  lightboxBackdrop.addEventListener('click', closeLightbox);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !imageLightbox.classList.contains('hidden')) {
+      closeLightbox();
+    }
+  });
+
+  // Full results page button from lightbox
+  openResultsPageBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
+  });
+
+  // Listen for pipeline progress from background service worker
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.type === 'pipelineProgress' && isBusy) {
+      updateProgressUI(message.statusText || 'Processing page...', message.stageId);
+    }
+  });
 }
 
-// ── Analysis Flow ──
-async function startAnalysis() {
-  if (isProcessing) return;
-  isProcessing = true;
+// ── Helpers for Extension vs Standalone Preview ──
+const isExtensionContext = typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
 
-  const task = taskInput.value.trim() || 'Analyze current page';
+// ── Settings ──
+async function loadSettings() {
+  try {
+    if (isExtensionContext) {
+      const data = await chrome.storage.local.get(['privamon_server_url']);
+      if (data.privamon_server_url) {
+        currentServerUrl = data.privamon_server_url;
+      }
+    } else {
+      const saved = localStorage.getItem('privamon_server_url');
+      if (saved) currentServerUrl = saved;
+    }
+    serverUrlInput.value = currentServerUrl;
+  } catch (e) {
+    console.warn('Failed to load settings:', e);
+  }
+}
 
-  // Switch UI
-  taskSection.classList.add('hidden');
-  resultsSection.classList.add('hidden');
-  errorSection.classList.add('hidden');
-  statusSection.classList.remove('hidden');
-  statusText.textContent = 'Starting pipeline...';
-  spinner.style.display = '';
-
-  // Reset stages
-  buildPipelineUI();
+// ── Server Health Check ──
+async function checkServerHealth() {
+  serverStatusDot.className = 'status-dot';
+  serverStatusLabel.textContent = 'Connecting...';
 
   try {
-    // Send to background service worker
-    const response = await chrome.runtime.sendMessage({
-      action: 'startAnalysis',
-      task: task,
-    });
-
-    if (response && response.error) {
-      throw new Error(response.error);
+    let isOnline = false;
+    if (isExtensionContext) {
+      const response = await chrome.runtime.sendMessage({
+        action: 'checkServerStatus',
+        serverUrl: currentServerUrl
+      });
+      isOnline = response && response.online;
+    } else {
+      const res = await fetch(`${currentServerUrl.replace(/\/+$/, '')}/health`);
+      const data = await res.json();
+      isOnline = data.status === 'ok';
     }
 
-    // The background will send progress updates via messages.
-    // We listen for them below.
+    if (isOnline) {
+      serverStatusDot.className = 'status-dot online';
+      serverStatusLabel.textContent = 'Agent Online';
+    } else {
+      serverStatusDot.className = 'status-dot offline';
+      serverStatusLabel.textContent = 'Agent Offline';
+    }
   } catch (err) {
-    showError(err.message || 'Failed to start analysis');
+    serverStatusDot.className = 'status-dot offline';
+    serverStatusLabel.textContent = 'Offline';
   }
 }
 
-// ── Listen for progress updates from background ──
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'pipelineProgress') {
-    updateStage(message.stageId, message.status, message.timeMs);
-    statusText.textContent = message.statusText || 'Processing...';
-  }
-
-  if (message.type === 'pipelineComplete') {
-    onPipelineComplete(message.result);
-  }
-
-  if (message.type === 'pipelineError') {
-    showError(message.error);
-  }
-});
-
-function updateStage(stageId, status, timeMs) {
-  const row = document.getElementById(`stage-${stageId}`);
-  const timeEl = document.getElementById(`time-${stageId}`);
-  if (!row) return;
-
-  row.classList.remove('active', 'done');
-
-  if (status === 'active') {
-    row.classList.add('active');
-    timeEl.textContent = '...';
-  } else if (status === 'done') {
-    row.classList.add('done');
-    timeEl.textContent = timeMs != null ? `${timeMs}ms` : '✓';
-  } else if (status === 'skipped') {
-    timeEl.textContent = 'skip';
+// ── Chat History ──
+async function loadChatHistory() {
+  try {
+    let history = [];
+    if (isExtensionContext) {
+      const response = await chrome.runtime.sendMessage({ action: 'getChatHistory' });
+      history = (response && response.history) ? response.history : [];
+    } else {
+      const saved = localStorage.getItem('privamon_chat_history');
+      if (saved) {
+        history = JSON.parse(saved);
+      } else {
+        // Pre-populate demo turn in preview mode
+        history = [{
+          id: 'demo_turn_1',
+          timestamp: Date.now() - 60000,
+          task: 'What should I do on this page?',
+          screenshotUrl: 'icons/icon128.png',
+          redactionsCount: 4,
+          thinking: '1. User wants to know what action to take next.\n2. Detected login form with username, password, and Submit button.\n3. Recommend filling credentials and clicking submit.',
+          actions: [
+            { action: 'click', target: 'button#submit-button', description: 'Click the Submit button' }
+          ],
+          message: 'The page contains a login interface. You should enter your credentials into the respective input fields and then click the Submit button to proceed.'
+        }];
+      }
+    }
+    renderHistory(history);
+  } catch (err) {
+    console.error('Failed to load chat history:', err);
+    renderHistory([]);
   }
 }
 
-function onPipelineComplete(result) {
-  isProcessing = false;
-  spinner.style.display = 'none';
-  statusText.textContent = 'Complete';
+function renderHistory(history) {
+  // Clear any existing turn cards (keep emptyState)
+  const existingTurns = chatTimeline.querySelectorAll('.chat-turn-card');
+  existingTurns.forEach(turn => turn.remove());
 
-  // Show results section
-  statusSection.classList.add('hidden');
-  resultsSection.classList.remove('hidden');
+  if (!history || history.length === 0) {
+    emptyState.classList.remove('hidden');
+    return;
+  }
 
-  // Build detections list
-  renderDetections(result.detectionSummary || {});
+  emptyState.classList.add('hidden');
+  history.forEach(turn => {
+    const turnEl = createTurnCard(turn);
+    chatTimeline.appendChild(turnEl);
+  });
 
-  // Build timing summary
-  renderTimings(result.timings || {});
+  scrollToBottom();
 }
 
-function renderDetections(summary) {
-  const PII_CONFIG = {
-    email:       { label: 'Emails',          severity: 'high' },
-    phone:       { label: 'Phone Numbers',   severity: 'high' },
-    password:    { label: 'Password Fields',  severity: 'high' },
-    creditCard:  { label: 'Credit Cards',     severity: 'high' },
-    aadhaar:     { label: 'Aadhaar Numbers',  severity: 'high' },
-    pan:         { label: 'PAN Numbers',       severity: 'high' },
-    face:        { label: 'Faces',             severity: 'medium' },
-    name:        { label: 'Names',             severity: 'medium' },
-    dob:         { label: 'Dates of Birth',    severity: 'medium' },
-    ip:          { label: 'IP Addresses',      severity: 'low' },
-    ocrPii:      { label: 'OCR-detected PII', severity: 'medium' },
-    other:       { label: 'Other Sensitive',   severity: 'low' },
-  };
+async function clearHistory() {
+  try {
+    if (isExtensionContext) {
+      await chrome.runtime.sendMessage({ action: 'clearChatHistory' });
+    } else {
+      localStorage.removeItem('privamon_chat_history');
+    }
+    renderHistory([]);
+  } catch (err) {
+    console.error('Failed to clear history:', err);
+  }
+}
 
-  let html = '';
-  let totalDetections = 0;
+// ── Submit Query Flow ──
+async function submitChatQuery(query) {
+  if (isBusy || !query) return;
+  isBusy = true;
 
-  for (const [type, count] of Object.entries(summary)) {
-    if (count <= 0) continue;
-    totalDetections += count;
+  // UI state
+  taskInput.value = '';
+  taskInput.disabled = true;
+  sendBtn.disabled = true;
+  activeProgressCard.classList.remove('hidden');
+  progressHeadline.textContent = 'Capturing & Redacting...';
+  progressSub.textContent = 'Extracting DOM and masking all PII & faces locally';
+  emptyState.classList.add('hidden');
+  scrollToBottom();
 
-    const config = PII_CONFIG[type] || { label: type, severity: 'low' };
-    html += `
-      <div class="detection-item">
-        <div class="detection-label">
-          <span class="detection-badge ${config.severity}">${config.severity}</span>
-          <span>${config.label}</span>
+  try {
+    let turn = null;
+    if (isExtensionContext) {
+      const response = await chrome.runtime.sendMessage({
+        action: 'chatWithAgent',
+        task: query,
+        serverUrl: currentServerUrl
+      });
+
+      if (response && response.error) {
+        throw new Error(response.error);
+      }
+      turn = response && response.turn;
+    } else {
+      // In standalone browser preview, query the server agent directly
+      const res = await fetch(`${currentServerUrl.replace(/\/+$/, '')}/interpret`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          image_b64: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+          task: query,
+          redacted_regions: [],
+          sanitized_dom: '<button id="submit">Submit</button>'
+        })
+      });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json();
+      turn = {
+        id: 'turn_' + Date.now(),
+        timestamp: Date.now(),
+        task: query,
+        screenshotUrl: 'icons/icon128.png',
+        redactionsCount: 1,
+        thinking: data.thinking || '',
+        actions: data.actions || [],
+        message: data.message || 'Completed analysis.'
+      };
+      const saved = JSON.parse(localStorage.getItem('privamon_chat_history') || '[]');
+      saved.push(turn);
+      localStorage.setItem('privamon_chat_history', JSON.stringify(saved));
+    }
+
+    if (turn) {
+      const turnEl = createTurnCard(turn);
+      chatTimeline.appendChild(turnEl);
+      scrollToBottom();
+    }
+  } catch (err) {
+    console.error('Chat error:', err);
+    const msg = err.message || 'Failed to analyze page.';
+    const isWorkerReloadNeeded = Boolean(
+      msg.includes('forwardToPopup') || msg.includes('not defined') || msg.includes('Receiving end does not exist') || msg.includes('Extension context invalidated')
+    );
+    const isServerErr = Boolean(
+      msg.includes('Server Error') || msg.includes('Server 4') || msg.includes('Server 5') || msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('8000')
+    );
+    const isPipelineTimeout = Boolean(
+      msg.includes('timed out') || msg.includes('Offscreen document failed')
+    );
+
+    let displayMessage = `Error: ${msg}`;
+    if (isWorkerReloadNeeded) {
+      displayMessage = `The background service worker was updated and needs to be reloaded.\n\nClick the "Reload Extension & Worker" button below or the ⟳ icon in the top header, then try again!`;
+    } else if (isServerErr) {
+      displayMessage = `Server Connection Error: ${msg}\n\nMake sure the server agent is running: 'uvicorn main:app --reload --port 8000'.`;
+    } else if (isPipelineTimeout) {
+      displayMessage = `Privacy Pipeline Timeout: ${msg}\n\nPlease click the ⟳ reload button in the header and try again. Heavy pages with dozens of large images may take extra time on initial model setup.`;
+    }
+
+    // Render error card in timeline
+    const errorTurn = {
+      id: 'err_' + Date.now(),
+      timestamp: Date.now(),
+      task: query,
+      screenshotUrl: null,
+      redactionsCount: 0,
+      thinking: '',
+      actions: [],
+      isReloadNeeded: isWorkerReloadNeeded || isPipelineTimeout,
+      message: displayMessage
+    };
+    const errEl = createTurnCard(errorTurn, true);
+    chatTimeline.appendChild(errEl);
+    scrollToBottom();
+  } finally {
+    isBusy = false;
+    taskInput.disabled = false;
+    sendBtn.disabled = false;
+    activeProgressCard.classList.add('hidden');
+    taskInput.focus();
+  }
+}
+
+function updateProgressUI(statusText, stageId) {
+  progressHeadline.textContent = statusText;
+  if (stageId === 'capture') {
+    progressSub.textContent = 'Taking atomic high-res snapshot of active tab';
+  } else if (stageId === 'dom') {
+    progressSub.textContent = 'Analyzing interactive DOM elements and input fields';
+  } else if (stageId === 'redaction') {
+    progressSub.textContent = 'Running local OCR, NER, and face detection blur';
+  } else if (stageId === 'server') {
+    progressSub.textContent = 'Querying local vision agent model via Ollama/vLLM';
+  }
+}
+
+// ── Turn Card Builder (Matches Hand-Drawn Wireframe) ──
+function createTurnCard(turn, isError = false) {
+  const card = document.createElement('article');
+  card.className = 'chat-turn-card';
+  card.id = turn.id;
+
+  const timeStr = formatTime(turn.timestamp);
+  const redactionCount = turn.redactionsCount || (turn.redactedRegions ? turn.redactedRegions.length : 0);
+
+  // 1. User Query Header
+  const queryBar = document.createElement('div');
+  queryBar.className = 'turn-query-bar';
+  queryBar.innerHTML = `
+    <div class="turn-query-content">
+      <span class="query-icon-badge">Q</span>
+      <span class="turn-query-text">${escapeHtml(turn.task || 'Analyze screen')}</span>
+    </div>
+    <span class="turn-timestamp">${timeStr}</span>
+  `;
+  card.appendChild(queryBar);
+
+  // 2. Redacted Image Preview Card ("image which is send to server")
+  if (turn.screenshotUrl) {
+    const imgCard = document.createElement('div');
+    imgCard.className = 'screenshot-preview-card';
+    imgCard.innerHTML = `
+      <div class="screenshot-preview-header">
+        <div class="preview-title-wrap">
+          <span class="preview-title">Sent to Server</span>
+          <span class="privacy-badge">🔒 Sanitized</span>
         </div>
-        <span class="detection-count">${count}</span>
+        <span class="pii-badge">${redactionCount} PII Redacted</span>
+      </div>
+      <div class="screenshot-thumb-container" title="Click to view full redacted image">
+        <img src="${turn.screenshotUrl}" alt="Redacted screenshot sent to agent" loading="lazy">
+        <div class="thumb-overlay">
+          <span>🔍 Click to Expand</span>
+        </div>
       </div>
     `;
+
+    imgCard.querySelector('.screenshot-thumb-container').addEventListener('click', () => {
+      openLightbox(turn.screenshotUrl, turn.task);
+    });
+
+    card.appendChild(imgCard);
   }
 
-  if (totalDetections === 0) {
-    html = `
-      <div class="detection-item">
-        <div class="detection-label">
-          <span class="detection-badge low">info</span>
-          <span>No PII detected on this page</span>
-        </div>
-        <span class="detection-count">0</span>
-      </div>
+  // 3. Reasoning Drawer ("Reasoning")
+  if (turn.thinking && turn.thinking.trim()) {
+    const reasoningBox = document.createElement('div');
+    reasoningBox.className = 'reasoning-box';
+    reasoningBox.innerHTML = `
+      <button class="reasoning-toggle" type="button" aria-expanded="false">
+        <span class="toggle-left">
+          <span>🧠</span>
+          <span>Model Reasoning</span>
+        </span>
+        <svg class="chevron-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="6 9 12 15 18 9"></polyline>
+        </svg>
+      </button>
+      <div class="reasoning-content">${escapeHtml(turn.thinking.trim())}</div>
     `;
+
+    const toggleBtn = reasoningBox.querySelector('.reasoning-toggle');
+    toggleBtn.addEventListener('click', () => {
+      const isOpen = reasoningBox.classList.toggle('open');
+      toggleBtn.setAttribute('aria-expanded', isOpen);
+    });
+
+    card.appendChild(reasoningBox);
   }
 
-  detectionsList.innerHTML = html;
+  // 4. Response Card ("Response: what you should do")
+  const responseCard = document.createElement('div');
+  responseCard.className = 'action-response-card';
+
+  let actionsHtml = '';
+  if (Array.isArray(turn.actions) && turn.actions.length > 0) {
+    const validActions = turn.actions.map(act => {
+      const actionType = (act.type || act.action || 'action').toLowerCase();
+      let target = act.reasoning || act.description || act.target || act.element || '';
+      if (!target) {
+        if (act.value) {
+          target = `Enter "${act.value}"`;
+        } else if (act.target_bbox && Array.isArray(act.target_bbox) && act.target_bbox.length === 4) {
+          target = `Target bbox [${act.target_bbox.join(', ')}]`;
+        }
+      } else if (act.value && !target.includes(act.value)) {
+        target = `"${act.value}" — ${target}`;
+      }
+      return { actionType, target: target.trim() };
+    }).filter(a => a.target.length > 0);
+
+    if (validActions.length > 0) {
+      actionsHtml = `
+        <div class="action-items-list">
+          ${validActions.map(act => `
+            <div class="action-pill">
+              <span class="action-type ${escapeHtml(act.actionType)}">${escapeHtml(act.actionType)}</span>
+              <span class="action-target">${escapeHtml(act.target)}</span>
+            </div>
+          `).join('')}
+        </div>
+      `;
+    }
+  }
+
+  responseCard.innerHTML = `
+    <div class="response-header">
+      <div class="response-title-wrap">
+        <div class="response-avatar">✦</div>
+        <span class="response-title">Response: What you should do</span>
+      </div>
+    </div>
+    <div class="response-body">${formatMessageBody(turn.message || 'No response details provided.')}</div>
+    ${actionsHtml}
+    <div class="turn-footer-actions">
+      <button class="btn-turn-action copy-btn" title="Copy response text">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+        </svg>
+        <span>Copy</span>
+      </button>
+      <button class="btn-turn-action inspect-btn" title="Open full Privamon analysis page">
+        <span>Inspect Detections ↗</span>
+      </button>
+    </div>
+  `;
+
+  // Copy button listener
+  const copyBtn = responseCard.querySelector('.copy-btn');
+  copyBtn.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(turn.message || '');
+      const span = copyBtn.querySelector('span');
+      span.textContent = 'Copied!';
+      setTimeout(() => { span.textContent = 'Copy'; }, 1500);
+    } catch (e) {
+      console.warn('Clipboard failed:', e);
+    }
+  });
+
+  // Inspect detections button
+  const inspectBtn = responseCard.querySelector('.inspect-btn');
+  inspectBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
+  });
+
+  if (turn.isReloadNeeded) {
+    const reloadBox = document.createElement('div');
+    reloadBox.style.marginTop = '10px';
+    reloadBox.innerHTML = `
+      <button class="btn-primary" id="btnReloadServiceWorker" style="padding: 8px 14px; font-size: 12px; cursor: pointer;">
+        ⟳ Reload Extension & Worker
+      </button>
+    `;
+    reloadBox.querySelector('#btnReloadServiceWorker').addEventListener('click', () => {
+      if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.reload === 'function') {
+        chrome.runtime.reload();
+      } else {
+        location.reload();
+      }
+    });
+    responseCard.appendChild(reloadBox);
+  }
+
+  card.appendChild(responseCard);
+  return card;
 }
 
-function renderTimings(timings) {
-  const lines = Object.entries(timings)
-    .map(([key, ms]) => `${key.padEnd(20)} ${String(ms).padStart(6)}ms`)
-    .join('\n');
-
-  const total = Object.values(timings).reduce((a, b) => a + b, 0);
-  timingSummary.textContent = lines + `\n${'TOTAL'.padEnd(20)} ${String(total).padStart(6)}ms`;
+// ── Lightbox Helpers ──
+function openLightbox(imageUrl, title) {
+  activeTurnImageUrl = imageUrl;
+  lightboxImg.src = imageUrl;
+  document.getElementById('lightboxTitle').textContent = title ? `Redacted: ${title}` : 'Redacted Image Sent to Server';
+  imageLightbox.classList.remove('hidden');
 }
 
-function showError(msg) {
-  isProcessing = false;
-  spinner.style.display = 'none';
-  statusSection.classList.add('hidden');
-  resultsSection.classList.add('hidden');
-  errorSection.classList.remove('hidden');
-  errorText.textContent = msg;
+function closeLightbox() {
+  imageLightbox.classList.add('hidden');
+  lightboxImg.src = '';
+  activeTurnImageUrl = '';
 }
 
-function resetToInput() {
-  errorSection.classList.add('hidden');
-  resultsSection.classList.add('hidden');
-  statusSection.classList.add('hidden');
-  taskSection.classList.remove('hidden');
-  isProcessing = false;
-  buildPipelineUI();
+// ── Formatting Utilities ──
+function formatTime(timestamp) {
+  if (!timestamp) return '';
+  const date = new Date(timestamp);
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-function openResults() {
-  chrome.tabs.create({
-    url: chrome.runtime.getURL('results.html')
+function escapeHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function formatMessageBody(text) {
+  if (!text) return '';
+  // Basic markdown-like formatting for bullet points and paragraphs
+  const lines = text.split('\n');
+  return lines.map(line => {
+    const trimmed = line.trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('- ') || trimmed.startsWith('* ')) {
+      return `<p style="padding-left: 10px;">• ${escapeHtml(trimmed.slice(2))}</p>`;
+    }
+    if (/^\d+\.\s/.test(trimmed)) {
+      return `<p style="padding-left: 10px;"><b>${escapeHtml(trimmed.slice(0, 3))}</b> ${escapeHtml(trimmed.slice(3))}</p>`;
+    }
+    return `<p>${escapeHtml(trimmed)}</p>`;
+  }).join('');
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    chatTimeline.scrollTop = chatTimeline.scrollHeight;
   });
 }

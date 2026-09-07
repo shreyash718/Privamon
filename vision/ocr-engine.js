@@ -1,24 +1,23 @@
 /**
  * Privamon — OCR Engine (Tesseract.js wrapper)
  *
- * Local OCR using Tesseract.js. Only processes selected pixel regions,
- * NOT the entire screenshot.
+ * Runs client-side OCR using Tesseract.js WebAssembly.
+ * Only processes selected pixel-bearing regions, NEVER the entire screenshot.
  *
- * ── SELECTIVE PROCESSING (Correction #3) ──
- *
- * Not every <img>/<canvas>/<video> needs OCR. We use heuristics to decide:
- *
- *   1. Size threshold: Skip tiny icons (<40×40 px) and huge decorative images
- *      (>80% of viewport — likely hero images)
- *   2. Alt text analysis: If alt text contains PII keywords, prioritize
- *   3. Context: Images near form fields or labeled content are higher priority
- *   4. Element type: <canvas> with no text children is higher priority
- *   5. Image source: Data URIs and blob URIs suggest dynamic/generated content
- *
- * OCR returns: { text, bbox, confidence } for each detected text block.
- * The text is then passed through the PII detector.
+ * Implements:
+ *   - Persistent worker loaded once and reused across regions & pipeline runs
+ *   - Offline traineddata from lib/tesseract/ (eng + hin)
+ *   - Token-level layout preservation and word bounding boxes
+ *   - Feeds recognized text through the shared Privamon.PIIDetector.detectPII module
+ *   - Character-span-to-word-box alignment for tight redaction boundaries
  */
-var Privamon = Privamon || {};
+var Privamon = (typeof window !== 'undefined' && window.Privamon)
+            || (typeof globalThis !== 'undefined' && globalThis.Privamon)
+            || (typeof self !== 'undefined' && self.Privamon)
+            || {};
+if (typeof window !== 'undefined') window.Privamon = Privamon;
+if (typeof globalThis !== 'undefined') globalThis.Privamon = Privamon;
+if (typeof self !== 'undefined') self.Privamon = Privamon;
 
 Privamon.OCREngine = (() => {
   'use strict';
@@ -26,183 +25,158 @@ Privamon.OCREngine = (() => {
   let worker = null;
   let isInitialized = false;
   let initPromise = null;
-  let isProcessing = false; // Mutex to prevent overlapping OCR pipeline executions
+  let isProcessing = false;
 
   // ── Selectivity Heuristics ──
-
-  // Minimum region size in CSS pixels to consider for OCR
-  const MIN_OCR_WIDTH = 40;
-  const MIN_OCR_HEIGHT = 20;
-
-  // Maximum fraction of viewport a single region can be to still qualify
-  // Set to 1.0 to allow full-screen images (like documents opened directly in the browser)
-  const MAX_VIEWPORT_FRACTION = 1.0;
-
-  // Maximum absolute area for OCR (Tesseract is slow on huge images, but we need to support full-page documents)
-  // Increased from 400k to 5 million (e.g., 2000x2500)
-  const MAX_OCR_AREA = 5000000; 
-
-  // Keywords in alt/src that suggest the image may contain text
-  const TEXT_HINT_KEYWORDS = [
-    'document', 'receipt', 'invoice', 'bill', 'statement', 'certificate',
-    'license', 'passport', 'id', 'card', 'form', 'scan', 'screenshot',
-    'cheque', 'check', 'letter', 'report', 'aadhaar', 'pan', 'text', 'doc'
-  ];
+  const MIN_OCR_WIDTH = 60;
+  const MIN_OCR_HEIGHT = 25;
+  const MAX_OCR_AREA = 5000000;
+  const MAX_OCR_REGIONS = 6; // Cap at top 6 regions to prevent multi-minute stalls on complex pages
 
   /**
    * Filter pixel regions to only those worth running OCR on.
-   *
-   * @param {Array} pixelRegions - From dom-extractor's pixelRegions array
-   * @param {Object} viewportInfo - { cssViewportWidth, cssViewportHeight }
-   * @returns {Array} Filtered regions worth processing
    */
   function selectRegionsForOCR(pixelRegions, viewportInfo) {
-    const viewportArea = viewportInfo.cssViewportWidth * viewportInfo.cssViewportHeight;
+    if (!pixelRegions || !Array.isArray(pixelRegions)) return [];
 
-    return pixelRegions.filter(region => {
-      const { regionId, bbox, tag, alt, src, area } = region;
-      const rId = regionId || 'unknown';
+    const candidates = pixelRegions.filter(region => {
+      const { bbox, tag, area } = region;
+      if (!bbox) return false;
 
-      // 1. Size filter — skip tiny icons
+      // 1. Size filter — skip tiny icons, badges, indicators
       if (bbox.width < MIN_OCR_WIDTH || bbox.height < MIN_OCR_HEIGHT) {
-        console.log(`[OCR][${rId}][REJECTED] Reason: size_too_small, tag: ${tag}, bbox: ${bbox.width}x${bbox.height}`);
         return false;
       }
 
-      // 2. Skip absolutely massive images that will crash WASM memory (e.g., > 5MP)
-      if (area > MAX_OCR_AREA) {
-        console.log(`[OCR][${rId}][REJECTED] Reason: area_too_large, tag: ${tag}, area: ${area}`);
+      // 2. Skip massive images that will crash WASM memory
+      if (area && area > MAX_OCR_AREA) {
         return false;
       }
 
-      // 3. Canvas elements are higher priority (likely generated content)
-      if (tag === 'CANVAS') {
-        console.log(`[OCR][${rId}][ACCEPTED] Reason: canvas_tag, bbox: ${bbox.width}x${bbox.height}`);
-        return true;
-      }
+      // 3. Canvas elements are high priority (graphs, charts, document previewers)
+      if (tag === 'CANVAS') return true;
 
-      // 4. SVG — skip (usually vector graphics, not text documents)
-      if (tag === 'SVG') {
-        console.log(`[OCR][${rId}][REJECTED] Reason: svg_tag`);
+      // 4. Vector/video elements skip
+      if (tag === 'SVG' || tag === 'VIDEO' || tag === 'IFRAME') return false;
+
+      // 5. Small square images (<140x140) are almost always icons, avatars, or decorative graphics
+      if (tag === 'IMG' && bbox.width < 140 && bbox.height < 140 && Math.abs(bbox.width - bbox.height) < 25) {
         return false;
       }
 
-      // 5. Video — skip for OCR (would need frame extraction)
-      if (tag === 'VIDEO') {
-        console.log(`[OCR][${rId}][REJECTED] Reason: video_tag`);
-        return false;
-      }
+      // 6. Image tags
+      if (tag === 'IMG') return true;
 
-      // 6. IFRAME — skip (separate document, can't easily extract)
-      if (tag === 'IFRAME') {
-        console.log(`[OCR][${rId}][REJECTED] Reason: iframe_tag`);
-        return false;
-      }
-
-      // 7. Image: Accept all images that passed the size constraints
-      if (tag === 'IMG') {
-        console.log(`[OCR][${rId}][ACCEPTED] Reason: valid_image, bbox: ${bbox.width}x${bbox.height}`);
-        return true;
-      }
-
-      // Default: include (OBJECT, EMBED, etc.)
-      console.log(`[OCR][${rId}][ACCEPTED] Reason: default_allow, tag: ${tag}`);
       return true;
     });
+
+    // Prioritize CANVAS elements first, then largest pixel areas (bills, documents, receipts)
+    candidates.sort((a, b) => {
+      if (a.tag === 'CANVAS' && b.tag !== 'CANVAS') return -1;
+      if (b.tag === 'CANVAS' && a.tag !== 'CANVAS') return 1;
+      const areaA = (a.bbox?.width || 0) * (a.bbox?.height || 0);
+      const areaB = (b.bbox?.width || 0) * (b.bbox?.height || 0);
+      return areaB - areaA;
+    });
+
+    return candidates.slice(0, MAX_OCR_REGIONS);
   }
 
   /**
-   * Preprocess a crop image on a temporary canvas for OCR (contrast and moderate upscaling for small crops).
-   * Note: Scaling factor must be inverted when mapping detected word bounding boxes back to screenshot pixels.
+   * Preprocess a crop image on a canvas for OCR.
+   * Upscales moderate regions with smooth bicubic interpolation and applies neutral padding
+   * to maximize Tesseract character recognition and prevent boundary clipping.
    */
   async function preprocessCropForOCR(dataUrl) {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
         let scale = 1.0;
-        // Moderate upscale if region is very small (< 400px in either dim) to assist OCR readability
-        if (img.width < 400 || img.height < 400) {
-          scale = Math.min(2.0, 800 / Math.max(img.width, img.height, 1));
-          if (scale < 1.0) scale = 1.0;
+        if (img.width < 1200 || img.height < 1200) {
+          scale = Math.max(2.5, Math.min(3.0, 2400 / Math.max(img.width, img.height, 1)));
         }
 
-        if (scale === 1.0) {
-          return resolve({ dataUrl, scale: 1.0 });
-        }
-
+        const pad = 25; // 25px boundary margin for Tesseract line segmenter
         const canvas = document.createElement('canvas');
-        canvas.width = Math.round(img.width * scale);
-        canvas.height = Math.round(img.height * scale);
-        const ctx = canvas.getContext('2d');
+        canvas.width = Math.round(img.width * scale) + pad * 2;
+        canvas.height = Math.round(img.height * scale) + pad * 2;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.imageSmoothingEnabled = true;
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, pad, pad, Math.round(img.width * scale), Math.round(img.height * scale));
 
         resolve({
           dataUrl: canvas.toDataURL('image/png'),
           scale: scale,
+          pad: pad,
         });
       };
-      img.onerror = () => resolve({ dataUrl, scale: 1.0 });
+      img.onerror = () => resolve({ dataUrl, scale: 1.0, pad: 0 });
       img.src = dataUrl;
     });
   }
 
+  function resolveUrl(relativePath) {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
+      return chrome.runtime.getURL(relativePath);
+    }
+    return relativePath.startsWith('/') ? relativePath : '/' + relativePath;
+  }
+
   /**
-   * Initialize the Tesseract.js worker.
-   * Lazy initialization — only called when OCR is actually needed.
-   * Uses dual English + Hindi ('eng+hin') with fallback to English ('eng').
+   * Initialize the persistent Tesseract.js worker.
+   * Loaded once and kept alive across runs.
    */
   async function initialize() {
-    if (isInitialized) return;
+    if (isInitialized && worker) return worker;
     if (initPromise) return initPromise;
 
     initPromise = (async () => {
       try {
-        // Check if Tesseract is available
-        if (typeof Tesseract === 'undefined') {
-          console.warn('[OCREngine] Tesseract.js not loaded — OCR will be unavailable');
-          return;
+        const tess = (typeof Tesseract !== 'undefined') ? Tesseract
+                   : (typeof window !== 'undefined' && window.Tesseract) ? window.Tesseract
+                   : (typeof globalThis !== 'undefined' && globalThis.Tesseract) ? globalThis.Tesseract
+                   : (typeof self !== 'undefined' && self.Tesseract) ? self.Tesseract
+                   : null;
+
+        if (!tess) {
+          console.warn('[OCREngine] Tesseract.js not loaded — OCR unavailable');
+          return null;
         }
 
         const tStart = performance.now();
-        const initTimeout = new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Tesseract initialization timeout')), 20000)
-        );
+        console.log('[OCREngine] Initializing persistent Tesseract.js worker (eng+hin)...');
+
+        const workerOptions = {
+          workerPath: resolveUrl('lib/tesseract/worker.min.js'),
+          corePath: resolveUrl('lib/tesseract/tesseract-core-simd.wasm.js'),
+          langPath: resolveUrl('lib/tesseract/'),
+          workerBlobURL: false,
+          gzip: false,
+          cacheMethod: 'none',
+        };
 
         let createdWorker = null;
-
-        // Try dual eng+hin first
         try {
-          console.log('[OCREngine] Attempting worker initialization with eng+hin...');
-          const workerPromise = Tesseract.createWorker('eng+hin', 1, {
-            workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
-            corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-simd.wasm.js'),
-            langPath: chrome.runtime.getURL('lib/tesseract/'),
-            workerBlobURL: false,
-          });
-          createdWorker = await Promise.race([workerPromise, initTimeout]);
+          // Attempt dual eng+hin language support
+          createdWorker = await tess.createWorker('eng+hin', 1, workerOptions);
         } catch (dualErr) {
-          console.warn('[OCREngine] eng+hin initialization failed, falling back to eng:', dualErr);
-          const fallbackTimeout = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error('Tesseract fallback timeout')), 15000)
-          );
-          const fallbackPromise = Tesseract.createWorker('eng', 1, {
-            workerPath: chrome.runtime.getURL('lib/tesseract/worker.min.js'),
-            corePath: chrome.runtime.getURL('lib/tesseract/tesseract-core-simd.wasm.js'),
-            langPath: chrome.runtime.getURL('lib/tesseract/'),
-            workerBlobURL: false,
-          });
-          createdWorker = await Promise.race([fallbackPromise, fallbackTimeout]);
+          console.warn('[OCREngine] eng+hin load failed, falling back to eng:', dualErr.message);
+          createdWorker = await tess.createWorker('eng', 1, workerOptions);
         }
 
         worker = createdWorker;
         isInitialized = true;
-        console.log(`[OCREngine] Initialized successfully in ${Math.round(performance.now() - tStart)}ms`);
+        console.log(`[OCREngine] Tesseract worker ready in ${Math.round(performance.now() - tStart)}ms`);
+        return worker;
       } catch (err) {
-        console.error('[OCREngine] Initialization failed completely:', err);
+        console.error('[OCREngine] Worker initialization failed:', err);
         worker = null;
         isInitialized = false;
         initPromise = null;
+        return null;
       }
     })();
 
@@ -210,30 +184,26 @@ Privamon.OCREngine = (() => {
   }
 
   /**
-   * Run OCR on a specific image region.
-   *
-   * @param {string} regionDataUrl - The image region as a data URL
-   * @param {Object} regionBbox - The bbox of this region in screenshot coordinates
-   * @returns {Promise<Array>} Array of { text, bbox, confidence }
+   * Run OCR on a specific cropped region.
    */
   async function recognizeRegion(regionDataUrl, regionBbox) {
-    if (!isInitialized || !worker) {
-      await initialize();
-      if (!worker) return [];
-    }
+    const w = await initialize();
+    if (!w) return [];
 
     try {
-      // Preprocess crop for improved contrast/readability
       const preprocessed = await preprocessCropForOCR(regionDataUrl);
       const invScale = 1.0 / (preprocessed.scale || 1.0);
+      const pad = preprocessed.pad || 0;
 
-      // Timeout for recognition (25s)
-      const timeoutPromise = new Promise((_, reject) => 
-        setTimeout(() => reject(new Error('OCR Timeout')), 25000)
+      // Ensure single uniform block of text mode for structured invoices/documents
+      await w.setParameters({ tessedit_pageseg_mode: '6' });
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OCR Timeout')), 8000)
       );
-      
+
       const result = await Promise.race([
-        worker.recognize(preprocessed.dataUrl),
+        w.recognize(preprocessed.dataUrl),
         timeoutPromise
       ]);
 
@@ -242,60 +212,53 @@ Privamon.OCREngine = (() => {
       const regX = Math.round(regionBbox.x);
       const regY = Math.round(regionBbox.y);
 
-      // 1. Prefer Tesseract's native layout engine lines
+      // Prefer native Tesseract layout engine lines
       if (result.data.lines && result.data.lines.length > 0) {
         const lineItems = [];
         result.data.lines.forEach((line, lineIdx) => {
           const words = (line.words || []).filter(w => (w.confidence === undefined || w.confidence > 5) && w.text && w.text.trim());
-          words.forEach((w, wordIdx) => {
+          words.forEach((wrd, wordIdx) => {
             lineItems.push({
-              text: w.text.trim(),
-              confidence: (w.confidence ?? 80) / 100,
+              text: wrd.text.trim(),
+              confidence: (wrd.confidence ?? 80) / 100,
               lineIndex: lineIdx,
               wordIndex: wordIdx,
               bbox: {
-                x: regX + Math.round(w.bbox.x0 * invScale),
-                y: regY + Math.round(w.bbox.y0 * invScale),
-                width: Math.max(1, Math.round((w.bbox.x1 - w.bbox.x0) * invScale)),
-                height: Math.max(1, Math.round((w.bbox.y1 - w.bbox.y0) * invScale)),
+                x: regX + Math.round((wrd.bbox.x0 - pad) * invScale),
+                y: regY + Math.round((wrd.bbox.y0 - pad) * invScale),
+                width: Math.max(1, Math.round((wrd.bbox.x1 - wrd.bbox.x0) * invScale)),
+                height: Math.max(1, Math.round((wrd.bbox.y1 - wrd.bbox.y0) * invScale)),
               },
               source: 'ocr',
             });
           });
         });
-        if (lineItems.length > 0) {
-          return lineItems;
-        }
+        if (lineItems.length > 0) return lineItems;
       }
 
       if (!result.data.words) return [];
 
-      // 2. Fallback: Map Tesseract word bboxes back to screenshot coordinates
       return result.data.words
-        .filter(w => (w.confidence === undefined || w.confidence > 5) && w.text && w.text.trim())
-        .map(w => ({
-          text: w.text.trim(),
-          confidence: (w.confidence ?? 80) / 100,
+        .filter(wrd => (wrd.confidence === undefined || wrd.confidence > 5) && wrd.text && wrd.text.trim())
+        .map(wrd => ({
+          text: wrd.text.trim(),
+          confidence: (wrd.confidence ?? 80) / 100,
           bbox: {
-            x: regX + Math.round(w.bbox.x0 * invScale),
-            y: regY + Math.round(w.bbox.y0 * invScale),
-            width: Math.max(1, Math.round((w.bbox.x1 - w.bbox.x0) * invScale)),
-            height: Math.max(1, Math.round((w.bbox.y1 - w.bbox.y0) * invScale)),
+            x: regX + Math.round((wrd.bbox.x0 - pad) * invScale),
+            y: regY + Math.round((wrd.bbox.y0 - pad) * invScale),
+            width: Math.max(1, Math.round((wrd.bbox.x1 - wrd.bbox.x0) * invScale)),
+            height: Math.max(1, Math.round((wrd.bbox.y1 - wrd.bbox.y0) * invScale)),
           },
           source: 'ocr',
         }));
     } catch (err) {
-      console.error('[OCREngine] Recognition failed or timed out:', err);
-      if (err.message === 'OCR Timeout' || err.message.includes('Timeout')) {
-         terminate();
-      }
+      console.warn('[OCREngine] Recognition failed:', err.message);
       return [];
     }
   }
 
   /**
    * Group OCR word tokens into lines and reconstruct text with layout preservation.
-   * Produces aligned tokens with character offsets (start, end) in the reconstructed string.
    */
   function buildTextAndTokens(ocrResults) {
     if (!ocrResults || ocrResults.length === 0) {
@@ -303,9 +266,8 @@ Privamon.OCREngine = (() => {
     }
 
     const lines = [];
-
-    // Case 1: Tesseract provided native lineIndex
     const hasLineIndex = ocrResults.some(item => item.lineIndex !== undefined);
+
     if (hasLineIndex) {
       const lineMap = new Map();
       for (const item of ocrResults) {
@@ -320,7 +282,6 @@ Privamon.OCREngine = (() => {
         lines.push(line);
       }
     } else {
-      // Case 2: Robust vertical clustering with transitive numeric comparator
       const sorted = [...ocrResults].sort((a, b) => a.bbox.y - b.bbox.y);
 
       for (const item of sorted) {
@@ -335,25 +296,20 @@ Privamon.OCREngine = (() => {
             break;
           }
         }
-        if (!placed) {
-          lines.push([item]);
-        }
+        if (!placed) lines.push([item]);
       }
 
-      // Sort lines vertically by average y
       lines.sort((l1, l2) => {
         const y1 = l1.reduce((sum, w) => sum + w.bbox.y, 0) / l1.length;
         const y2 = l2.reduce((sum, w) => sum + w.bbox.y, 0) / l2.length;
         return y1 - y2;
       });
 
-      // Sort each line horizontally
       for (const line of lines) {
         line.sort((a, b) => a.bbox.x - b.bbox.x);
       }
     }
 
-    // Build text with \n between lines and space between words
     let fullText = '';
     const tokens = [];
     let tokenIndex = 0;
@@ -386,9 +342,6 @@ Privamon.OCREngine = (() => {
     return { text: fullText, tokens };
   }
 
-  /**
-   * Proportional sub-box calculation for partial token overlaps.
-   */
   function computeTokenSubBox(token, spanStart, spanEnd) {
     const box = token.bbox;
     const tStart = token.start;
@@ -419,20 +372,15 @@ Privamon.OCREngine = (() => {
     };
   }
 
-  /**
-   * Fallback multi-line aware token-to-bbox mapper with partial overlap precision.
-   */
   function mapSpanToBoxes(spanStart, spanEnd, tokens) {
     const matched = tokens.filter(t => t.end > spanStart && t.start < spanEnd);
     if (matched.length === 0) return { bbox: null, boxes: [], tokens: [] };
 
-    // Calculate exact sub-boxes for each overlapping token
     const items = matched.map(t => ({
       id: t.id,
       bbox: computeTokenSubBox(t, spanStart, spanEnd)
     }));
 
-    // Group matched items by line
     const lines = [];
     for (const item of items) {
       const midY = item.bbox.y + item.bbox.height / 2;
@@ -471,37 +419,273 @@ Privamon.OCREngine = (() => {
   }
 
   /**
-   * Process multiple regions sequentially.
-   *
-   * @param {string} screenshotDataUrl - Full screenshot
-   * @param {Array} regions - Filtered regions to process
-   * @param {Object} mapper - CoordinateMapper instance
-   * @returns {Promise<Array>} All OCR results with PII detection applied
+   * Detect form field anchors in documents, receipts, and invoices.
+   * Cursive handwriting on paper forms cannot be reliably transcribed by typographic OCR,
+   * but the printed labels define the geometric location of the sensitive handwritten values.
+   */
+  function detectFormFieldAnchors(ocrWords, regionBbox) {
+    if (!ocrWords || !ocrWords.length) return [];
+    const anchors = [];
+    const regX = regionBbox.x;
+    const regY = regionBbox.y;
+    const regW = regionBbox.width;
+    const regH = regionBbox.height;
+    const rightEdge = regX + regW - 6;
+
+    // Group words into lines
+    const lines = [];
+    const sorted = [...ocrWords].sort((a, b) => a.bbox.y - b.bbox.y);
+    for (const item of sorted) {
+      const itemMidY = item.bbox.y + item.bbox.height / 2;
+      let placed = false;
+      for (const line of lines) {
+        const lineMidY = line.reduce((sum, w) => sum + (w.bbox.y + w.bbox.height / 2), 0) / line.length;
+        const avgH = line.reduce((sum, w) => sum + w.bbox.height, 0) / line.length;
+        if (Math.abs(itemMidY - lineMidY) < avgH * 0.55) {
+          line.push(item);
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) lines.push([item]);
+    }
+
+    const fullDocText = ocrWords.map(w => w.text).join(' ').toLowerCase();
+    const isInvoiceOrForm = /invoice|bill|tax|gst|particulars|cash|receipt|challan|order|model/i.test(fullDocText);
+
+    let foundName = false;
+    let foundMob = false;
+    let foundImei = false;
+    let foundSignature = false;
+
+    for (const line of lines) {
+      line.sort((a, b) => a.bbox.x - b.bbox.x);
+      const lineClean = line.map(w => w.text).join(' ').toLowerCase();
+
+      for (let wi = 0; wi < line.length; wi++) {
+        const w = line[wi];
+        const clean = w.text.toLowerCase().replace(/[^a-z0-9!]/g, '');
+
+        const getSubsequent = (fromX) => line.filter(other => other.bbox.x > fromX);
+
+        // ── Anchor 1: Customer Name ──
+        if (!foundName && w.bbox.y < regY + regH * 0.48 &&
+            (/^(?:name|buyer|patient|applicant)$/i.test(clean) ||
+             (clean === 'customer' && !lineClean.includes('signature')) ||
+             (clean === 'nam' && line[wi + 1] && /^(?:e|is)$/i.test(line[wi + 1].text.toLowerCase().replace(/[^a-z]/g, ''))))) {
+          let refWord = w;
+          if (line[wi + 1] && /^[:\-\.]$/.test(line[wi + 1].text.trim())) {
+            refWord = line[wi + 1];
+          }
+          const startX = refWord.bbox.x + refWord.bbox.width + 4;
+          const dateWord = line.find(other => other.bbox.x > startX && /date/i.test(other.text));
+          const limitRight = dateWord ? (dateWord.bbox.x - 8) : (regX + regW * 0.78);
+          const subsequent = getSubsequent(startX).filter(sw => sw.bbox.x < limitRight);
+          let valW = Math.round(regW * 0.55);
+          if (subsequent.length > 0) {
+            const maxRight = Math.max(...subsequent.map(sw => sw.bbox.x + sw.bbox.width));
+            valW = Math.max(valW, maxRight - startX + 10);
+          }
+          valW = Math.min(limitRight - startX, valW);
+
+          anchors.push({
+            type: 'name',
+            text: 'Customer Name (Handwritten Field)',
+            confidence: 0.98,
+            decision: 'REDACT',
+            reason: 'form_field_anchor:name',
+            bbox: {
+              x: startX,
+              y: Math.max(regY + 2, refWord.bbox.y - 4),
+              width: Math.max(80, valW),
+              height: Math.max(refWord.bbox.height + 10, 26)
+            }
+          });
+          foundName = true;
+        }
+
+        // ── Anchor 2: Mobile / Phone ──
+        // Only accept phone labels in the customer details section (top 42% of document)
+        if (!foundMob && w.bbox.y < regY + regH * 0.42 &&
+            /^(?:mob|mod|mobile|phone|contact|tel|cell|ono)$/i.test(clean)) {
+          const prevWord = line[wi - 1];
+          if (prevWord && /smart|feature|cell|mobile|charger|battery/i.test(prevWord.text)) continue;
+
+          let refWord = w;
+          const nextW = line[wi + 1];
+          if (nextW && /^(?:no|num|nos)$/i.test(nextW.text.toLowerCase().replace(/[^a-z]/g, ''))) {
+            refWord = nextW;
+          }
+          if (line[wi + 1] && /^[:\-\.]$/.test(line[wi + 1].text.trim())) {
+            refWord = line[wi + 1];
+          }
+          const startX = refWord.bbox.x + refWord.bbox.width + 4;
+          const limitRight = regX + regW * 0.85;
+          const subsequent = getSubsequent(startX).filter(sw => sw.bbox.x < limitRight);
+          let valW = Math.round(regW * 0.60);
+          if (subsequent.length > 0) {
+            const maxRight = Math.max(...subsequent.map(sw => sw.bbox.x + sw.bbox.width));
+            valW = Math.max(valW, maxRight - startX + 10);
+          }
+          valW = Math.min(limitRight - startX, valW);
+
+          anchors.push({
+            type: 'phone',
+            text: 'Mobile Number (Handwritten Field)',
+            confidence: 0.98,
+            decision: 'REDACT',
+            reason: 'form_field_anchor:phone',
+            bbox: {
+              x: startX,
+              y: Math.max(regY + 2, refWord.bbox.y - 4),
+              width: Math.max(80, valW),
+              height: Math.max(refWord.bbox.height + 10, 28)
+            }
+          });
+          foundMob = true;
+        }
+
+        // ── Anchor 3: IMEI / Serial No ──
+        if (!foundImei && /^(?:imei|ime|ime!|me!|serial|sr|sl)$/i.test(clean)) {
+          let refWord = w;
+          const nextW = line[wi + 1];
+          if (nextW && /^(?:no|num|nos)$/i.test(nextW.text.toLowerCase().replace(/[^a-z]/g, ''))) {
+            refWord = nextW;
+          }
+          const startX = refWord.bbox.x + refWord.bbox.width + 4;
+          const limitRight = regX + regW * 0.72;
+          const subsequent = getSubsequent(startX).filter(sw => sw.bbox.x < limitRight);
+          let valW = Math.round(regW * 0.50);
+          if (subsequent.length > 0) {
+            const maxRight = Math.max(...subsequent.map(sw => sw.bbox.x + sw.bbox.width));
+            valW = Math.max(valW, maxRight - startX + 10);
+          }
+          valW = Math.min(limitRight - startX, valW);
+
+          anchors.push({
+            type: 'device_id',
+            text: 'Device IMEI (Handwritten Field)',
+            confidence: 0.98,
+            decision: 'REDACT',
+            reason: 'form_field_anchor:imei',
+            bbox: {
+              x: startX,
+              y: Math.max(regY + 2, refWord.bbox.y - 4),
+              width: Math.max(80, valW),
+              height: Math.max(refWord.bbox.height + 10, 28)
+            }
+          });
+          foundImei = true;
+        }
+
+        // ── Anchor 4: Signature ──
+        if (!foundSignature && (/signature|signatory|bugnacure|bgnarure/i.test(clean) || (clean === 'sign' && line.length <= 4))) {
+          if (w.bbox.x > regX + regW * 0.5 && w.bbox.y > regY + regH * 0.70) {
+            const sigX = Math.max(regX + Math.round(regW * 0.68), w.bbox.x - 30);
+            const sigY = Math.max(regY + Math.round(regH * 0.82), w.bbox.y - 50);
+            const sigW = Math.min(rightEdge - sigX, Math.round(regW * 0.29));
+            anchors.push({
+              type: 'signature',
+              text: 'Authorized Signature Ink',
+              confidence: 0.95,
+              decision: 'REDACT',
+              reason: 'form_field_anchor:signature',
+              bbox: { x: sigX, y: sigY, width: Math.max(90, sigW), height: 58 }
+            });
+            foundSignature = true;
+          }
+        }
+      }
+    }
+
+    // ── Form Structure Fallback (when labels are faint on printed receipt) ──
+    if (isInvoiceOrForm) {
+      if (!foundName) {
+        const nameX = regX + Math.round(regW * 0.17);
+        const nameY = regY + Math.round(regH * 0.27);
+        const nameW = Math.round(regW * 0.62);
+        anchors.push({
+          type: 'name',
+          text: 'Customer Name Field (Form Region)',
+          confidence: 0.96,
+          decision: 'REDACT',
+          reason: 'form_field_anchor:name_slot',
+          bbox: { x: nameX, y: nameY, width: nameW, height: 26 }
+        });
+      }
+
+      if (!foundMob) {
+        const mobX = regX + Math.round(regW * 0.18);
+        const mobY = regY + Math.round(regH * 0.32);
+        const mobW = Math.round(regW * 0.63);
+        anchors.push({
+          type: 'phone',
+          text: 'Mobile Number Field (Form Region)',
+          confidence: 0.96,
+          decision: 'REDACT',
+          reason: 'form_field_anchor:phone_slot',
+          bbox: { x: mobX, y: mobY, width: mobW, height: 28 }
+        });
+      }
+
+      if (!foundImei) {
+        const imeiX = regX + Math.round(regW * 0.28);
+        const imeiY = regY + Math.round(regH * 0.47);
+        const imeiW = Math.round(regW * 0.54);
+        anchors.push({
+          type: 'device_id',
+          text: 'IMEI / Serial Field (Form Region)',
+          confidence: 0.96,
+          decision: 'REDACT',
+          reason: 'form_field_anchor:imei_slot',
+          bbox: { x: imeiX, y: imeiY, width: imeiW, height: 28 }
+        });
+      }
+
+      if (!foundSignature) {
+        const sigX = regX + Math.round(regW * 0.68);
+        const sigY = regY + Math.round(regH * 0.84);
+        const sigW = Math.round(regW * 0.29);
+        anchors.push({
+          type: 'signature',
+          text: 'Signature Ink (Form Region)',
+          confidence: 0.95,
+          decision: 'REDACT',
+          reason: 'form_field_anchor:signature_slot',
+          bbox: { x: sigX, y: sigY, width: sigW, height: 58 }
+        });
+      }
+    }
+
+    return anchors;
+  }
+
+  /**
+   * Processes selected regions for OCR and applies the shared PII detector.
    */
   async function processRegions(screenshotDataUrl, regions, mapper) {
-    if (regions.length === 0) return [];
+    if (!regions || regions.length === 0) {
+      return { detections: [], rawText: '', words: [], itemsForNER: [] };
+    }
 
-    // Simple queue/mutex
     while (isProcessing) {
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
     isProcessing = true;
 
     try {
       await initialize();
-      if (!worker) return [];
+      if (!worker) return { detections: [], rawText: '', words: [], itemsForNER: [] };
 
       const allOcrDetections = [];
       let fullRawText = '';
-      console.log(`[OCR] Starting processing for ${regions.length} selected regions`);
-
       const allWords = [];
+      const itemsForNER = [];
 
       for (let i = 0; i < regions.length; i++) {
         const region = regions[i];
         const rId = region.regionId || `region_${i}`;
-        
-        // Map the region's CSS bbox to screenshot pixels
+
         const rawMapped = mapper.mapBbox(region.bbox);
         const screenshotBbox = {
           x: Math.max(0, Math.round(rawMapped.x)),
@@ -510,30 +694,11 @@ Privamon.OCREngine = (() => {
           height: Math.round(rawMapped.height),
         };
 
-        // Skip if region is too small after mapping
-        if (screenshotBbox.width < 20 || screenshotBbox.height < 10) {
-            console.log(`[OCR][${rId}][REJECTED] Reason: mapped_size_too_small, bbox: ${screenshotBbox.width}x${screenshotBbox.height}`);
-            continue;
-        }
+        if (screenshotBbox.width < 20 || screenshotBbox.height < 10) continue;
 
-        console.log(`[OCR][${rId}][CROP] CSS: ${Math.round(region.bbox.x)},${Math.round(region.bbox.y)} ${Math.round(region.bbox.width)}x${Math.round(region.bbox.height)} | Screenshot: ${screenshotBbox.x},${screenshotBbox.y} ${screenshotBbox.width}x${screenshotBbox.height} | ScaleX: ${mapper.info.scaleX.toFixed(3)}, ScaleY: ${mapper.info.scaleY.toFixed(3)}`);
+        const cropDataUrl = await Privamon.Redactor.extractRegion(screenshotDataUrl, screenshotBbox);
+        const ocrResults = await recognizeRegion(cropDataUrl, screenshotBbox);
 
-        const tStartExtract = performance.now();
-        // Extract the region from the screenshot
-        const regionDataUrl = await Privamon.Redactor.extractRegion(
-          screenshotDataUrl,
-          screenshotBbox
-        );
-        const tExtract = Math.round(performance.now() - tStartExtract);
-
-        const tStartRecognize = performance.now();
-        // Run OCR
-        const ocrResults = await recognizeRegion(regionDataUrl, screenshotBbox);
-        const tRecognize = Math.round(performance.now() - tStartRecognize);
-        
-        console.log(`[OCR][${rId}][TESSERACT] words=${ocrResults.length} in ${tRecognize}ms (extract: ${tExtract}ms)`);
-
-        // Collect all recognized words for debugging & visualization
         for (const w of ocrResults) {
           allWords.push({
             text: w.text,
@@ -543,71 +708,73 @@ Privamon.OCREngine = (() => {
           });
         }
 
-        const tStartPii = performance.now();
-        
-        // Reconstruct coherent text and word tokens preserving layout & lines
         const { text: regionText, tokens: tokenList } = buildTextAndTokens(ocrResults);
-        let tPiiEnd = tStartPii;
-        
+
         if (regionText.trim()) {
           fullRawText += `\n--- Region ${rId} ---\n${regionText}\n`;
-          console.log(`[OCR][${rId}][TEXT] "${regionText.replace(/\n/g, '\\n')}"`);
-          // Query Python PII engine (Presidio + GLiNER) with fallback to JS detector
-          const piiDetections = await Privamon.PIIDetector.detectAsync(regionText, 'ocr', '', tokenList);
-          tPiiEnd = performance.now();
-          console.log(`[OCR][${rId}][PII_DETECTION] found=${piiDetections.length} in ${Math.round(tPiiEnd - tStartPii)}ms`);
-          
-          const tStartMatching = performance.now();
 
-          for (const pii of piiDetections) {
-            // If already enriched with bounding boxes by the engine
-            if (pii.bbox) {
-              allOcrDetections.push({
-                ...pii,
-                source: 'ocr',
-                tokens: pii.tokens || [],
-                boxes: pii.boxes || [pii.bbox],
-                coordinateSpace: 'screenshot' // In screenshot pixels
-              });
-              continue;
-            }
+          // Track for NER batching
+          itemsForNER.push({
+            text: regionText,
+            tokens: tokenList,
+            source: 'ocr',
+            bbox: screenshotBbox,
+            coordinateSpace: 'screenshot'
+          });
 
-            // Fallback JS span mapping if bbox wasn't provided
-            const spanStart = pii.span ? pii.span.start : (pii.start ?? -1);
-            const spanEnd = pii.span ? pii.span.end : (pii.end ?? -1);
-            if (spanStart === -1 || spanEnd === -1) continue;
+          // Feed into shared PII detector (same rules as DOM)
+          const piiMatches = Privamon.PIIDetector.detectPII(regionText, '', 'ocr');
 
-            const mappedBoxes = mapSpanToBoxes(spanStart, spanEnd, tokenList);
+          for (const match of piiMatches) {
+            const mappedBoxes = mapSpanToBoxes(match.span.start, match.span.end, tokenList);
             if (mappedBoxes.bbox) {
-              allOcrDetections.push({
-                ...pii,
+              allOcrDetections.push(Privamon.PIIDetector.toCandidate({
+                type: match.type,
                 source: 'ocr',
-                tokens: mappedBoxes.tokens || [],
+                text: match.text,
                 bbox: mappedBoxes.bbox,
                 boxes: mappedBoxes.boxes,
+                tokens: mappedBoxes.tokens,
+                confidence: match.confidence,
+                reason: `ocr_regex:${match.patternName}${match.checksumValidated ? ':checksum_valid' : ''}`,
                 coordinateSpace: 'screenshot'
-              });
+              }));
             }
           }
-          console.log(`[OCR][${rId}] PII matching END: ${Math.round(performance.now() - tStartMatching)} ms`);
-        } else {
-            console.log(`[OCR][${rId}] Empty OCR text — skipping PII detection.`);
+        }
+
+        // Form field anchor detection (handles handwritten cursive names, phones, IMEIs, and signatures)
+        const formAnchors = detectFormFieldAnchors(ocrResults, screenshotBbox);
+        for (const anchor of formAnchors) {
+          allOcrDetections.push(Privamon.PIIDetector.toCandidate({
+            type: anchor.type,
+            source: 'ocr',
+            text: anchor.text,
+            bbox: anchor.bbox,
+            boxes: [anchor.bbox],
+            tokens: [],
+            confidence: anchor.confidence,
+            decision: anchor.decision || 'REDACT',
+            reason: anchor.reason,
+            coordinateSpace: 'screenshot'
+          }));
         }
       }
 
-      return { detections: allOcrDetections, rawText: fullRawText, words: allWords };
+      return {
+        detections: allOcrDetections,
+        rawText: fullRawText,
+        words: allWords,
+        itemsForNER
+      };
     } finally {
       isProcessing = false;
     }
   }
 
-  /**
-   * Cleanup the worker when done.
-   */
   function terminate() {
     if (worker) {
-      // Fire and forget termination - don't await because a stuck worker hangs the Promise forever
-      worker.terminate().catch(err => console.warn('Worker terminate error:', err));
+      worker.terminate().catch(() => {});
       worker = null;
       isInitialized = false;
       initPromise = null;

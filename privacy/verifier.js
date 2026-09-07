@@ -1,147 +1,123 @@
 /**
  * Privamon — Redaction Verifier
  *
- * Post-redaction verification: checks that sensitive content is actually
- * hidden after redaction. Re-runs PII detection on redacted regions.
- *
- * If PII is still detected in a redacted area, expands the redaction
- * and re-applies it.
- *
- * Principle: Never assume redaction succeeded just because a bbox was drawn.
+ * Implements strict post-redaction pixel auditing:
+ *   - Re-inspects every redacted bounding box directly via getImageData
+ *   - Verifies that all pixels within the bounding box are strictly opaque black (R=0, G=0, B=0, A=255)
+ *   - Expands dirty boxes by 25% in each direction and re-fills with #000000
+ *   - Caps expansions at 3 retries; logs audit warnings if verification fails
+ *   - Tracks reRedactedCount and verificationPassed
  */
-var Privamon = Privamon || {};
+var Privamon = (typeof window !== 'undefined' && window.Privamon)
+            || (typeof globalThis !== 'undefined' && globalThis.Privamon)
+            || (typeof self !== 'undefined' && self.Privamon)
+            || {};
+if (typeof window !== 'undefined') window.Privamon = Privamon;
+if (typeof globalThis !== 'undefined') globalThis.Privamon = Privamon;
+if (typeof self !== 'undefined') self.Privamon = Privamon;
 
 Privamon.Verifier = (() => {
   'use strict';
 
-  // How much to expand a bbox if verification fails (fraction of original size)
-  const EXPAND_FACTOR = 0.25;
-
-  // Maximum verification rounds to prevent infinite loops
-  const MAX_ROUNDS = 2;
+  const MAX_EXPANSION_RETRIES = 3;
+  const EXPANSION_FACTOR = 0.25; // 25% overall size expansion (12.5% on each side)
 
   /**
-   * Verify that redaction was successful.
+   * Checks whether a rectangular region on a canvas 2D context contains ONLY opaque black pixels.
    *
-   * @param {string} sanitizedDataUrl - The redacted screenshot
-   * @param {Array} redactedRegions - Regions that were redacted (from Redactor)
-   * @param {Object} options
-   * @param {boolean} [options.useOcr=false] - Whether OCR is available for verification
-   * @returns {Promise<Object>} { verified, failedRegions, sanitizedDataUrl }
+   * @param {CanvasRenderingContext2D} ctx
+   * @param {number} x
+   * @param {number} y
+   * @param {number} width
+   * @param {number} height
+   * @returns {boolean} true if 100% opaque black, false otherwise
    */
-  async function verify(sanitizedDataUrl, redactedRegions, options = {}) {
-    const failedRegions = [];
+  function isRegionCleanBlack(ctx, x, y, width, height) {
+    if (width <= 0 || height <= 0) return true;
 
-    for (const region of redactedRegions) {
-      // Extract the redacted area from the sanitized image
-      try {
-        const regionDataUrl = await Privamon.Redactor.extractRegion(
-          sanitizedDataUrl,
-          region.bbox
-        );
-
-        // Check if the region is actually opaque/blank
-        const isBlank = await isRegionBlank(regionDataUrl, region.bbox);
-
-        const tokenStr = (region.tokens && region.tokens.length > 0) ? region.tokens.join(', ') : 'none';
-        console.log(`[VERIFIER][TRACE] PII: ${region.type} "${region.text || ''}" | Source: ${region.source} | Tokens: [${tokenStr}] | Box: ${region.bbox.x},${region.bbox.y} ${region.bbox.width}x${region.bbox.height} | Status: ${isBlank ? 'PASS' : 'FAIL'}`);
-
-        if (!isBlank) {
-          failedRegions.push({
-            ...region,
-            failReason: 'Region not fully opaque after redaction',
-          });
-        }
-      } catch (err) {
-        // If extraction fails, the region might be at image edges — acceptable
-        console.warn('[Verifier] Region extraction failed:', err.message);
-      }
-    }
-
-    // If any regions failed, expand and re-redact
-    if (failedRegions.length > 0 && options.reRedact !== false) {
-      console.warn(`[Verifier] ${failedRegions.length} regions failed verification. Expanding...`);
-
-      const expandedDetections = failedRegions.map(region => ({
-        ...region,
-        bbox: expandBbox(region.bbox, EXPAND_FACTOR),
-      }));
-
-      const reRedacted = await Privamon.Redactor.redact(
-        sanitizedDataUrl,
-        expandedDetections,
-        { padding: 8 } // Extra padding for re-redaction
-      );
-
-      return {
-        verified: false,
-        failedRegions,
-        sanitizedDataUrl: reRedacted.sanitizedDataUrl,
-        reRedacted: true,
-      };
-    }
-
-    return {
-      verified: true,
-      failedRegions: [],
-      sanitizedDataUrl,
-      reRedacted: false,
-    };
-  }
-
-  /**
-   * Check if a region is blank (all same color, i.e., properly redacted).
-   *
-   * @param {string} regionDataUrl - The region image
-   * @param {Object} bbox - The region's bbox
-   * @returns {Promise<boolean>}
-   */
-  async function isRegionBlank(regionDataUrl, bbox) {
-    const img = await Privamon.Redactor.loadImage(regionDataUrl);
-    const canvas = document.createElement('canvas');
-    canvas.width = img.width;
-    canvas.height = img.height;
-    const ctx = canvas.getContext('2d');
-    ctx.drawImage(img, 0, 0);
-
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const data = imageData.data;
-
-    if (data.length < 4) return true;
-
-    // Check if all pixels are the same color (within tolerance)
-    const r0 = data[0], g0 = data[1], b0 = data[2];
-    const tolerance = 5;
-
-    // Sample pixels (checking every pixel is expensive for large regions)
-    const step = Math.max(1, Math.floor(data.length / (4 * 200))); // ~200 samples
-
-    for (let i = 0; i < data.length; i += 4 * step) {
-      if (
-        Math.abs(data[i] - r0) > tolerance ||
-        Math.abs(data[i + 1] - g0) > tolerance ||
-        Math.abs(data[i + 2] - b0) > tolerance
-      ) {
+    const data = ctx.getImageData(x, y, width, height).data;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] !== 0 || data[i + 1] !== 0 || data[i + 2] !== 0 || data[i + 3] !== 255) {
         return false;
       }
     }
-
     return true;
   }
 
   /**
-   * Expand a bounding box by a fraction of its size.
+   * Verifies all redacted bounding boxes on the sanitized canvas.
+   * Expands and re-fills any region where original pixel data survives.
+   *
+   * @param {HTMLCanvasElement} canvas - The canvas containing the redacted screenshot
+   * @param {CanvasRenderingContext2D} ctx - Context of the canvas
+   * @param {Array<Object>} redactedRegions - List of regions that were redacted
+   * @returns {Object} { verified, verificationPassed, reRedactedCount, warnings, sanitizedDataUrl }
    */
-  function expandBbox(bbox, factor) {
-    const dx = Math.round(bbox.width * factor);
-    const dy = Math.round(bbox.height * factor);
+  function verify(canvas, ctx, redactedRegions = []) {
+    const warnings = [];
+    let reRedactedCount = 0;
+    let anyExpanded = false;
+
+    for (let idx = 0; idx < redactedRegions.length; idx++) {
+      const region = redactedRegions[idx];
+      let { x, y, width, height } = region.bbox;
+
+      // Clamp initial coordinates
+      x = Math.max(0, Math.min(Math.round(x), canvas.width - 1));
+      y = Math.max(0, Math.min(Math.round(y), canvas.height - 1));
+      width = Math.min(Math.round(width), canvas.width - x);
+      height = Math.min(Math.round(height), canvas.height - y);
+
+      if (width <= 0 || height <= 0) continue;
+
+      let clean = isRegionCleanBlack(ctx, x, y, width, height);
+
+      if (!clean) {
+        reRedactedCount++;
+        anyExpanded = true;
+        let retries = 0;
+
+        while (!clean && retries < MAX_EXPANSION_RETRIES) {
+          retries++;
+
+          // Expand 25% in each direction
+          const deltaW = width * (EXPANSION_FACTOR / 2);
+          const deltaH = height * (EXPANSION_FACTOR / 2);
+
+          x = Math.max(0, Math.round(x - deltaW));
+          y = Math.max(0, Math.round(y - deltaH));
+          width = Math.min(canvas.width - x, Math.round(width * (1 + EXPANSION_FACTOR)));
+          height = Math.min(canvas.height - y, Math.round(height * (1 + EXPANSION_FACTOR)));
+
+          // Re-fill expanded bounding box
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(x, y, width, height);
+
+          clean = isRegionCleanBlack(ctx, x, y, width, height);
+        }
+
+        if (!clean) {
+          warnings.push(`box #${idx + 1} (${region.type || 'PII'}) failed verification after ${MAX_EXPANSION_RETRIES} expansions`);
+        } else {
+          // Update region bbox with expanded clean dimensions
+          region.bbox = { x, y, width, height };
+        }
+      }
+    }
+
+    const verificationPassed = (warnings.length === 0);
+
     return {
-      x: Math.max(0, bbox.x - dx),
-      y: Math.max(0, bbox.y - dy),
-      width: bbox.width + 2 * dx,
-      height: bbox.height + 2 * dy,
+      verified: verificationPassed,
+      verificationPassed,
+      reRedactedCount,
+      warnings,
+      sanitizedDataUrl: anyExpanded ? canvas.toDataURL('image/png') : null
     };
   }
 
-  return { verify };
+  return {
+    verify,
+    isRegionCleanBlack
+  };
 })();

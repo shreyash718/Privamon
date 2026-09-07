@@ -10,7 +10,13 @@
  * - Multi-rect wrapped text across line breaks (preserves distinct per-line rectangles)
  * - Word tokenization with stable DOM token IDs
  */
-var Privamon = Privamon || {};
+var Privamon = (typeof window !== 'undefined' && window.Privamon)
+            || (typeof globalThis !== 'undefined' && globalThis.Privamon)
+            || (typeof self !== 'undefined' && self.Privamon)
+            || {};
+if (typeof window !== 'undefined') window.Privamon = Privamon;
+if (typeof globalThis !== 'undefined') globalThis.Privamon = Privamon;
+if (typeof self !== 'undefined') self.Privamon = Privamon;
 
 Privamon.DOMRangeMapper = (() => {
   'use strict';

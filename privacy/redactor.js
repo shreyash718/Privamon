@@ -1,128 +1,108 @@
 /**
- * Privamon — Redactor
+ * Privamon — Canvas Redactor
  *
- * Canvas-based redaction: draws opaque black rectangles over sensitive regions.
+ * Implements client-side visual redaction by rasterizing opaque black rectangles (#000000)
+ * over all confirmed sensitive bounding boxes on a clean offscreen canvas.
  *
  * Principles:
- *   - Only redact identified PII regions
- *   - Preserve all non-sensitive visual context
- *   - Use opaque fill (not blur — blur is reversible)
- *   - Configurable padding to prevent edge leakage
- *   - Maximum privacy with minimum visual information loss
+ *   - Creates a fresh dedicated canvas so the original screenshot is preserved for side-by-side UI
+ *   - Solid fill only: blur/pixelate is strictly prohibited (reversible via deconvolution)
+ *   - Only items with explicit decision === 'REDACT' are drawn
+ *   - Exports to Data URL once all boxes are rendered for maximum throughput
  */
-var Privamon = Privamon || {};
+var Privamon = (typeof window !== 'undefined' && window.Privamon)
+            || (typeof globalThis !== 'undefined' && globalThis.Privamon)
+            || (typeof self !== 'undefined' && self.Privamon)
+            || {};
+if (typeof window !== 'undefined') window.Privamon = Privamon;
+if (typeof globalThis !== 'undefined') globalThis.Privamon = Privamon;
+if (typeof self !== 'undefined') self.Privamon = Privamon;
 
 Privamon.Redactor = (() => {
   'use strict';
 
-  // Default padding (screenshot pixels) around each bbox to prevent leakage
-  const DEFAULT_PADDING = 4;
-
-  // Redaction fill color
-  const REDACT_COLOR = '#000000';
+  const REDACT_FILL_COLOR = '#000000';
+  const DEFAULT_SAFETY_PADDING = 2; // px padding to prevent font antialiasing bleed
 
   /**
-   * Redact sensitive regions on a screenshot.
-   *
-   * @param {string} screenshotDataUrl - The raw screenshot as a data URL
-   * @param {Array} detections - Detections with .bbox in screenshot pixel coordinates
-   * @param {Object} options
-   * @param {number} [options.padding=4] - Padding in px around each bbox
-   * @param {string} [options.fillColor='#000000'] - Redaction fill color
-   * @returns {Promise<Object>} { sanitizedDataUrl, redactedRegions }
+   * Loads an image from a data URL into an HTMLImageElement.
    */
-  async function redact(screenshotDataUrl, detections, options = {}) {
-    const padding = options.padding ?? DEFAULT_PADDING;
-    const fillColor = options.fillColor || REDACT_COLOR;
+  function loadImage(dataUrl) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('Failed to load image for redaction'));
+      img.src = dataUrl;
+    });
+  }
 
-    // Load the screenshot into an Image
+  /**
+   * Redacts sensitive regions onto a new clean canvas.
+   *
+   * @param {string} screenshotDataUrl - The raw screenshot data URL
+   * @param {Array<Object>} candidates - DetectionCandidate array (only decision === 'REDACT' are drawn)
+   * @param {Object} [options={}] - Options { padding }
+   * @returns {Promise<Object>} { canvas, ctx, sanitizedDataUrl, redactedRegions, dimensions }
+   */
+  async function redact(screenshotDataUrl, candidates = [], options = {}) {
+    const padding = options.padding ?? DEFAULT_SAFETY_PADDING;
     const img = await loadImage(screenshotDataUrl);
 
-    // Create canvas at screenshot's native resolution
+    // Create a new canvas at native screenshot resolution
     const canvas = document.createElement('canvas');
     canvas.width = img.width;
     canvas.height = img.height;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    // Draw the original screenshot
+    // Draw the clean base screenshot
     ctx.drawImage(img, 0, 0);
 
-    // Apply redaction to each detection bbox
-    ctx.fillStyle = fillColor;
+    ctx.fillStyle = REDACT_FILL_COLOR;
     const redactedRegions = [];
 
-    for (const detection of detections) {
-      // INVARIANT: The redactor MUST ONLY process items with explicit decision === 'REDACT'
-      if (detection.decision !== 'REDACT') {
-        continue;
-      }
-      if (!detection.bbox && (!detection.boxes || detection.boxes.length === 0)) continue;
+    // Filter only candidates confirmed for redaction
+    const redactList = candidates.filter(c => c && c.decision === 'REDACT' && c.bbox);
 
-      const targetBoxes = (detection.boxes && detection.boxes.length > 0) ? detection.boxes : [detection.bbox];
+    for (const candidate of redactList) {
+      const boxesToDraw = (candidate.boxes && candidate.boxes.length > 0)
+        ? candidate.boxes
+        : [candidate.bbox];
 
-      for (const box of targetBoxes) {
-        if (!box) continue;
-        const { x, y, width, height } = box;
+      for (const box of boxesToDraw) {
+        if (!box || box.width <= 0 || box.height <= 0) continue;
 
-        // Apply padding, clamped to canvas bounds
-        const isFace = (detection.type === 'face');
-        const effectivePadding = isFace
-          ? Math.max(4, Math.round(Math.min(width, height) * 0.03))
-          : padding;
-
-        const rx = Math.max(0, x - effectivePadding);
-        const ry = Math.max(0, y - effectivePadding);
-        const rw = Math.min(canvas.width - rx, width + 2 * effectivePadding);
-        const rh = Math.min(canvas.height - ry, height + 2 * effectivePadding);
+        // Apply safety padding clamped to canvas boundaries
+        const rx = Math.max(0, Math.round(box.x - padding));
+        const ry = Math.max(0, Math.round(box.y - padding));
+        const rw = Math.min(canvas.width - rx, Math.round(box.width + 2 * padding));
+        const rh = Math.min(canvas.height - ry, Math.round(box.height + 2 * padding));
 
         if (rw <= 0 || rh <= 0) continue;
 
         ctx.fillRect(rx, ry, rw, rh);
 
         redactedRegions.push({
-          type: detection.type,
-          text: detection.text || '',
-          source: detection.source || 'unknown',
-          tokens: detection.tokens || [],
-          confidence: detection.confidence,
+          ...candidate,
           bbox: { x: rx, y: ry, width: rw, height: rh },
-          originalBbox: box,
-          boxes: detection.boxes || [box],
+          originalBbox: { ...box }
         });
       }
     }
 
-    // Export sanitized screenshot
+    // Export single PNG Data URL after all boxes are rendered
     const sanitizedDataUrl = canvas.toDataURL('image/png');
 
     return {
+      canvas,
+      ctx,
       sanitizedDataUrl,
       redactedRegions,
-      dimensions: { width: canvas.width, height: canvas.height },
+      dimensions: { width: canvas.width, height: canvas.height }
     };
   }
 
   /**
-   * Load an image from a data URL.
-   * @param {string} dataUrl
-   * @returns {Promise<HTMLImageElement>}
-   */
-  function loadImage(dataUrl) {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => resolve(img);
-      img.onerror = (e) => reject(new Error('Failed to load screenshot image'));
-      img.src = dataUrl;
-    });
-  }
-
-  /**
-   * Extract a rectangular region from the screenshot as a separate data URL.
-   * Useful for OCR/Vision on specific regions.
-   *
-   * @param {string} screenshotDataUrl
-   * @param {Object} bbox - { x, y, width, height } in screenshot pixels
-   * @returns {Promise<string>} Region as data URL
+   * Crops a region from a screenshot onto an offscreen canvas.
    */
   async function extractRegion(screenshotDataUrl, bbox) {
     const img = await loadImage(screenshotDataUrl);
@@ -136,14 +116,14 @@ Privamon.Redactor = (() => {
     canvas.height = rh;
     const ctx = canvas.getContext('2d');
 
-    ctx.drawImage(
-      img,
-      rx, ry, rw, rh,
-      0, 0, rw, rh
-    );
-
+    ctx.drawImage(img, rx, ry, rw, rh, 0, 0, rw, rh);
     return canvas.toDataURL('image/png');
   }
 
-  return { redact, extractRegion, loadImage };
+  return {
+    redact,
+    extractRegion,
+    loadImage,
+    REDACT_FILL_COLOR
+  };
 })();

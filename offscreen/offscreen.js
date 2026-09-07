@@ -11,6 +11,12 @@
 
   // Listen for messages from the background service worker
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Health / Ready check from background service worker
+    if (message.action === 'pingOffscreen') {
+      sendResponse({ ready: true, timestamp: Date.now() });
+      return false;
+    }
+
     if (message.action !== 'runPipeline') return;
 
     // Acknowledge receipt immediately so message channel closes cleanly
@@ -33,6 +39,11 @@
         });
       });
   });
+
+  // Announce ready state
+  try {
+    chrome.runtime.sendMessage({ type: 'offscreenReady' }).catch(() => {});
+  } catch (e) {}
 
   /**
    * Handle the pipeline execution.

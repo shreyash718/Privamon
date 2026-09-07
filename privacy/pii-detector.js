@@ -1,67 +1,77 @@
 /**
- * Privamon — PII Detector
+ * Privamon — PII Detector (100% In-Browser, Zero-Server)
  *
- * Detects Personally Identifiable Information (PII) in text using:
- *   A) HTML semantic analysis (input types, autocomplete, name attributes)
- *   B) Regex-based pattern matching with context boosting and negative prefix suppression
- *   C) High-accuracy local ML/NLP engine bridge (Presidio + GLiNER) via detectAsync()
+ * Implements multi-modal client-side PII detection across:
+ *   1. DOM Semantic Analysis (<input>, <textarea>, autocomplete, sensitive keywords)
+ *   2. Shared High-Performance Regex Matching with Luhn & Verhoeff algorithmic checksums
+ *   3. Context-aware confidence boosting and false-positive negative prefix filtering
  *
- * Each detection produces:
- *   { type, text, confidence, span: {start, end}, source: 'dom'|'ocr', bbox?, boxes? }
+ * All detectors produce normalized `DetectionCandidate` objects via `toCandidate()`.
  */
-var Privamon = Privamon || {};
+var Privamon = (typeof window !== 'undefined' && window.Privamon)
+            || (typeof globalThis !== 'undefined' && globalThis.Privamon)
+            || (typeof self !== 'undefined' && self.Privamon)
+            || {};
+if (typeof window !== 'undefined') window.Privamon = Privamon;
+if (typeof globalThis !== 'undefined') globalThis.Privamon = Privamon;
+if (typeof self !== 'undefined') self.Privamon = Privamon;
 
 Privamon.PIIDetector = (() => {
   'use strict';
 
-  const LOCAL_ENGINE_URL = 'http://127.0.0.1:8765/detect';
-  const LOCAL_ENGINE_BATCH_URL = 'http://127.0.0.1:8765/detect/batch';
-  const LOCAL_ENGINE_HEALTH_URL = 'http://127.0.0.1:8765/health';
-  const ENGINE_TIMEOUT_MS = 3000;
-
-  let lastEngineHealth = {
-    checked: false,
-    online: false,
-    glinerReady: false,
-    presidioReady: false,
-    error: null
-  };
-
+  // ── Universal Candidate Factory ──
   /**
-   * Ping the local backend engine to verify server, Presidio, and GLiNER availability.
+   * Normalizes any detection from DOM, OCR, Vision, or NER into the unified DetectionCandidate contract.
    */
-  async function checkEngineHealth() {
-    try {
-      const resp = await fetch(LOCAL_ENGINE_HEALTH_URL, { signal: AbortSignal.timeout(1500) });
-      if (resp.ok) {
-        const data = await resp.json();
-        lastEngineHealth = {
-          checked: true,
-          online: true,
-          glinerReady: Boolean(data.gliner_ready),
-          presidioReady: Boolean(data.presidio_ready),
-          error: null
-        };
-        return lastEngineHealth;
-      }
-      throw new Error(`HTTP ${resp.status}`);
-    } catch (err) {
-      lastEngineHealth = {
-        checked: true,
-        online: false,
-        glinerReady: false,
-        presidioReady: false,
-        error: err.message
-      };
-      return lastEngineHealth;
-    }
+  function toCandidate({
+    type,
+    source = 'dom',
+    text = '',
+    originalValue = null,
+    bbox = null,
+    boxes = null,
+    tokens = [],
+    confidence = 0.5,
+    decision = null,
+    elementId = null,
+    reason = null,
+    coordinateSpace = 'screenshot'
+  }) {
+    const conf = Math.max(0, Math.min(1.0, Number(confidence) || 0.5));
+    const b = bbox ? {
+      x: Math.round(bbox.x),
+      y: Math.round(bbox.y),
+      width: Math.round(bbox.width),
+      height: Math.round(bbox.height)
+    } : null;
+
+    const bx = (boxes && boxes.length > 0)
+      ? boxes.map(box => ({
+          x: Math.round(box.x),
+          y: Math.round(box.y),
+          width: Math.round(box.width),
+          height: Math.round(box.height)
+        }))
+      : (b ? [b] : []);
+
+    return {
+      type: type || 'other',
+      source,
+      sources: [source],
+      text: text || '',
+      originalValue: originalValue || null,
+      bbox: b,
+      boxes: bx,
+      tokens: Array.isArray(tokens) ? [...tokens] : [],
+      confidence: conf,
+      decision: decision || null, // Will be classified in Fusion based on confidence thresholds
+      elementId: elementId || null,
+      reason: reason || `${source}:${type}`,
+      coordinateSpace: coordinateSpace || 'screenshot'
+    };
   }
 
-  function getEngineHealth() {
-    return lastEngineHealth;
-  }
-
-  // ── Verhoeff Checksum Tables (for Aadhaar validation) ──
+  // ── Verhoeff Checksum Algorithm (Indian Aadhaar validation) ──
   const VERHOEFF_D = [
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
     [1, 2, 3, 4, 0, 6, 7, 8, 9, 5],
@@ -88,7 +98,10 @@ Privamon.PIIDetector = (() => {
 
   function validateVerhoeff(numStr) {
     const digits = String(numStr).replace(/\D/g, '');
-    if (!digits) return false;
+    if (!digits || digits.length !== 12) return false;
+    // Aadhaar numbers do not start with 0 or 1
+    if (digits[0] === '0' || digits[0] === '1') return false;
+
     let c = 0;
     const reversed = digits.split('').reverse();
     for (let i = 0; i < reversed.length; i++) {
@@ -97,38 +110,18 @@ Privamon.PIIDetector = (() => {
     return c === 0;
   }
 
-  // ── Luhn Check for Credit Cards ──
-  function luhnCheck(text) {
-    const digits = text.replace(/[\s\-]/g, '');
-    if (digits.length < 13 || digits.length > 19) return false;
-    if (!/^\d+$/.test(digits)) return false;
-
-    let sum = 0;
-    let isEven = false;
-    for (let i = digits.length - 1; i >= 0; i--) {
-      let digit = parseInt(digits[i], 10);
-      if (isEven) {
-        digit *= 2;
-        if (digit > 9) digit -= 9;
-      }
-      sum += digit;
-      isEven = !isEven;
-    }
+  // ── Luhn Checksum Algorithm (Credit/Debit Cards) ──
+  function luhnValid(num) {
+    const clean = String(num).replace(/\D/g, '');
+    if (clean.length < 13 || clean.length > 19) return false;
+    const digits = clean.split('').reverse().map(Number);
+    const sum = digits.reduce((acc, d, i) =>
+      acc + (i % 2 ? ((d * 2 > 9) ? d * 2 - 9 : d * 2) : d), 0);
     return sum % 10 === 0;
   }
 
-  // ── Aadhaar Full Validation (Format + Verhoeff Checksum) ──
-  function aadhaarCheck(text) {
-    const digits = text.replace(/[\s\-]/g, '');
-    if (digits.length !== 12) return false;
-    if (!/^\d{12}$/.test(digits)) return false;
-    // Aadhaar does not start with 0 or 1
-    if (digits[0] === '0' || digits[0] === '1') return false;
-    return validateVerhoeff(digits);
-  }
-
   // ── Negative Prefix Context Filter ──
-  // Suppresses false positives where order IDs, invoices, tracking codes, or PIN codes resemble PII
+  // Suppresses false positives where order IDs, invoices, tracking codes, or pin codes resemble phone/card/aadhaar
   const NEGATIVE_PREFIX_REGEX = /(?:order\s*(?:id|#|no|num)?|invoice\s*(?:id|#|no|num)?|tracking\s*(?:id|#|no|num)?|product\s*(?:code|id|#)?|item\s*(?:code|id|#|no)?|sku\s*(?:#|no)?|pin\s*(?:code)?|pincode|postal\s*(?:code)?|zip\s*(?:code)?)\s*[:#\-]?\s*$/i;
 
   function hasNegativePrefix(fullText, matchStart) {
@@ -137,155 +130,363 @@ Privamon.PIIDetector = (() => {
     return NEGATIVE_PREFIX_REGEX.test(preceding);
   }
 
-  // ── Regex Patterns ──
+  // ── Ordered Compiled Regex Patterns ──
+  // Compiled once and reused to minimize garbage collection & regex compile overhead
   const PATTERNS = [
     {
       name: 'email',
-      // OCR safe, ignores sentence trailing punctuation
       regex: /\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b/g,
       type: 'email',
       baseConfidence: 0.92,
-      validator: (text) => {
-        return !text.endsWith('.') && !text.endsWith(',') && text.includes('@');
-      }
+      validator: (text) => !text.endsWith('.') && !text.endsWith(',') && text.includes('@'),
+      checksum: false
     },
     {
-      name: 'upi_id',
-      regex: /\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}(?!\.[a-zA-Z])\b/gi,
-      type: 'financial',
+      name: 'credit_card',
+      regex: /\b(?:\d[ -]*?){13,19}\b/g,
+      type: 'creditCard',
+      baseConfidence: 0.75,
+      validator: (text, ctx) => {
+        if (ctx && /\b(?:imei|device|serial|sr\s*no)\b/i.test(ctx)) return false;
+        return luhnValid(text);
+      },
+      contextValidator: true,
+      checksum: true // Valid Luhn promotes to 1.0 confidence
+    },
+    {
+      name: 'aadhaar',
+      regex: /\b\d{4}\s?\d{4}\s?\d{4}\b/g,
+      type: 'aadhaar',
       baseConfidence: 0.85,
+      validator: validateVerhoeff,
+      checksum: true // Valid Verhoeff promotes to 1.0 confidence
+    },
+    {
+      name: 'pan',
+      regex: /\b[A-Z]{5}[0-9]{4}[A-Z]\b/g,
+      type: 'pan',
+      baseConfidence: 0.70, // No mathematical checksum; boosted via context keywords
       validator: (text) => {
-        const lower = text.toLowerCase();
-        const handles = ['okhdfcbank', 'okaxis', 'oksbi', 'okicici', 'paytm', 'ybl', 'ibl', 'axl', 'apl', 'upi', 'gpay', 'phonepe', 'barodampay', 'federal'];
-        const parts = lower.split('@');
-        if (parts.length !== 2) return false;
-        if (parts[1].includes('.')) return false; // Email domains contain dots, UPI handles don't
-        return handles.includes(parts[1]) || /^[a-zA-Z]{3,20}$/.test(parts[1]);
-      }
+        const clean = text.replace(/[\s\-]/g, '').toUpperCase();
+        if (clean.length !== 10) return false;
+        // 4th character indicates entity type in Indian tax system (P=Individual, C=Company, etc.)
+        return 'ABCFGHLJPT'.includes(clean[3]);
+      },
+      checksum: false
     },
     {
       name: 'phone_indian',
       regex: /\b(?:\+91[\s\-]?)?(?:\(?0?\)?[\s\-]?)?[6-9](?:\d[\s\-]?){9}\b/g,
       type: 'phone',
       baseConfidence: 0.80,
+      checksum: false
     },
     {
-      name: 'phone_intl',
-      regex: /\b(?:\+\d{1,3}[\s.\-]?)?\(?\d{3,4}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b/g,
+      name: 'phone_e164',
+      regex: /\b\+(?:[1-9]\d{0,2})[\s.\-]?(?:\(?\d{1,4}\)?[\s.\-]?)?\d{1,4}[\s.\-]?\d{1,4}[\s.\-]?\d{1,9}\b/g,
+      type: 'phone',
+      baseConfidence: 0.75,
+      checksum: false
+    },
+    {
+      name: 'phone_us_intl',
+      regex: /\b(?:\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}\b/g,
       type: 'phone',
       baseConfidence: 0.70,
+      checksum: false
     },
     {
-      name: 'credit_card',
-      regex: /\b(?:\d[\s\-]?){13,19}\b/g,
-      type: 'creditCard',
-      baseConfidence: 0.75,
-      validator: luhnCheck,
-    },
-    {
-      name: 'aadhaar',
-      regex: /\b(?:\d[\s\-]?){12}\b/g,
-      type: 'aadhaar',
-      baseConfidence: 0.85,
-      validator: aadhaarCheck,
-    },
-    {
-      name: 'pan',
-      regex: /\b(?:[A-Z][\s\-]*){5}(?:\d[\s\-]*){4}[A-Z]\b/gi,
-      type: 'pan',
-      baseConfidence: 0.85,
-      // PAN format: AAAAA9999A — 4th char indicates entity type
-      validator: (text) => {
-        const clean = text.replace(/[\s\-]/g, '').toUpperCase();
-        if (clean.length !== 10) return false;
-        const fourthChar = clean[3];
-        return 'ABCFGHLJPT'.includes(fourthChar);
-      },
-    },
-    {
-      name: 'driving_licence_indian',
-      regex: /\b[A-Z]{2}[-\s]?\d{2}[-\s]?(?:19|20)\d{2}[-\s]?\d{7}\b/gi,
-      type: 'id',
-      baseConfidence: 0.85,
-    },
-    {
-      name: 'voter_id_indian',
-      regex: /\b[A-Z]{3}[0-9]{7}\b/gi,
-      type: 'id',
-      baseConfidence: 0.85,
-    },
-    {
-      name: 'ip_address',
-      regex: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)[\s]*\.[\s]*){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
-      type: 'ip',
-      baseConfidence: 0.60,
-    },
-    {
-      name: 'passport_indian',
-      // Indian Passport: 1 letter (except Q, X, Z), 7 digits (first digit non-zero)
-      regex: /\b[A-PR-WYa-pr-wy][1-9]\d{6}\b/gi,
-      type: 'passport',
-      baseConfidence: 0.85,
-    },
-    {
-      name: 'ifsc_code',
-      // Indian Bank IFSC Code: 4 letters, '0', 6 alphanumeric
-      regex: /\b[A-Z]{4}0[A-Z0-9]{6}\b/gi,
+      name: 'upi_id',
+      regex: /\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}(?!\.[a-zA-Z])\b/g,
       type: 'financial',
       baseConfidence: 0.85,
+      validator: (text) => {
+        const lower = text.toLowerCase();
+        const handles = ['okhdfcbank', 'okaxis', 'oksbi', 'okicici', 'paytm', 'ybl', 'ibl', 'axl', 'apl', 'upi', 'gpay', 'phonepe', 'barodampay', 'federal'];
+        const parts = lower.split('@');
+        if (parts.length !== 2 || parts[1].includes('.')) return false;
+        return handles.includes(parts[1]) || /^[a-zA-Z]{3,20}$/.test(parts[1]);
+      },
+      checksum: false
+    },
+    {
+      name: 'ssn',
+      regex: /\b\d{3}-\d{2}-\d{4}\b/g,
+      type: 'ssn',
+      baseConfidence: 0.85,
+      validator: (text) => {
+        const parts = text.split('-');
+        if (parts[0] === '000' || parts[0] === '666' || parseInt(parts[0], 10) >= 900) return false;
+        if (parts[1] === '00' || parts[2] === '0000') return false;
+        return true;
+      },
+      checksum: false
     },
     {
       name: 'jwt_token',
       regex: /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g,
       type: 'apiToken',
       baseConfidence: 0.95,
+      checksum: false
     },
     {
       name: 'api_key',
-      regex: /\b(?:sk_live|pk_live|bearer|api_key)_[a-zA-Z0-9]+\b/gi,
+      regex: /\b(?:sk_live|pk_live|bearer|ghp|gho|glpat|xoxb|xoxp)_[a-zA-Z0-9_\-]{16,}\b/gi,
       type: 'apiToken',
       baseConfidence: 0.95,
+      checksum: false
     },
     {
-      name: 'otp',
-      regex: /\b\d{4,8}\b/g,
-      type: 'otp',
-      baseConfidence: 0.10, // Must be boosted by context
-    },
-    {
-      name: 'coordinates',
-      regex: /\b[-+]?(?:90(?:\.0{1,6})?|[1-8]?\d(?:\.\d{1,6})?)[,\s]+[-+]?(?:180(?:\.0{1,6})?|(?:1[0-7]\d|[1-9]?\d)(?:\.\d{1,6})?)\b/g,
-      type: 'location',
-      baseConfidence: 0.85,
+      name: 'ip_address',
+      regex: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
+      type: 'ip',
+      baseConfidence: 0.25, // Demoted to avoid false-positive [REVIEW] on printed amounts/dates without technical context
+      validator: (text, ctx) => {
+        const lowerCtx = (ctx || '').toLowerCase();
+        // Reject amounts, item numbers, rates, invoice tables, or phone figures mistakenly parsed with periods
+        if (/\b(?:total|amount|rate|qty|rs|inr|tax|gst|bill|price|particulars|subtotal|invoice|cgst|sgst|model|charger|battery|mob|name|date)\b/i.test(lowerCtx)) {
+          return false;
+        }
+        if (text.startsWith('0.') || text.startsWith('10.') || text.startsWith('13.') || text.endsWith('.0') || text === '0.0.0.0' || text === '255.255.255.255') {
+          return false;
+        }
+        // Require explicit networking context keyword to confirm it is truly an IP address
+        return /\b(?:server|host|ip|client|network|dns|proxy|interface|subnet|router|dhcp|tcp|udp)\b/i.test(lowerCtx);
+      },
+      contextValidator: true,
+      checksum: false
     },
     {
       name: 'dob',
       regex: /\b(?:0?[1-9]|[12]\d|3[01])[\/\-\.](?:0?[1-9]|1[0-2])[\/\-\.](?:19|20)\d{2}\b/g,
       type: 'dob',
-      baseConfidence: 0.40,
+      baseConfidence: 0.20, // Demoted so normal transaction/invoice dates default to KEEP
+      validator: (text, ctx) => {
+        const lowerCtx = (ctx || '').toLowerCase();
+        // Reject invoice, receipt, or transaction dates
+        if (/\b(?:date|inv|invoice|bill|receipt|purchase|order|valid|expiry|due|payment|particulars|tax)\b/i.test(lowerCtx)) {
+          return false;
+        }
+        return /\b(?:birth|dob|born|birthday|age)\b/i.test(lowerCtx);
+      },
+      contextValidator: true,
+      checksum: false
     },
+    {
+      name: 'ifsc_code',
+      regex: /\b[A-Z]{4}0[A-Z0-9]{6}\b/g,
+      type: 'financial',
+      baseConfidence: 0.85,
+      checksum: false
+    },
+    {
+      name: 'gstin_pan',
+      regex: /\b[0-9]{2}[\s\-]?[A-Za-z]{5}[0-9]{4}[A-Za-z][1-9A-Za-z][A-Za-z0-9][0-9A-Za-z]\b/gi,
+      type: 'pan',
+      baseConfidence: 0.95,
+      checksum: false
+    },
+    {
+      name: 'gstin_labeled',
+      regex: /(?:gst(?:in)?(?:\s*no\.?)?|pan(?:\s*no\.?)?)\s*[:\-=_.\s]{1,15}([0-9]{2}[\s\-]?[A-Za-z]{5}[0-9]{4}[A-Za-z][1-9A-Za-z][A-Za-z0-9][0-9A-Za-z]|[A-Za-z]{5}[0-9]{4}[A-Za-z])/gi,
+      type: 'pan',
+      baseConfidence: 0.95,
+      matchGroup: 1,
+      checksum: false
+    },
+    {
+      name: 'imei_labeled',
+      regex: /(?:imei(?:[^\S\r\n]*no\.?)?|device[^\S\r\n]*id|serial(?:[^\S\r\n]*no\.?)?|sr(?:[^\S\r\n]*no\.?)?)[^\S\r\n]*[.\-_=~*:\t ]{1,30}([0-9OIlSB\t .\-]{14,22})/gi,
+      type: 'device_id',
+      baseConfidence: 0.95,
+      matchGroup: 1,
+      validator: (text) => {
+        const cleaned = text.replace(/O/g, '0').replace(/[Il]/g, '1').replace(/S/g, '5').replace(/B/g, '8').replace(/\D/g, '');
+        return cleaned.length >= 14 && cleaned.length <= 17;
+      },
+      checksum: false
+    },
+    {
+      name: 'imei_number',
+      regex: /\b[0-9]{15}\b/g,
+      type: 'device_id',
+      baseConfidence: 0.90,
+      validator: (text, ctx) => {
+        const lowerCtx = (ctx || '').toLowerCase();
+        if (/\b(?:amount|rate|price|total|tax)\b/i.test(lowerCtx)) return false;
+        return luhnValid(text);
+      },
+      contextValidator: true,
+      checksum: true
+    },
+    {
+      name: 'phone_labeled',
+      regex: /(?:mob(?:ile)?(?:[^\S\r\n]*no\.?)?|phone(?:[^\S\r\n]*no\.?)?|contact(?:[^\S\r\n]*no\.?)?|tel(?:[^\S\r\n]*no\.?)?|m\.)[^\S\r\n]*[.\-_=~*:\t ]{1,50}([6-9][0-9\t .\-]{8,15}[0-9])/gi,
+      type: 'phone',
+      baseConfidence: 0.95,
+      matchGroup: 1,
+      validator: (text) => {
+        const digits = text.replace(/\D/g, '');
+        return digits.length >= 10 && digits.length <= 12 && ['6','7','8','9'].includes(digits[0]);
+      },
+      checksum: false
+    },
+    {
+      name: 'name_labeled',
+      regex: /\b(?:name|customer(?:[^\S\r\n]*name)?|client(?:[^\S\r\n]*name)?|patient(?:[^\S\r\n]*name)?|buyer(?:[^\S\r\n]*name)?|holder(?:[^\S\r\n]*name)?|m\/s|shri|smt|mr\.)(?:\s*[:.\-_=~*]\s*|\s{2,}|\t+)([a-zA-Z][a-zA-Z0-9\.\'\-]+(?:[^\S\r\n]+[a-zA-Z\.\'\-]+){0,3})/gi,
+      type: 'name',
+      baseConfidence: 0.92,
+      matchGroup: 1,
+      validator: (text) => {
+        const lower = text.trim().toLowerCase();
+        const stopWords = new Set([
+          'particulars', 'address', 'date', 'invoice', 'bill', 'model', 'amount', 'rate', 'total',
+          'signature', 'sign', 'item', 'description', 'qty', 'status', 'gateway', 'home', 'no',
+          'mob', 'mobile', 'phone', 'imei', 'battery', 'charger', 'tax', 'gst', 'gstin',
+          'communication', 'communications', 'enterprises', 'store', 'shop', 'pvt', 'ltd', 'agency',
+          'email', 'username', 'user', 'password', 'login', 'signup', 'submit', 'search', 'cancel', 'reset',
+          'or', 'and', 'not', 'id', 'account', 'number', 'code'
+        ]);
+        if (/\b(?:communication|enterprises|store|shop|pvt|ltd|agency|telecom)\b/i.test(lower)) {
+          return false;
+        }
+        return !stopWords.has(lower) && lower.length >= 3;
+      },
+      checksum: false
+    },
+    {
+      name: 'signature_labeled',
+      regex: /(?:customer\s*signature|auth(?:orized)?\s*sign(?:atory)?|for\s+[a-zA-Z\s]{3,30}\s*signature)\b/gi,
+      type: 'signature',
+      baseConfidence: 0.90,
+      checksum: false
+    },
+    {
+      name: 'indian_name',
+      regex: /\b(?:Shreyash|Sanjeet|Lanjeet|Sangeet|Dahiya|Tanishq|Tanish|Tanmay|Tanuja|Tanvi|Tanya|Tara|Tarun|Tejas|Tina|Tirth|Trisha|Tulsi|Tushar|Aarav|Aayush|Aakash|Aarti|Aashish|Abhay|Abhilash|Abhimanyu|Abhishek|Aditi|Aditya|Ajay|Ajit|Akanksha|Akash|Akhil|Alok|Aman|Amarjeet|Ambar|Amit|Amita|Amrita|Anand|Ananya|Aneesh|Angad|Anil|Anita|Anjali|Ankit|Ankita|Ankur|Ankush|Anmol|Ansh|Anshu|Anshul|Anubhav|Anuj|Anurag|Anushka|Aparna|Archana|Arjun|Arnav|Arun|Aruna|Aryan|Ashish|Ashok|Ashu|Ashwin|Atharv|Atharva|Avani|Avneet|Ayush|Babita|Badal|Bala|Baldev|Balraj|Bharat|Bharti|Bhavana|Bhavesh|Bhavna|Bhavya|Bhushan|Bijoy|Bindu|Birendra|Chandan|Chandni|Chetan|Chirag|Daksh|Darshan|Deepa|Deepak|Deepali|Deepika|Dev|Devi|Devika|Dhananjay|Dheeraj|Dhruv|Dinesh|Dipika|Divya|Dolly|Durga|Ekta|Esha|Farhan|Gaurav|Gautam|Geeta|Girish|Gopal|Govind|Gul|Gunjan|Gurpreet|Guru|Harinder|Harish|Harpreet|Harsh|Harsha|Harshit|Harshita|Hemant|Himani|Himanshu|Inderjeet|Indira|Isha|Ishaan|Jagdish|Jatin|Jaya|Jayant|Jigar|Jitendra|Jyoti|Jyotsna|Kajal|Kajol|Kalyan|Kamal|Kanak|Kanchan|Karan|Kartik|Kashi|Kavita|Kavya|Kedar|Keshav|Khushi|Kiran|Kirti|Komal|Kshitij|Kunal|Lakshay|Lakshmi|Lakshya|Lalita|Lalit|Lata|Lokesh|Madhav|Madhavi|Madhur|Madhu|Mahesh|Maithili|Malini|Mamta|Manav|Mandeep|Mani|Manish|Manisha|Manjeet|Manju|Mansi|Mayank|Mayur|Meena|Meenakshi|Megha|Meghna|Mihir|Milan|Minal|Minakshi|Mira|Mitali|Mohini|Mohit|Moksh|Monika|Mridul|Mrinal|Mukesh|Mukul|Muskan|Naina|Namita|Nandini|Naresh|Naveen|Navneet|Nayan|Neelam|Neeru|Neha|Netra|Nidhi|Niharika|Nikhil|Nikita|Nilesh|Nimisha|Nisha|Nishant|Nitin|Nitya|Padma|Pallavi|Pankaj|Paras|Parth|Parveen|Parvati|Payal|Peyush|Pinky|Piyush|Pooja|Poornima|Prabha|Prabhat|Pradeep|Praful|Pragati|Pragya|Prakash|Pranav|Pranay|Pranjal|Prashant|Pratap|Prateek|Pratibha|Pratik|Preeti|Prem|Prerna|Priya|Priyam|Priyanka|Priyanshu|Puja|Pulkit|Puneet|Pushpa|Rachna|Radhika|Raghu|Rahul|Rajan|Rajat|Rajeev|Rajendra|Rajesh|Rajiv|Raju|Rakesh|Ram|Ramesh|Rashi|Rashmi|Ratan|Ravi|Ravinder|Reena|Rekha|Richa|Rinku|Rishi|Ritesh|Ritika|Ritu|Riya|Rohan|Rohit|Roshni|Ruhi|Rupal|Rupali|Rupesh|Saanvi|Sachin|Sahil|Saif|Sakshi|Salman|Sameer|Samiksha|Sandeep|Sandesh|Sangeeta|Sanjay|Sanjiv|Sankalp|Santosh|Sapna|Sarita|Sarthak|Saroj|Sarvesh|Satish|Saumya|Saurabh|Savita|Seema|Shailendra|Shailesh|Shakti|Shalini|Shambhu|Shankar|Shanti|Sharad|Sharda|Shashank|Shashi|Shekhar|Shilpa|Shipra|Shivam|Shivani|Shobha|Shreya|Shruti|Shubham|Shweta|Siddharth|Simran|Smita|Smriti|Sneha|Sonam|Sonia|Soniya|Sourav|Subhash|Sucheta|Suchitra|Sudha|Sudhir|Sujata|Suman|Sumit|Sunaina|Sunil|Sunita|Suraj|Suresh|Surya|Sushant|Sushil|Sushma|Swapnil|Swara|Swati|Udai|Udit|Ujjwal|Uma|Umesh|Urvashi|Utkarsh|Vaibhav|Vaishali|Vaishnavi|Vansh|Varun|Vedant|Veena|Vibha|Vibhor|Vidya|Vikas|Vikram|Vimal|Vinay|Vineet|Vinita|Vinod|Vipul|Virat|Vishal|Vishnu|Vivek|Yamini|Yash|Yashika|Yogesh|Yogita|Zara)(?:[^\S\r\n]+(?:Dahiya|Sharma|Verma|Gupta|Singh|Kumar|Patel|Shah|Joshi|Mehta|Rao|Reddy|Nair|Iyer|Pillai|Das|Banerjee|Chatterjee|Mukherjee|Bose|Ghosh|Sen|Dutta|Roy|Choudhury|Agarwal|Jain|Bansal|Goel|Mittal|Singhal|Garg|Bhatia|Arora|Kapoor|Malhotra|Khanna|Chopra|Sethi|Grover|Ahuja|Malik|Gill|Dhillon|Sandhu|Grewal|Sidhu|Mann|Kulkarni|Deshmukh|Patil|Shinde|Jadhav|Pawar|More|Gaikwad|Chavan|Bhatt|Trivedi|Shukla|Mishra|Tiwari|Pandey|Dubey|Chaubey|Tripathi|Pathak|Jha|Thakur|Chauhan|Rathore|Rajput|Yadav|Prasad|Maurya|Soni|Sahu|Prajapati|Vishwakarma))?\b/gi,
+      type: 'name',
+      baseConfidence: 0.90,
+      validator: (text) => {
+        const lower = text.trim().toLowerCase();
+        const stopWords = new Set([
+          'may', 'will', 'bill', 'can', 'about', 'for', 'with', 'and', 'or', 'to', 'in', 'on', 'at', 'by',
+          'from', 'date', 'time', 'rate', 'total', 'amount', 'qty', 'tax', 'gst', 'name', 'customer',
+          'phone', 'email', 'address', 'model', 'particulars', 'number', 'user', 'username', 'password',
+          'login', 'mobile', 'status', 'view', 'edit', 'save', 'close', 'details', 'more', 'all', 'home'
+        ]);
+        return !stopWords.has(lower) && lower.length >= 3;
+      },
+      checksum: false
+    },
+    {
+      name: 'common_name',
+      regex: /\b(?:James|John|Robert|Michael|William|David|Richard|Joseph|Thomas|Charles|Daniel|Matthew|Anthony|Donald|Mark|Paul|Steven|Andrew|Kenneth|Joshua|Kevin|Brian|George|Edward|Ronald|Timothy|Jason|Jeffrey|Ryan|Jacob|Gary|Nicholas|Eric|Jonathan|Stephen|Larry|Justin|Scott|Brandon|Benjamin|Samuel|Gregory|Alexander|Frank|Patrick|Raymond|Jack|Dennis|Jerry|Tyler|Aaron|Jose|Adam|Nathan|Henry|Douglas|Zachary|Peter|Kyle|Walter|Ethan|Jeremy|Harold|Keith|Christian|Roger|Noah|Gerald|Carl|Terry|Sean|Austin|Arthur|Lawrence|Jesse|Dylan|Bryan|Joe|Jordan|Billy|Bruce|Albert|Willie|Gabriel|Logan|Alan|Juan|Wayne|Roy|Ralph|Randy|Eugene|Vincent|Russell|Elijah|Louis|Bobby|Philip|Johnny|Mary|Patricia|Jennifer|Linda|Elizabeth|Barbara|Susan|Jessica|Sarah|Karen|Nancy|Lisa|Betty|Margaret|Sandra|Ashley|Kimberly|Emily|Donna|Michelle|Dorothy|Carol|Amanda|Melissa|Deborah|Stephanie|Rebecca|Sharon|Laura|Cynthia|Kathleen|Amy|Shirley|Angela|Helen|Anna|Brenda|Pamela|Nicole|Emma|Samantha|Katherine|Christine|Debra|Rachel|Catherine|Carolyn|Janet|Ruth|Maria|Heather|Diane|Virginia|Julie|Joyce|Victoria|Olivia|Kelly|Christina|Lauren|Joan|Evelyn|Judith|Megan|Cheryl|Andrea|Hannah|Martha|Jacqueline|Frances|Gloria|Ann|Teresa|Kathryn|Sara|Janice|Jean|Alice|Madison|Doris|Abigail|Julia|Judy|Grace|Denise|Amber|Marilyn|Beverly|Danielle|Theresa|Sophia|Marie|Diana|Brittany|Natalie|Isabella|Charlotte|Rose|Alexis|Kayla)(?:[^\S\r\n]+[A-Z][a-zA-Z\.'\-]{1,25})?\b/g,
+      type: 'name',
+      baseConfidence: 0.88,
+      checksum: false
+    },
+    {
+      name: 'student_roll_no',
+      regex: /\b[1-9]\d{7,13}\b/g,
+      type: 'username',
+      baseConfidence: 0.85,
+      validator: (text, ctx) => {
+        if (/^0+$/.test(text) || /^10+$/.test(text)) return false;
+        if (text === '10000000' || text === '50000000') return false;
+        if (ctx) {
+          const lowerCtx = ctx.toLowerCase();
+          if (/\b(?:roll\s*no|rollno|roll|enroll|student|reg\s*no|reg|user|account|hall|admission|id)\b/i.test(lowerCtx)) {
+            return true;
+          }
+        }
+        // 10-12 digit sequence starting with 1-9 (e.g. 24001003121) is strongly a student/account identifier
+        if (text.length >= 10 && text.length <= 12) {
+          return true;
+        }
+        return false;
+      },
+      contextValidator: true,
+      checksum: false
+    },
+    {
+      name: 'admission_reg_code',
+      regex: /\b\d{2}-\d{4,6}\b/g,
+      type: 'username',
+      baseConfidence: 0.85,
+      validator: (text, ctx) => {
+        if (!ctx) return false;
+        const lowerCtx = ctx.toLowerCase();
+        return /\b(?:roll|reg|student|challen|challan|enroll|admission|ymca)\b/i.test(lowerCtx);
+      },
+      contextValidator: true,
+      checksum: false
+    },
+    {
+      name: 'person_name_context',
+      regex: /\b[A-Z][a-zA-Z\.\'\-]{1,25}(?:[^\S\r\n]+[A-Z][a-zA-Z\.\'\-]{1,25}){0,2}\b/g,
+      type: 'name',
+      baseConfidence: 0.85,
+      validator: (text, ctx) => {
+        if (!ctx) return false;
+        const lowerText = text.trim().toLowerCase();
+        if (['firstname', 'first name', 'lastname', 'last name', 'fullname', 'full name', 'name', 'username', 'mob', 'mob no', 'mobile', 'mobile no', 'phone', 'phone no', 'contact', 'imei', 'imei no', 'gst', 'gstin'].includes(lowerText)) {
+          return false;
+        }
+        const lowerCtx = ctx.toLowerCase();
+        const nameMatch = lowerCtx.match(/\b(?:name|first\s*name|firstname|last\s*name|lastname|full\s*name|fullname|student\s*name|candidate|holder|patient|emp\s*name|employee\s*name|applicant)\b/);
+        if (!nameMatch) return false;
+
+        const nameIdx = nameMatch.index;
+        const candIdx = lowerCtx.indexOf(lowerText);
+        // Candidate must appear at or after the label (or within 10 chars before)
+        if (candIdx !== -1 && candIdx < nameIdx - 10) return false;
+
+        const blockedWords = new Set([
+          'Home', 'Dashboard', 'Result', 'Update', 'Payment', 'Amount', 'Status', 'Search',
+          'Order', 'Gateway', 'Mode', 'Next', 'Previous', 'Show', 'Entries', 'RollNo',
+          'ChallenNo', 'Successful', 'Unsuccessful', 'Initiated', 'Shipped', 'Pending', 'UPI', 'NetBanking',
+          'Main', 'YMCA', 'Payment Gateway', 'Order_id', 'Order_status', 'Model', 'Particulars', 'Rate', 'Qty',
+          'Battery', 'Charger', 'Smart Phone', 'Invoice', 'Bill', 'Tax', 'Date', 'All', 'Kind', 'Accessories',
+          'Samsung', 'Nokia', 'Oppo', 'Vivo', 'MI', 'Apple', 'HTC', 'Lenovo', 'Xiaomi', 'Micromax', 'Lava', 'OnePlus', 'Realme'
+        ]);
+        return !blockedWords.has(text.trim());
+      },
+      contextValidator: true,
+      checksum: false
+    },
+    {
+      name: 'identifier_context',
+      regex: /\b[A-Za-z0-9\/\-]{5,30}\b/g,
+      type: 'username',
+      baseConfidence: 0.85,
+      validator: (text, ctx) => {
+        if (!ctx) return false;
+        const lowerCtx = ctx.toLowerCase();
+        const isIdContext = /\b(?:roll\s*no|rollno|roll|enrollment|student\s*id|user\s*id|userid|username|account\s*no|acc\s*no|reg\s*no|registration\s*no|hall\s*ticket|admission\s*no)\b/i.test(lowerCtx);
+        return isIdContext && /\d/.test(text);
+      },
+      contextValidator: true,
+      checksum: false
+    }
   ];
 
-  // Context Keywords for confidence boosting
+  // ── Context Keywords for Confidence Boosting ──
   const CONTEXT_KEYWORDS = {
-    email:      ['email', 'e-mail', 'mail', 'contact', 'send', 'reach'],
+    email:      ['email', 'e-mail', 'mail', 'contact', 'reach'],
     phone:      ['phone', 'mobile', 'cell', 'tel', 'telephone', 'contact', 'call', 'whatsapp', 'number'],
-    creditCard: ['card', 'credit', 'debit', 'visa', 'master', 'amex', 'payment', 'cc'],
-    aadhaar:    ['aadhaar', 'aadhar', 'uid', 'uidai', 'identity', 'verification'],
-    pan:        ['pan', 'permanent account', 'income tax', 'tax', 'itr'],
-    passport:   ['passport', 'travel document', 'nationality', 'visa'],
+    creditCard: ['card', 'credit', 'debit', 'visa', 'master', 'amex', 'payment', 'cc', 'cvv', 'cardholder'],
+    aadhaar:    ['aadhaar', 'aadhar', 'uid', 'uidai', 'identity', 'government id'],
+    pan:        ['pan', 'permanent account', 'income tax', 'tax', 'itr', 'pan card', 'nsdl', 'uti'],
     financial:  ['ifsc', 'account', 'bank', 'routing', 'branch', 'swift', 'upi', 'paytm', 'gpay', 'phonepe'],
-    ip:         ['ip', 'address', 'server', 'host', 'network'],
+    ssn:        ['ssn', 'social security', 'tax id'],
     dob:        ['birth', 'dob', 'born', 'birthday', 'age', 'date of birth'],
-    name:       ['name', 'first name', 'last name', 'full name', 'fname', 'lname'],
-    password:   ['password', 'passwd', 'pwd', 'secret'],
-    otp:        ['otp', 'code', 'pin', 'verification code', 'one time password', 'auth code'],
-    apiToken:   ['token', 'api key', 'bearer', 'auth token', 'session', 'jwt'],
-    location:   ['lat', 'long', 'latitude', 'longitude', 'coordinates', 'location', 'gps'],
-    address:    ['address', 'addr', 'street', 'city', 'state', 'zip', 'postal', 'pin code', 'pincode'],
+    apiToken:   ['token', 'api key', 'bearer', 'auth', 'secret', 'jwt', 'credentials'],
+    ip:         ['ip', 'address', 'server', 'host', 'gateway'],
+    name:       ['name', 'firstname', 'first name', 'lastname', 'last name', 'fullname', 'full name', 'student', 'candidate', 'applicant', 'patient', 'holder'],
+    username:   ['rollno', 'roll no', 'roll', 'enrollment', 'student id', 'userid', 'user id', 'username', 'login', 'account no', 'reg no']
   };
 
-  const CONTEXT_BOOST = 0.35;
+  const CONTEXT_BOOST = 0.25;
 
   function getContextBoost(fullText, matchStart, matchEnd, piiType) {
     const keywords = CONTEXT_KEYWORDS[piiType];
@@ -295,492 +496,293 @@ Privamon.PIIDetector = (() => {
     const windowEnd = Math.min(fullText.length, matchEnd + 100);
     const context = fullText.slice(windowStart, windowEnd).toLowerCase();
 
-    for (const keyword of keywords) {
-      if (context.includes(keyword)) {
+    for (const kw of keywords) {
+      if (context.includes(kw)) {
         return CONTEXT_BOOST;
       }
     }
     return 0;
   }
 
-  // ── Main Detection Functions ──
-
+  // ── Core Shared PII Detection Function ──
   /**
-   * Detect PII in a text string using local regex patterns.
-   * @param {string} text - Text to analyze
-   * @param {string} source - 'dom' or 'ocr'
-   * @param {string} [nearbyContext=''] - Additional context text (e.g., label)
-   * @returns {Array} Detections
+   * Scans text for sensitive patterns. Shared across DOM text, OCR text, and user inputs.
+   * @param {string} text - Raw text to inspect
+   * @param {string} [nearbyContext=''] - Adjacent labels or attribute context
+   * @param {string} [source='dom'] - 'dom' or 'ocr'
+   * @returns {Array<Object>} Found matches with spans, confidence, and validated status
    */
-  function detectInText(text, source = 'dom', nearbyContext = '') {
+  function detectPII(text, nearbyContext = '', source = 'dom') {
     if (!text || typeof text !== 'string') return [];
 
-    console.log(`[PII][${source.toUpperCase()}] detectInText INPUT: "${text}"`);
     const detections = [];
-    const combinedText = nearbyContext ? `${nearbyContext} ${text}` : text;
+    const combinedContext = nearbyContext ? `${nearbyContext} ${text}` : text;
 
     for (const pattern of PATTERNS) {
       pattern.regex.lastIndex = 0;
-
       let match;
+
       while ((match = pattern.regex.exec(text)) !== null) {
-        const matchText = match[0];
+        let matchText = match[0];
+        let matchStart = match.index;
+        let matchEnd = match.index + matchText.length;
 
-        // 1. Negative prefix filter: suppress false positives like Order ID, PIN Code, etc.
-        if (['phone', 'otp', 'aadhaar', 'financial'].includes(pattern.type) && hasNegativePrefix(text, match.index)) {
-          console.log(`[PII][${source.toUpperCase()}][SUPPRESSED] pattern=${pattern.name} text="${matchText}" near negative prefix.`);
+        if (pattern.matchGroup && match[pattern.matchGroup]) {
+          const val = match[pattern.matchGroup];
+          const offset = match[0].indexOf(val);
+          matchText = val;
+          matchStart = match.index + offset;
+          matchEnd = matchStart + matchText.length;
+        }
+
+        // 1. Negative prefix check
+        if (['phone', 'creditCard', 'aadhaar', 'financial'].includes(pattern.type) && hasNegativePrefix(text, matchStart)) {
           continue;
         }
 
-        // 2. Run validator if present
-        if (pattern.validator && !pattern.validator(matchText)) {
-          console.log(`[PII][${source.toUpperCase()}][MATCH_FAILED] pattern=${pattern.name} matched="${matchText}" but failed validation.`);
-          continue;
+        // 2. Algorithmic validator check (Luhn, Verhoeff, format rules)
+        let isValid = true;
+        if (pattern.validator) {
+          const localWindow = text.slice(Math.max(0, matchStart - 80), Math.min(text.length, matchEnd + 80));
+          const localContext = nearbyContext ? `${nearbyContext} ${localWindow}` : localWindow;
+          isValid = pattern.contextValidator
+            ? pattern.validator(matchText, localContext)
+            : pattern.validator(matchText);
+          if (!isValid) continue; // Drop invalid checksums/contexts immediately
         }
 
-        // 3. Calculate confidence with context boost
+        // 3. Confidence determination
         let confidence = pattern.baseConfidence;
-        confidence += getContextBoost(combinedText, match.index, match.index + matchText.length, pattern.type);
-        confidence = Math.min(1.0, confidence);
-
-        // Discard low confidence OTP matches without context boost
-        if (pattern.type === 'otp' && confidence < 0.4) {
-          continue;
+        if (pattern.checksum && isValid) {
+          // Checksum-validated numbers get 1.0 confidence
+          confidence = 1.0;
+        } else {
+          // Add context boost
+          confidence += getContextBoost(combinedContext, matchStart, matchEnd, pattern.type);
+          confidence = Math.min(1.0, confidence);
         }
-
-        console.log(`[PII][${source.toUpperCase()}][MATCH] pattern=${pattern.name} type=${pattern.type} text="${matchText}" span=[${match.index}, ${match.index + matchText.length}] conf=${confidence.toFixed(2)}`);
 
         detections.push({
           type: pattern.type,
+          patternName: pattern.name,
           text: matchText,
           confidence,
           source,
-          span: {
-            start: match.index,
-            end: match.index + matchText.length,
-          },
-          patternName: pattern.name,
+          checksumValidated: Boolean(pattern.checksum && isValid),
+          span: { start: matchStart, end: matchEnd }
         });
       }
     }
 
-    console.log(`[PII][${source.toUpperCase()}] detectInText OUTPUT: ${detections.length} detections`);
     return detections;
   }
 
+  // ── DOM Semantic Detection ──
+  const SENSITIVE_INPUT_TYPES = new Set(['password', 'email', 'tel']);
+  const SENSITIVE_AUTOCOMPLETE = new Set([
+    'name', 'given-name', 'family-name', 'email', 'tel', 'tel-national',
+    'cc-name', 'cc-number', 'cc-exp', 'cc-exp-month', 'cc-exp-year', 'cc-csc',
+    'address-line1', 'address-line2', 'address-level1', 'address-level2',
+    'postal-code', 'country', 'bday', 'bday-day', 'bday-month', 'bday-year',
+    'sex', 'username', 'new-password', 'current-password', 'one-time-code'
+  ]);
+  const SENSITIVE_KEYWORDS = [
+    'ssn', 'social_security', 'aadhaar', 'aadhar', 'pan', 'cvv', 'cvc',
+    'salary', 'dob', 'birth', 'account', 'password', 'passwd', 'pwd',
+    'pin', 'otp', 'credit_card', 'card_number', 'income',
+    'username', 'user_name', 'user_id', 'userid', 'login', 'roll_no', 'rollno',
+    'enrollment', 'student_id'
+  ];
+
   /**
-   * Asynchronously detect PII by querying the local Privamon Python engine
-   * (Presidio + GLiNER) with bounding-box-aware tokens.
-   * If the local engine is unreachable or errors, seamlessly falls back
-   * to the enhanced local JS detector.
+   * Analyzes an extracted DOM element for semantic and text-level PII.
+   * Produces an array of normalized `DetectionCandidate` objects.
    *
-   * @param {string} text - Text to analyze
-   * @param {string} [source='ocr'] - 'dom' or 'ocr'
-   * @param {string} [nearbyContext=''] - Additional context
-   * @param {Array} [tokens=[]] - Optional OCR tokens with bounding boxes
-   * @returns {Promise<Array>} Detections
+   * @param {Object} element - From dom-extractor
+   * @param {Object} [mapper=null] - CoordinateMapper instance (if mapping immediately)
+   * @returns {Array<Object>} DetectionCandidate array
    */
-  async function detectAsync(text, source = 'ocr', nearbyContext = '', tokens = []) {
-    if (!text || typeof text !== 'string') return [];
+  function detectInDOMElement(element, mapper = null) {
+    const candidates = [];
+    if (!element || !element.bbox || element.isContainer || element.isHeader) return candidates;
 
-    console.log(`[PII][${source.toUpperCase()}] detectAsync invoked (text length: ${text.length}, tokens: ${tokens.length})`);
+    const upperTag = (element.tag || '').toUpperCase();
+    const inputType = (element.inputType || element.type || '').toLowerCase();
+    const { autocomplete, name, id, className, text, tokens, elementId } = element;
+    const labelText = element.labelText || element.label || '';
+    const contextStr = [name, id, className, labelText].filter(Boolean).join(' ');
 
-    // 1. Attempt local Python service
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), ENGINE_TIMEOUT_MS);
+    // ── 1. Form Inputs & Textareas ──
+    if (upperTag === 'INPUT' || upperTag === 'TEXTAREA' || upperTag === 'SELECT') {
+      let matchedType = null;
+      let conf = 0.0;
+      let reason = '';
 
-      const payload = {
-        text: text,
-        source: source,
-        context: nearbyContext || '',
-        tokens: (tokens && tokens.length > 0) ? tokens : []
-      };
-
-      const response = await fetch(LOCAL_ENGINE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`[PII][${source.toUpperCase()}][ENGINE] Success: ${data.detections.length} detections (${data.processing_ms}ms)`);
-        return data.detections.map(d => ({
-          type: d.type,
-          text: d.text,
-          confidence: d.confidence,
-          decision_score: d.decision_score || d.confidence,
-          model_confidence: d.model_confidence || d.confidence,
-          sensitivity_class: d.sensitivity_class || 'DIRECT_PII',
-          decision: d.decision || 'REDACT',
-          positive_evidence: d.positive_evidence || [],
-          negative_evidence: d.negative_evidence || [],
-          source: d.source || source,
-          span: { start: d.start, end: d.end },
-          bbox: d.bbox || null,
-          boxes: d.boxes || (d.bbox ? [d.bbox] : null),
-          reason: d.reason || `engine:${d.engine || 'hybrid'}`,
-          patternName: d.pattern_name || d.type
-        }));
-      } else {
-        console.warn(`[PII][${source.toUpperCase()}] Python engine responded status ${response.status}. Using JS fallback.`);
-      }
-    } catch (err) {
-      console.log(`[PII][${source.toUpperCase()}] Python engine offline/unreachable (${err.message}). Using JS fallback.`);
-    }
-
-    // 2. Fallback: local JS detection
-    return detectInText(text, source, nearbyContext);
-  }
-
-  /**
-   * Batch detection for multiple text blocks in a single HTTP roundtrip.
-   * @param {Array<{text: string, source?: string, context?: string, tokens?: Array}>} items
-   * @returns {Promise<Array<Array>>} Array of detections per input item
-   */
-  async function detectBatchAsync(items) {
-    if (!items || !items.length) return [];
-
-    try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), ENGINE_TIMEOUT_MS * 2);
-
-      const payload = {
-        items: items.map(it => ({
-          text: it.text || '',
-          source: it.source || 'ocr',
-          context: it.context || '',
-          tokens: it.tokens || [],
-          dom_context: it.dom_context || null
-        }))
-      };
-
-      const response = await fetch(LOCAL_ENGINE_BATCH_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (response.ok) {
-        const data = await response.json();
-        return (data.results || []).map((res, idx) => {
-          const itemSource = items[idx]?.source || 'ocr';
-          return (res.detections || []).map(d => ({
-            type: d.type,
-            text: d.text,
-            confidence: d.confidence,
-            decision_score: d.decision_score || d.confidence,
-            model_confidence: d.model_confidence || d.confidence,
-            sensitivity_class: d.sensitivity_class || 'DIRECT_PII',
-            decision: d.decision || 'REDACT',
-            positive_evidence: d.positive_evidence || [],
-            negative_evidence: d.negative_evidence || [],
-            source: d.source || itemSource,
-            span: { start: d.start, end: d.end },
-            bbox: d.bbox || null,
-            boxes: d.boxes || (d.bbox ? [d.bbox] : null),
-            reason: d.reason || `engine:${d.engine || 'hybrid'}`,
-            patternName: d.pattern_name || d.type
-          }));
-        });
-      }
-    } catch (err) {
-      console.log(`[PII] Python engine batch offline/error (${err.message}). Falling back to local JS.`);
-    }
-
-    // Fallback: local JS detection per item
-    return items.map(it => detectInText(it.text || '', it.source || 'ocr', it.context || ''));
-  }
-
-  /**
-   * High-accuracy batch DOM detection:
-   * Batches visible DOM elements and sends them to the local Python engine,
-   * unifying DOM and OCR intelligence while mapping coordinates accurately.
-   *
-   * @param {Array} elements - Elements from dom-extractor
-   * @returns {Promise<Array>} All detections mapped to viewport coordinates
-   */
-  async function detectDOMBatchAsync(elements) {
-    if (!elements || !elements.length) return [];
-
-    const semanticDetections = [];
-    const textEligibleItems = [];
-
-    for (let i = 0; i < elements.length; i++) {
-      const el = elements[i];
-      if (el.isPixelContent) continue;
-
-      // Sensitive input check
-      if (el.inputType === 'password') {
-        semanticDetections.push({
-          type: 'password',
-          text: '••••••••',
-          confidence: 1.0,
-          decision_score: 1.0,
-          model_confidence: 1.0,
-          sensitivity_class: 'DIRECT_PII',
-          decision: 'REDACT',
-          positive_evidence: ['input_type=password'],
-          negative_evidence: [],
-          source: 'dom',
-          bbox: el.bbox,
-          boxes: [el.bbox],
-          elementId: el.id || el.testId || null,
-          reason: 'input type=password',
-          coordinateSpace: 'css-viewport'
-        });
+      // Check input type
+      if (inputType === 'password') {
+        matchedType = 'password';
+        conf = 1.0;
+        reason = 'input[type=password]';
+      } else if (inputType === 'email') {
+        matchedType = 'email';
+        conf = 0.90;
+        reason = 'input[type=email]';
+      } else if (inputType === 'tel') {
+        matchedType = 'phone';
+        conf = 0.90;
+        reason = 'input[type=tel]';
+      } else if (inputType === 'number' && /card|cc|cvv|account/i.test(contextStr)) {
+        matchedType = 'creditCard';
+        conf = 0.90;
+        reason = 'input[type=number] with card keyword';
       }
 
-      const textToScan = el.text || el.value || '';
-      if (textToScan && textToScan.trim().length > 0) {
-        textEligibleItems.push({
-          text: textToScan,
-          source: 'dom',
-          context: [el.label, el.placeholder, el.name, el.id].filter(Boolean).join(' '),
-          dom_context: {
-            label: el.label || '',
-            placeholder: el.placeholder || '',
-            name: el.name || '',
-            id: el.id || '',
-            autocomplete: el.autocomplete || '',
-            type: el.inputType || ''
-          },
-          element: el
-        });
+      // Check autocomplete
+      if (autocomplete && SENSITIVE_AUTOCOMPLETE.has(autocomplete.toLowerCase())) {
+        const auto = autocomplete.toLowerCase();
+        matchedType = auto.includes('cc') ? 'creditCard' : (auto.includes('tel') ? 'phone' : (auto.includes('bday') ? 'dob' : 'pii_input'));
+        conf = Math.max(conf, 0.95);
+        reason = `autocomplete=${autocomplete}`;
       }
-    }
 
-    if (textEligibleItems.length === 0) {
-      return semanticDetections;
-    }
-
-    const allEngineDetections = [];
-    const CHUNK_SIZE = 20;
-
-    try {
-      for (let i = 0; i < textEligibleItems.length; i += CHUNK_SIZE) {
-        const chunk = textEligibleItems.slice(i, i + CHUNK_SIZE);
-        const payload = {
-          items: chunk.map(item => ({
-            text: item.text,
-            source: 'dom',
-            context: item.context,
-            dom_context: item.dom_context
-          }))
-        };
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), ENGINE_TIMEOUT_MS * 2);
-
-        const response = await fetch(LOCAL_ENGINE_BATCH_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
-
-        if (!response.ok) {
-          throw new Error(`Engine returned HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-        const results = data.results || [];
-
-        for (let j = 0; j < results.length; j++) {
-          const item = chunk[j];
-          const itemDetections = results[j]?.detections || [];
-          const el = item.element;
-
-          for (const d of itemDetections) {
-            let bbox = el.bbox;
-            let boxes = [el.bbox];
-            let tokenIds = [];
-
-            if (el.tokens && el.tokens.length > 0 && typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper) {
-              const mapped = Privamon.DOMRangeMapper.mapSpanToDomBoxes(d.start, d.end, el.tokens);
-              if (mapped && mapped.bbox) {
-                bbox = mapped.bbox;
-                boxes = mapped.boxes || [mapped.bbox];
-                tokenIds = mapped.tokens || [];
-              }
-            }
-
-            allEngineDetections.push({
-              type: d.type,
-              text: d.text,
-              confidence: d.confidence,
-              decision_score: d.decision_score || d.confidence,
-              model_confidence: d.model_confidence || d.confidence,
-              sensitivity_class: d.sensitivity_class || 'DIRECT_PII',
-              decision: d.decision || 'REDACT',
-              positive_evidence: d.positive_evidence || [],
-              negative_evidence: d.negative_evidence || [],
-              reason: d.reason || 'engine:hybrid',
-              source: 'dom',
-              span: { start: d.start, end: d.end },
-              bbox: bbox,
-              boxes: boxes,
-              tokens: tokenIds,
-              elementId: el.id || el.testId || null,
-              coordinateSpace: 'css-viewport'
-            });
+      // Check name / id / class keywords
+      if (!matchedType) {
+        const lowerContext = contextStr.toLowerCase();
+        for (const kw of SENSITIVE_KEYWORDS) {
+          if (lowerContext.includes(kw)) {
+            matchedType = (kw === 'password' || kw === 'passwd') ? 'password' :
+                          (kw === 'aadhaar' || kw === 'aadhar') ? 'aadhaar' :
+                          (kw === 'pan') ? 'pan' :
+                          (kw === 'ssn') ? 'ssn' :
+                          (kw === 'cvv' || kw === 'credit_card' || kw === 'card_number') ? 'creditCard' :
+                          (kw === 'dob' || kw === 'birth') ? 'dob' :
+                          (kw.includes('user') || kw.includes('login') || kw.includes('roll') || kw.includes('enroll') || kw.includes('student')) ? 'username' : 'sensitive_field';
+            conf = Math.max(conf, 0.85);
+            reason = `keyword:${kw}`;
+            break;
           }
         }
       }
 
-      return [...semanticDetections, ...allEngineDetections];
-    } catch (err) {
-      console.warn(`[PII] DOM Batch Engine detection failed (${err.message}). Falling back to local JS regexes.`);
-      return detectAllDom(elements);
-    }
-  }
-
-  /**
-   * Analyze a DOM element entry from the extractor for PII.
-   * Combines semantic HTML analysis with regex-based text detection.
-   *
-   * @param {Object} element - Element entry from dom-extractor
-   * @returns {Array} Detections with bounding boxes
-   */
-  function detectInElement(element) {
-    const detections = [];
-
-    // A) HTML Semantic Analysis for input elements
-    if (element.inputType) {
-      if (element.inputType === 'password') {
-        detections.push({
-          type: 'password',
-          text: '[password field]',
-          confidence: 1.0,
+      if (matchedType) {
+        const candidateBbox = mapper ? mapper.mapBbox(element.bbox) : element.bbox;
+        candidates.push(toCandidate({
+          type: matchedType,
           source: 'dom',
-          bbox: element.bbox,
-          reason: 'input[type=password]',
-        });
-      }
-
-      if (element.isSensitiveType && element.value) {
-        const typeMap = { email: 'email', tel: 'phone', number: 'other' };
-        detections.push({
-          type: typeMap[element.inputType] || 'other',
-          text: element.value,
-          confidence: 0.90,
-          source: 'dom',
-          bbox: element.bbox,
-          reason: `input[type=${element.inputType}]`,
-        });
-      }
-
-      if (element.isSensitiveAutocomplete && element.value) {
-        const acMap = {
-          'cc-number': 'creditCard', 'cc-exp': 'creditCard', 'cc-csc': 'creditCard',
-          'cc-name': 'creditCard', 'email': 'email', 'tel': 'phone', 'tel-national': 'phone',
-          'name': 'name', 'given-name': 'name', 'family-name': 'name',
-          'bday': 'dob', 'bday-day': 'dob', 'bday-month': 'dob', 'bday-year': 'dob',
-          'address-line1': 'address', 'address-line2': 'address',
-          'postal-code': 'address', 'country': 'address',
-          'one-time-code': 'otp'
-        };
-        detections.push({
-          type: acMap[element.autocomplete] || 'other',
-          text: element.value,
-          confidence: 0.88,
-          source: 'dom',
-          bbox: element.bbox,
-          reason: `autocomplete=${element.autocomplete}`,
-        });
-      }
-
-      if (element.sensitiveNameMatch && element.value) {
-        detections.push({
-          type: element.sensitiveNameMatch === 'password' ? 'password' : 'other',
-          text: element.value,
-          confidence: 0.75,
-          source: 'dom',
-          bbox: element.bbox,
-          reason: `name/id contains '${element.sensitiveNameMatch}'`,
-        });
+          text: element.value ? '[MASKED VALUE]' : '',
+          originalValue: element.value || '',
+          bbox: candidateBbox,
+          boxes: [candidateBbox],
+          tokens: [],
+          confidence: conf,
+          elementId: elementId || id || null,
+          reason,
+          coordinateSpace: mapper ? 'screenshot' : 'viewport'
+        }));
       }
     }
 
-    // B) Regex-based detection on text content
-    const textToScan = element.text || element.value || '';
-    const contextText = [element.label, element.placeholder, element.name, element.id]
-      .filter(Boolean)
-      .join(' ');
+    // ── 2. Rendered Visible Text Nodes ──
+    if (text && text.trim().length > 0) {
+      const piiMatches = detectPII(text, contextStr, 'dom');
 
-    if (textToScan) {
-      const textDetections = detectInText(textToScan, 'dom', contextText);
-      for (const det of textDetections) {
-        let mapped = null;
-        if (element.tokens && element.tokens.length > 0 && typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper) {
-          mapped = Privamon.DOMRangeMapper.mapSpanToDomBoxes(det.span.start, det.span.end, element.tokens);
+      for (const match of piiMatches) {
+        // Map match to exact word token rects if range tokens are available
+        let matchedBbox = null;
+        let matchedBoxes = [];
+        let matchedTokens = [];
+
+        if (tokens && tokens.length > 0) {
+          // Find tokens overlapping this character span
+          const spanTokens = tokens.filter(t => t.start < match.span.end && t.end > match.span.start);
+          if (spanTokens.length > 0) {
+            matchedTokens = spanTokens.map(t => t.id);
+            matchedBoxes = spanTokens.map(t => t.bbox);
+
+            // Compute enclosing box for these tokens
+            const minX = Math.min(...matchedBoxes.map(b => b.x));
+            const minY = Math.min(...matchedBoxes.map(b => b.y));
+            const maxX = Math.max(...matchedBoxes.map(b => b.x + b.width));
+            const maxY = Math.max(...matchedBoxes.map(b => b.y + b.height));
+
+            matchedBbox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+          }
         }
 
-        const bbox = (mapped && mapped.bbox) ? mapped.bbox : element.bbox;
-        const boxes = (mapped && mapped.boxes && mapped.boxes.length > 0) ? mapped.boxes : (bbox ? [bbox] : []);
-        const tokenIds = (mapped && mapped.tokens) ? mapped.tokens : [];
+        // If tokens not available, interpolate sub-box — NEVER use a giant container bbox
+        if (!matchedBbox) {
+          if (element.bbox && element.bbox.width <= 350 && element.bbox.height <= 50 && match.text.length >= text.length * 0.6) {
+            matchedBbox = element.bbox;
+            matchedBoxes = [element.bbox];
+          } else if (element.bbox && text.length > 0 && match.span) {
+            const charWidth = element.bbox.width / Math.max(1, text.length);
+            const subX = element.bbox.x + Math.round(match.span.start * charWidth);
+            const subW = Math.max(20, Math.round(match.text.length * charWidth));
+            const clampedW = Math.min(subW, (element.bbox.x + element.bbox.width) - subX);
+            matchedBbox = { x: subX, y: element.bbox.y, width: clampedW, height: Math.min(element.bbox.height, 40) };
+            matchedBoxes = [matchedBbox];
+          } else {
+            continue;
+          }
+        }
 
-        detections.push({
-          ...det,
-          bbox,
-          boxes,
-          tokens: tokenIds,
-          elementId: element.id || element.testId || null,
-        });
+        const mappedBbox = mapper ? mapper.mapBbox(matchedBbox) : matchedBbox;
+        const mappedBoxes = mapper ? matchedBoxes.map(b => mapper.mapBbox(b)) : matchedBoxes;
+
+        candidates.push(toCandidate({
+          type: match.type,
+          source: 'dom',
+          text: match.text,
+          bbox: mappedBbox,
+          boxes: mappedBoxes,
+          tokens: matchedTokens,
+          confidence: match.confidence,
+          elementId: elementId || id || null,
+          reason: `regex:${match.patternName}${match.checksumValidated ? ':checksum_valid' : ''}`,
+          coordinateSpace: mapper ? 'screenshot' : 'viewport'
+        }));
       }
     }
 
-    if (element.label) {
-      const labelDetections = detectInText(element.label, 'dom', '');
-      for (const det of labelDetections) {
-        detections.push({
-          ...det,
-          bbox: element.bbox,
-          boxes: [element.bbox],
-          reason: 'label text',
-        });
-      }
-    }
-
-    return detections;
+    return candidates;
   }
 
   /**
-   * Detect PII across all extracted DOM elements.
-   * @param {Array} elements - Elements from dom-extractor
-   * @returns {Array} All detections
+   * Batch processes all extracted DOM elements completely in-browser.
+   * @param {Array<Object>} elements - From dom-extractor
+   * @param {Object} [mapper=null] - CoordinateMapper instance
+   * @returns {Array<Object>} Array of normalized DetectionCandidate objects
    */
-  function detectAllDom(elements) {
-    const allDetections = [];
-    for (const element of elements) {
-      if (element.isPixelContent) continue;
-      const detections = detectInElement(element);
-      allDetections.push(...detections);
+  function detectDOMBatch(elements = [], mapper = null) {
+    if (!elements || !elements.length) return [];
+    const allCandidates = [];
+
+    for (const el of elements) {
+      const elCandidates = detectInDOMElement(el, mapper);
+      if (elCandidates.length > 0) {
+        allCandidates.push(...elCandidates);
+      }
     }
-    return allDetections;
+
+    return allCandidates;
+  }
+
+  /**
+   * Alias for detectPII with caller-expected parameter order.
+   * Callers use detectInText(text, source, nearbyContext).
+   * detectPII uses detectPII(text, nearbyContext, source).
+   */
+  function detectInText(text, source = 'dom', nearbyContext = '') {
+    return detectPII(text, nearbyContext, source);
   }
 
   return {
+    toCandidate,
+    detectPII,
     detectInText,
-    detectAsync,
-    detectBatchAsync,
-    detectDOMBatchAsync,
-    detectInElement,
-    detectAllDom,
-    checkEngineHealth,
-    getEngineHealth,
+    detectInDOMElement,
+    detectDOMBatch,
+    luhnValid,
     validateVerhoeff,
-    aadhaarCheck,
-    hasNegativePrefix,
-    PATTERNS,
-    CONTEXT_KEYWORDS,
   };
 })();

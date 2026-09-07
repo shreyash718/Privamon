@@ -8,11 +8,19 @@
     "activeTab",
     "scripting",
     "offscreen",
-    "storage"
+    "storage",
+    "unlimitedStorage",
+    "sidePanel"
   ],
+  "side_panel": {
+    "default_path": "popup.html?view=sidepanel"
+  },
   "host_permissions": [
     "http://127.0.0.1/*",
-    "http://localhost/*"
+    "http://localhost/*",
+    "https://huggingface.co/*",
+    "https://*.huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*"
   ],
 
   "background": {
@@ -38,7 +46,10 @@
     {
       "resources": [
         "lib/tesseract/*",
-        "lib/onnx/*"
+        "lib/onnx/*",
+        "lib/onnx/*.mjs",
+        "lib/transformers/*",
+        "*.traineddata"
       ],
       "matches": ["<all_urls>"]
     }

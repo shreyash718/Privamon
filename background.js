@@ -27,49 +27,160 @@
 
 let offscreenReady = false;
 
-async function ensureOffscreenDocument() {
-  // Check if we already have an offscreen document
-  if (offscreenReady) {
-    // Double-check it still exists
-    try {
-      const existingContexts = await chrome.runtime.getContexts({
-        contextTypes: ['OFFSCREEN_DOCUMENT'],
-        documentUrls: [chrome.runtime.getURL('offscreen/offscreen.html')],
+/**
+ * Pings the offscreen document to check if it is loaded, parsed, and listening.
+ */
+async function pingOffscreen(timeoutMs = 600) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (!done) {
+        done = true;
+        resolve(false);
+      }
+    }, timeoutMs);
+
+    chrome.runtime.sendMessage({ action: 'pingOffscreen' })
+      .then((res) => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          resolve(res && res.ready === true);
+        }
+      })
+      .catch(() => {
+        if (!done) {
+          done = true;
+          clearTimeout(timer);
+          resolve(false);
+        }
       });
-      if (existingContexts.length > 0) return;
-    } catch (e) {
-      // getContexts may not be available — fall through to creation
-    }
+  });
+}
+
+async function ensureOffscreenDocument() {
+  // 1. If marked ready, verify with a fast ping
+  if (offscreenReady) {
+    const isAlive = await pingOffscreen(300);
+    if (isAlive) return;
+    offscreenReady = false;
   }
 
-  // Create offscreen document (catch if already exists)
+  // 2. Check if an offscreen context already exists in the browser
+  let hasContext = false;
+  try {
+    const contexts = await chrome.runtime.getContexts({
+      contextTypes: ['OFFSCREEN_DOCUMENT'],
+      documentUrls: [chrome.runtime.getURL('offscreen/offscreen.html')],
+    });
+    hasContext = contexts && contexts.length > 0;
+  } catch (e) {
+    // getContexts may not be available on all Chrome versions
+  }
+
+  if (hasContext) {
+    const isAlive = await pingOffscreen(400);
+    if (isAlive) {
+      offscreenReady = true;
+      return;
+    }
+    // Document exists but is unresponsive — close it to start fresh
+    try {
+      if (chrome.offscreen && typeof chrome.offscreen.closeDocument === 'function') {
+        await chrome.offscreen.closeDocument();
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  // 3. Create fresh offscreen document
   try {
     await chrome.offscreen.createDocument({
       url: 'offscreen/offscreen.html',
       reasons: [chrome.offscreen.Reason.WORKERS, chrome.offscreen.Reason.BLOBS],
       justification: 'Image processing for PII redaction (Canvas), OCR (Workers)',
     });
-    offscreenReady = true;
     console.log('[Background] Offscreen document created');
   } catch (err) {
-    if (err.message?.includes('Only a single offscreen')) {
-      // Already exists — that's fine
-      offscreenReady = true;
-    } else {
+    if (!err.message?.includes('Only a single offscreen')) {
       throw err;
     }
   }
+
+  // 4. Poll ping until offscreen scripts finish parsing and initialize (up to 12s)
+  const startTime = performance.now();
+  while (performance.now() - startTime < 12000) {
+    const ready = await pingOffscreen(300);
+    if (ready) {
+      offscreenReady = true;
+      console.log(`[Background] Offscreen document confirmed ready in ${Math.round(performance.now() - startTime)}ms`);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  throw new Error('Offscreen document failed to initialize modules within 12 seconds');
+}
+
+// ── Helper: Forward message to popup UI ──
+
+/**
+ * Forward a message to the popup (and any open results pages).
+ * Non-critical — if popup is closed, the message is silently dropped.
+ */
+function forwardToPopup(message) {
+  chrome.runtime.sendMessage(message).catch(() => {
+    // Popup might be closed — that's fine
+  });
 }
 
 // ── Message Handling ──
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // From popup: start analysis
+  // Conversational agent query with automatic screenshot, redaction, server consultation, and history
+  if (message.action === 'chatWithAgent') {
+    handleChatWithAgent(message.task, message.serverUrl)
+      .then(response => sendResponse(response))
+      .catch(err => sendResponse({ error: err.message }));
+    return true; // Async response
+  }
+
+  // From popup: start analysis (legacy one-shot analysis)
   if (message.action === 'startAnalysis') {
     handleStartAnalysis(message.task)
       .then(response => sendResponse(response))
       .catch(err => sendResponse({ error: err.message }));
     return true; // Async response
+  }
+
+  // Retrieve chat history
+  if (message.action === 'getChatHistory') {
+    chrome.storage.local.get(['privamon_chat_history'], (res) => {
+      sendResponse({ history: res.privamon_chat_history || [] });
+    });
+    return true;
+  }
+
+  // Clear chat history
+  if (message.action === 'clearChatHistory') {
+    chrome.storage.local.set({ privamon_chat_history: [] }, () => {
+      sendResponse({ success: true });
+    });
+    return true;
+  }
+
+  // Check server health
+  if (message.action === 'checkServerStatus') {
+    const url = (message.serverUrl || 'http://localhost:8000').replace(/\/+$/, '') + '/health';
+    fetch(url)
+      .then(r => r.json())
+      .then(data => sendResponse({ online: data.status === 'ok' || true, data }))
+      .catch(err => sendResponse({ online: false, error: err.message }));
+    return true;
+  }
+
+  // From offscreen: offscreen document loaded and ready
+  if (message.type === 'offscreenReady') {
+    offscreenReady = true;
   }
 
   // From offscreen: pipeline progress updates → forward to popup
@@ -256,25 +367,272 @@ async function handlePipelineResult(message) {
       });
     }
   } finally {
-    // Close offscreen document so memory is released and next run loads clean state from disk
-    try {
-      if (chrome.offscreen && typeof chrome.offscreen.closeDocument === 'function') {
-        await chrome.offscreen.closeDocument();
-        console.log('[Background] Offscreen document closed');
-      }
-    } catch (e) { /* ignore */ }
-    offscreenReady = false;
+    // Keep offscreen document alive across queries so persistent ONNX sessions and
+    // Tesseract worker remain warm in memory without re-parsing/re-downloading.
+    offscreenReady = true;
   }
 }
 
 /**
- * Forward a message to the popup (and any open results pages).
- * Non-critical — if popup is closed, the message is silently dropped.
+ * Conversational agent query flow:
+ * 1. Capture screenshot of the active tab.
+ * 2. Extract DOM elements.
+ * 3. Run full local privacy pipeline (PII detection, face detection, solid redactions, verification).
+ * 4. Transmit redacted screenshot & sanitized DOM to server_side_agent (/interpret).
+ * 5. Save the turn in chrome.storage.local (chat history).
+ * 6. Return response to popup / side panel.
  */
-function forwardToPopup(message) {
-  chrome.runtime.sendMessage(message).catch(() => {
-    // Popup might be closed — that's fine
+async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
+  const queryText = (task && task.trim()) ? task.trim() : 'Analyze screen and recommend what to do';
+  console.log('[Background] Chat with agent requested. Query:', queryText);
+
+  // Get active tab
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) throw new Error('No active tab found');
+
+  // Step 1: Capture screenshot
+  forwardToPopup({
+    type: 'pipelineProgress',
+    stageId: 'capture',
+    status: 'active',
+    statusText: 'Capturing screen...',
+  });
+
+  const screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+
+  // Step 2: Extract DOM
+  forwardToPopup({
+    type: 'pipelineProgress',
+    stageId: 'dom',
+    status: 'active',
+    statusText: 'Extracting DOM context...',
+  });
+
+  const domResults = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
+  });
+  const domData = domResults[0]?.result;
+  if (!domData) throw new Error('DOM extraction returned no data');
+
+  // Step 3: Ensure offscreen document & run privacy pipeline
+  forwardToPopup({
+    type: 'pipelineProgress',
+    stageId: 'redaction',
+    status: 'active',
+    statusText: 'Redacting PII and detecting faces locally...',
+  });
+
+  await ensureOffscreenDocument();
+  const pipelineResult = await runPipelineAsync(screenshot, domData, queryText);
+
+  // Step 4: Transmit sanitized screenshot to server side agent
+  forwardToPopup({
+    type: 'pipelineProgress',
+    stageId: 'server',
+    status: 'active',
+    statusText: 'Consulting vision agent on server...',
+  });
+
+  let agentResp = { actions: [], message: '', thinking: '', raw_model_output: '' };
+  try {
+    agentResp = await sendToServerAgent(pipelineResult, queryText, serverUrl);
+  } catch (serverErr) {
+    console.warn('[Background] Server side agent query failed:', serverErr.message);
+    agentResp = {
+      actions: [],
+      message: `Server Error: ${serverErr.message}. Ensure 'uvicorn main:app --reload --port 8000' is running.`,
+      thinking: '',
+      raw_model_output: ''
+    };
+  }
+
+  // Step 5: Construct chat turn
+  const turn = {
+    id: 'turn_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+    timestamp: Date.now(),
+    task: queryText,
+    screenshotUrl: pipelineResult.sanitizedScreenshot,
+    redactionsCount: (pipelineResult.redactions || []).length,
+    redactedRegions: (pipelineResult.redactions || []).map(r => ({
+      bbox: [
+        Math.round(r.bbox.x),
+        Math.round(r.bbox.y),
+        Math.round(r.bbox.x + r.bbox.width),
+        Math.round(r.bbox.y + r.bbox.height)
+      ],
+      reason: r.type || r.reason || 'redacted_pii'
+    })),
+    thinking: agentResp.thinking || '',
+    actions: agentResp.actions || [],
+    message: agentResp.message || agentResp.raw_model_output || 'Analysis complete.',
+    rawModelOutput: agentResp.raw_model_output || '',
+    pageUrl: tab.url || '',
+    pageTitle: tab.title || 'Web Page'
+  };
+
+  // Step 6: Append to persistent chat history in chrome.storage.local
+  try {
+    const data = await chrome.storage.local.get(['privamon_chat_history']);
+    const history = data.privamon_chat_history || [];
+    history.push(turn);
+    // Keep up to 30 past turns
+    const trimmed = history.slice(-30);
+    await chrome.storage.local.set({ privamon_chat_history: trimmed });
+    console.log(`[Background] Saved turn ${turn.id} to chat history. Total turns: ${trimmed.length}`);
+  } catch (storeErr) {
+    console.error('[Background] Failed to save chat turn:', storeErr);
+  }
+
+  // Also save to session storage for results page
+  try {
+    await chrome.storage.session.set({
+      privamon_result: {
+        sanitizedScreenshot: pipelineResult.sanitizedScreenshot,
+        detections: pipelineResult.detections,
+        allCandidates: pipelineResult.allCandidates || pipelineResult.detections,
+        redactions: pipelineResult.redactions || [],
+        reviews: pipelineResult.reviews || [],
+        kept: pipelineResult.kept || [],
+        ocrWords: pipelineResult.ocrWords || [],
+        detectionSummary: pipelineResult.detectionSummary,
+        sanitizedDom: pipelineResult.sanitizedDom,
+        ocrRawText: pipelineResult.ocrRawText,
+        timings: pipelineResult.timings,
+        metadata: pipelineResult.metadata,
+        timestamp: Date.now(),
+      }
+    });
+  } catch (e) { /* ignore */ }
+
+  forwardToPopup({
+    type: 'pipelineComplete',
+    result: {
+      detectionSummary: pipelineResult.detectionSummary,
+      timings: pipelineResult.timings,
+      turn: turn
+    }
+  });
+
+  return { success: true, turn };
+}
+
+/**
+ * Executes the offscreen privacy pipeline asynchronously.
+ */
+function runPipelineAsync(screenshot, domData, task) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error('Privacy pipeline timed out after 90 seconds. Try running on a simpler page.'));
+    }, 90000);
+
+    function listener(message) {
+      if (message.type === 'pipelineResult') {
+        cleanup();
+        if (message.error) {
+          reject(new Error(message.error));
+        } else {
+          resolve(message.result);
+        }
+      } else if (message.type === 'pipelineError') {
+        cleanup();
+        reject(new Error(message.error || 'Pipeline error occurred'));
+      }
+    }
+
+    function cleanup() {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      chrome.runtime.onMessage.removeListener(listener);
+    }
+
+    chrome.runtime.onMessage.addListener(listener);
+
+    // Send runPipeline and retry if not acknowledged immediately
+    (async () => {
+      let acked = false;
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        if (finished) break;
+        try {
+          const resp = await chrome.runtime.sendMessage({
+            action: 'runPipeline',
+            screenshot,
+            domData,
+            task,
+          });
+          if (resp && resp.status === 'started') {
+            acked = true;
+            console.log(`[Background] Pipeline run acknowledged on attempt ${attempt}`);
+            break;
+          }
+        } catch (sendErr) {
+          console.warn(`[Background] Attempt ${attempt} to dispatch runPipeline:`, sendErr.message);
+        }
+        await new Promise(r => setTimeout(r, 250));
+      }
+      if (!acked && !finished) {
+        console.warn('[Background] Pipeline message not acknowledged by offscreen, waiting on listener anyway');
+      }
+    })();
   });
 }
 
+/**
+ * Sends the sanitized image, redacted regions, task, and DOM context to server_side_agent.
+ */
+async function sendToServerAgent(result, task, serverUrl = 'http://localhost:8000') {
+  const endpoint = (serverUrl || 'http://localhost:8000').replace(/\/+$/, '') + '/interpret';
+
+  // Format redacted regions
+  const redacted_regions = (result.redactions || []).map(r => ({
+    bbox: [
+      Math.round(r.bbox.x),
+      Math.round(r.bbox.y),
+      Math.round(r.bbox.x + r.bbox.width),
+      Math.round(r.bbox.y + r.bbox.height)
+    ],
+    reason: r.type || r.reason || 'redacted_pii'
+  }));
+
+  // Format concise sanitized DOM context
+  let sanitized_dom = '';
+  if (Array.isArray(result.sanitizedDom) && result.sanitizedDom.length > 0) {
+    const lines = [];
+    for (const el of result.sanitizedDom.slice(0, 40)) {
+      const tag = el.tag || 'elem';
+      const text = el.text ? ` text="${el.text.slice(0, 60)}"` : '';
+      const label = el.label ? ` label="${el.label.slice(0, 60)}"` : '';
+      const val = el.value ? ` value="${el.value}"` : '';
+      const type = el.inputType ? ` type="${el.inputType}"` : '';
+      const b = el.bbox ? ` bbox="[${el.bbox.x},${el.bbox.y},${el.bbox.x + el.bbox.width},${el.bbox.y + el.bbox.height}]"` : '';
+      lines.push(`<${tag}${type}${label}${text}${val}${b}/>`);
+    }
+    sanitized_dom = lines.join('\n');
+  }
+
+  const payload = {
+    image_b64: result.sanitizedScreenshot,
+    task: task,
+    redacted_regions: redacted_regions,
+    sanitized_dom: sanitized_dom
+  };
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Server ${response.status}: ${errText.slice(0, 200)}`);
+  }
+
+  return await response.json();
+}
+
 console.log('[Background] Privamon service worker initialized');
+

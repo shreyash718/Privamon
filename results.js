@@ -627,6 +627,8 @@
       address: '🏠 Addresses',
       employee_id: '🪪 Employee IDs',
       customer_id: '🏷️ Customer IDs',
+      device_id: '📱 Device IMEI/IDs',
+      signature: '✍️ Signatures',
       other: '⚠️ Other Sensitive',
     };
 

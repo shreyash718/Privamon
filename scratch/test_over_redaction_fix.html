@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Privamon Comprehensive Over-Redaction & Table PII Test</title>
+  <script src="../content/dom-range-mapper.js"></script>
+  <script src="../privacy/pii-detector.js"></script>
+  <script src="../privacy/coordinate-mapper.js"></script>
+  <script src="../privacy/ner-engine.js"></script>
+  <script src="../privacy/fusion.js"></script>
+  <script src="../privacy/redactor.js"></script>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    .header { width: 1000px; height: 90px; background: #0088cc; color: white; padding: 10px; }
+    .top-nav { width: 1000px; height: 40px; background: #1a2226; color: white; display: flex; justify-content: flex-end; }
+    .nav-user { margin-right: 20px; line-height: 40px; font-weight: bold; }
+    .card-container { display: flex; width: 800px; margin: 20px auto; }
+    .left-card { width: 400px; height: 350px; background: #0099ff; color: white; padding: 20px; }
+    .right-card { width: 400px; height: 350px; background: #ffffff; padding: 20px; }
+    .table-container { width: 950px; margin: 20px auto; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+    .whatsapp-main { width: 900px; height: 600px; background: #121b22; color: #e9edef; padding: 20px; margin-top: 30px; }
+  </style>
+</head>
+<body>
+  <!-- Top Nav with student roll number badge -->
+  <div class="top-nav">
+    <span class="nav-user" id="user-badge">24001003121</span>
+  </div>
+
+  <!-- Test Case 1: University Portal -->
+  <div id="portal-wrapper">
+    <div class="header" id="portal-header">
+      <h1>J.C. Bose University of Science & Technology</h1>
+      <p>YMCA, Faridabad</p>
+    </div>
+    <div class="card-container" id="portal-cards">
+      <div class="left-card" id="news-card">
+        <h2>Important News And Alerts</h2>
+        <ul>
+          <li>Result - For Affiliated Colleges Students</li>
+          <li>Result Report</li>
+        </ul>
+        <button>Student Registration</button>
+        <button>Request for Resend OTP</button>
+      </div>
+      <div class="right-card" id="login-card">
+        <h2>Welcome To J.C.Bose UST</h2>
+        <label for="uname">RollNo</label>
+        <input type="text" id="uname" name="rollno" value="24001003121">
+        <label for="pwd">Password</label>
+        <input type="password" id="pwd" name="password" value="secret123">
+        <button>Search</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Test Case 2: Student Details Table (Exact User Screenshot: 10 columns, blank action th) -->
+  <div class="table-container" id="student-table-container">
+    <h2>Student Details</h2>
+    <table id="student-table">
+      <thead>
+        <tr>
+          <th style="width: 60px;"></th>
+          <th>Payment Gateway</th>
+          <th>RollNo</th>
+          <th>FirstName</th>
+          <th>Order_id</th>
+          <th>Order_status</th>
+          <th>ChallenNo</th>
+          <th>Mer_amount</th>
+          <th>Payment_mode</th>
+          <th>Amount</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><a href="#" class="btn-update">Update</a></td>
+          <td>H</td>
+          <td class="cell-rollno">24001003121</td>
+          <td class="cell-name">Shreyash</td>
+          <td>M_YMCA/Main/19-12420_JBV</td>
+          <td>Successful</td>
+          <td>YMCA/Main/19-12420</td>
+          <td>50584</td>
+          <td>UPI</td>
+          <td>50584.00</td>
+        </tr>
+        <tr>
+          <td><a href="#" class="btn-update">Update</a></td>
+          <td>H</td>
+          <td class="cell-rollno">24001003121</td>
+          <td class="cell-name">Shreyash</td>
+          <td>M_YMCA/Main/19-12420_JJT</td>
+          <td>Unsuccessful</td>
+          <td>YMCA/Main/19-12420</td>
+          <td>50584</td>
+          <td>UPI</td>
+          <td>50584.00</td>
+        </tr>
+        <tr>
+          <td><a href="#" class="btn-update">Update</a></td>
+          <td>H</td>
+          <td class="cell-rollno">24001003121</td>
+          <td class="cell-name">Shreyash</td>
+          <td>M_YMCA/Main/18-21318_XS2</td>
+          <td>Shipped</td>
+          <td>YMCA/Main/18-21318</td>
+          <td>48129</td>
+          <td>UPI</td>
+          <td>48129.00</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Test Case 3: WhatsApp Web -->
+  <div class="whatsapp-main" id="wa-main">
+    <div class="chat-header">
+      <h3>UCC Informal 2k23</h3>
+      <p>A N ⚡ H U, Aditya, Anshu, Anubhav, Tanya Bhadauriya, Kunal</p>
+    </div>
+    <div class="messages">
+      <div class="msg">Happy birthday @~Tanya Bhadauriya and @~Kunal</div>
+      <div class="msg">Contact coordinator: +91 83078 41099</div>
+      <div class="msg">Koi assignment to nhi h krne ko ?</div>
+    </div>
+  </div>
+
+  <script>
+    window.testResults = { passed: false, errors: [], logs: [] };
+
+    async function runTest() {
+      try {
+        console.log('[TEST] Starting Comprehensive PII & Table Extraction Test...');
+
+        const offsetLeft = 0;
+        const offsetTop = 0;
+        const elements = [];
+
+        const CONTAINER_TAGS = new Set([
+          'DIV', 'HEADER', 'FOOTER', 'MAIN', 'SECTION', 'ARTICLE', 'ASIDE', 'NAV',
+          'FORM', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'TR', 'UL', 'OL', 'DL', 'DETAILS'
+        ]);
+        const CHILD_BLOCK_TAGS = new Set([
+          'DIV', 'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'TD', 'TH',
+          'FORM', 'HEADER', 'FOOTER', 'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'NAV',
+          'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'BLOCKQUOTE', 'PRE', 'BUTTON', 'INPUT', 'TEXTAREA'
+        ]);
+
+        function isStructuralContainer(el) {
+          if (el.tagName === 'TABLE' || el.tagName === 'THEAD' || el.tagName === 'TBODY' || el.tagName === 'TFOOT' || el.tagName === 'TR') {
+            return true;
+          }
+          if (!CONTAINER_TAGS.has(el.tagName)) return false;
+          for (let i = 0; i < el.children.length; i++) {
+            if (CHILD_BLOCK_TAGS.has(el.children[i].tagName)) return true;
+          }
+          return false;
+        }
+
+        function findTableColumnHeader(el) {
+          const cell = el.closest('td, th');
+          if (!cell) return '';
+          const table = cell.closest('table');
+          if (!table) return '';
+
+          let headerRow = table.querySelector('thead tr');
+          if (!headerRow) headerRow = table.querySelector('tr');
+          if (!headerRow || !headerRow.children || headerRow.children.length === 0) return '';
+
+          // 1. Precise Geometric Horizontal Center Match
+          try {
+            const cellRect = cell.getBoundingClientRect();
+            if (cellRect.width > 0) {
+              const cellCenterX = cellRect.left + cellRect.width / 2;
+              for (let i = 0; i < headerRow.children.length; i++) {
+                const th = headerRow.children[i];
+                const thRect = th.getBoundingClientRect();
+                if (cellCenterX >= thRect.left - 4 && cellCenterX <= thRect.right + 4) {
+                  const text = th.textContent.trim().slice(0, 100);
+                  if (text) return text;
+                }
+              }
+            }
+          } catch (e) {}
+
+          // 2. Index-based fallback
+          const cellIndex = cell.cellIndex;
+          if (typeof cellIndex === 'number' && cellIndex >= 0 && headerRow.children[cellIndex]) {
+            return headerRow.children[cellIndex].textContent.trim().slice(0, 100);
+          }
+          return '';
+        }
+
+        function findContextLabel(el) {
+          if (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') {
+            if (el.id) {
+              const label = document.querySelector(`label[for="${el.id}"]`);
+              if (label) return label.textContent.trim();
+            }
+            return '';
+          }
+          const colHeader = findTableColumnHeader(el);
+          if (colHeader) return colHeader;
+          const prev = el.previousElementSibling;
+          if (prev && (prev.tagName === 'LABEL' || prev.tagName === 'DT' || prev.tagName === 'TH')) {
+            return prev.textContent.trim().slice(0, 100);
+          }
+          return el.getAttribute('aria-label') || el.getAttribute('title') || '';
+        }
+
+        const allNodes = document.querySelectorAll('*');
+        for (const el of allNodes) {
+          if (el.tagName === 'HTML' || el.tagName === 'HEAD' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE' || el.tagName === 'BODY') continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 4 || rect.height < 4) continue;
+
+          const isContainer = isStructuralContainer(el);
+          const isHeader = (el.tagName === 'TH');
+          const entry = {
+            tag: el.tagName.toLowerCase(),
+            id: el.id || null,
+            name: el.getAttribute('name') || null,
+            inputType: el.type || null,
+            value: el.value || null,
+            label: findContextLabel(el),
+            isContainer,
+            isHeader,
+            bbox: {
+              x: Math.round(rect.left),
+              y: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height)
+            }
+          };
+
+          if (!isContainer && el.tagName !== 'INPUT') {
+            const res = Privamon.DOMRangeMapper.extractTextAndTokens(el, offsetLeft, offsetTop);
+            if (res.text) {
+              entry.text = res.text;
+              entry.tokens = res.tokens;
+            }
+          }
+
+          if (el.tagName === 'INPUT' && el.value) {
+            entry.tokens = [{
+              id: 'input_' + el.id,
+              text: el.value,
+              start: 0,
+              end: el.value.length,
+              bbox: entry.bbox,
+              boxes: [entry.bbox]
+            }];
+          }
+
+          elements.push(entry);
+        }
+
+        console.log(`[TEST] Extracted ${elements.length} elements`);
+
+        // 2. Identity Mapper
+        const mapper = Privamon.CoordinateMapper.create(
+          { cssViewportWidth: 1000, cssViewportHeight: 1000 },
+          { width: 1000, height: 1000 }
+        );
+
+        // 3. Run DOM PII Detection
+        const domCandidates = Privamon.PIIDetector.detectDOMBatch(elements, mapper);
+
+        // Cross-Element Propagation (mirroring sanitize-pipeline.js)
+        const confirmedIdentifiers = new Set();
+        const confirmedNames = new Set();
+
+        for (const el of elements) {
+          if (el.isHeader || el.tag === 'th') continue;
+
+          if (el.value) {
+            const val = el.value.trim();
+            const isSens = (el.inputType === 'password' || /roll|student|user|login|enroll|reg/i.test(el.label || el.name || el.id || ''));
+            if (isSens && val.length >= 4 && !val.includes(' ') && /\d/.test(val)) {
+              confirmedIdentifiers.add(val);
+            }
+          }
+          if (el.text && el.label && /roll|student\s*id|enroll|reg\s*no/i.test(el.label)) {
+            const val = el.text.trim();
+            if (val.length >= 6 && val.length <= 25 && /\d/.test(val) && !/roll/i.test(val)) {
+              confirmedIdentifiers.add(val);
+            }
+          }
+          if (el.text && el.label && /first\s*name|firstname|last\s*name|lastname|full\s*name|student\s*name/i.test(el.label)) {
+            const val = el.text.trim();
+            const isHeaderWord = /^(?:first\s*name|firstname|last\s*name|lastname|full\s*name|fullname|name|student|update|successful|unsuccessful|initiated|shipped|upi|payment|h)$/i.test(val);
+            if (val.length >= 2 && val.length <= 40 && !isHeaderWord) {
+              confirmedNames.add(val);
+            }
+          }
+        }
+
+        for (const cand of domCandidates) {
+          if (cand.confidence >= 0.80) {
+            if (cand.type === 'username' || cand.type === 'password') {
+              const val = (cand.originalValue || (cand.text !== '[MASKED VALUE]' ? cand.text : '')).trim();
+              if (val && val.length >= 4 && !val.includes(' ') && /\d/.test(val)) {
+                confirmedIdentifiers.add(val);
+              }
+            } else if (cand.type === 'name') {
+              const val = (cand.text || '').trim();
+              const isHeaderWord = /^(?:home|dashboard|result|update|search|firstname|first\s*name|lastname|last\s*name|fullname|full\s*name|name)$/i.test(val);
+              if (val && val.length >= 3 && !isHeaderWord) {
+                confirmedNames.add(val);
+              }
+            }
+          }
+        }
+
+        if (confirmedIdentifiers.size > 0 || confirmedNames.size > 0) {
+          for (const el of elements) {
+            if (el.isContainer || el.isHeader || el.tag === 'th' || !el.text) continue;
+            const elText = el.text;
+
+            for (const idVal of confirmedIdentifiers) {
+              const idx = elText.indexOf(idVal);
+              if (idx !== -1) {
+                const alreadyIn = domCandidates.some(c => c.elementId === el.id && c.text === idVal);
+                if (!alreadyIn) {
+                  domCandidates.push(Privamon.PIIDetector.toCandidate({
+                    type: 'username',
+                    source: 'dom',
+                    text: idVal,
+                    bbox: mapper.mapBbox(el.bbox),
+                    boxes: [mapper.mapBbox(el.bbox)],
+                    confidence: 0.95,
+                    elementId: el.id || null,
+                    reason: 'propagated_identifier',
+                    coordinateSpace: 'screenshot'
+                  }));
+                }
+              }
+            }
+
+            for (const nameVal of confirmedNames) {
+              const idx = elText.indexOf(nameVal);
+              if (idx !== -1) {
+                const alreadyIn = domCandidates.some(c => c.elementId === el.id && c.text === nameVal);
+                if (!alreadyIn) {
+                  domCandidates.push(Privamon.PIIDetector.toCandidate({
+                    type: 'name',
+                    source: 'dom',
+                    text: nameVal,
+                    bbox: mapper.mapBbox(el.bbox),
+                    boxes: [mapper.mapBbox(el.bbox)],
+                    confidence: 0.95,
+                    elementId: el.id || null,
+                    reason: 'propagated_name',
+                    coordinateSpace: 'screenshot'
+                  }));
+                }
+              }
+            }
+          }
+        }
+
+        console.log(`[TEST] DOM PII candidates: ${domCandidates.length}`);
+
+        // 4. Run NER Engine
+        const itemsForNER = [];
+        for (const el of elements) {
+          if (el.isContainer || el.isHeader) continue;
+          if (el.text && el.text.trim().length > 2) {
+            const mappedTokens = (el.tokens || []).map(t => ({
+              ...t,
+              bbox: mapper.mapBbox(t.bbox),
+              boxes: (t.boxes || []).map(b => mapper.mapBbox(b))
+            }));
+            itemsForNER.push({
+              text: el.text,
+              tokens: mappedTokens,
+              source: 'dom',
+              label: el.label || '',
+              bbox: mapper.mapBbox(el.bbox),
+              elementId: el.id,
+              coordinateSpace: 'screenshot'
+            });
+          }
+        }
+
+        const nerCandidates = await Privamon.NEREngine.detectEntities(itemsForNER, mapper);
+        console.log(`[TEST] NER candidates: ${nerCandidates.length}`);
+
+        // 5. Run Fusion
+        const allCandidates = [...domCandidates, ...nerCandidates];
+        const fusionResult = Privamon.Fusion.fuse(allCandidates, { mapper });
+        const redactions = fusionResult.redactions;
+        console.log(`[TEST] Redactions count: ${redactions.length}`);
+
+        // 6. Assertions
+        const errors = [];
+
+        // Check A: Every "Shreyash" in the table must be redacted
+        const shreyashRedactions = redactions.filter(r => r.text.includes('Shreyash'));
+        if (shreyashRedactions.length < 3) {
+          errors.push(`FAIL: Expected at least 3 redactions for 'Shreyash' in table rows, but found ${shreyashRedactions.length}`);
+        } else {
+          console.log(`[PASS] Found ${shreyashRedactions.length} 'Shreyash' table redactions.`);
+        }
+
+        // Check B: Every "24001003121" must be redacted (in search input, table rows, navbar)
+        const rollNoRedactions = redactions.filter(r => r.text.includes('24001003121') || (r.elementId === 'uname' && r.type === 'username'));
+        // We have: 1 in search input, 3 in table rows, 1 in navbar = 5 total
+        if (rollNoRedactions.length < 4) {
+          errors.push(`FAIL: Expected at least 4 redactions for RollNo '24001003121', but found ${rollNoRedactions.length}`);
+        } else {
+          console.log(`[PASS] Found ${rollNoRedactions.length} RollNo '24001003121' redactions across inputs, table, and navbar.`);
+        }
+
+        // Check C: Password redacted
+        const pwdRedaction = redactions.some(r => r.elementId === 'pwd' || r.type === 'password');
+        if (!pwdRedaction) {
+          errors.push("FAIL: Password input not redacted!");
+        } else {
+          console.log("[PASS] Password input redacted.");
+        }
+
+        // Check D: Phone in WhatsApp redacted
+        const phoneRedaction = redactions.some(r => r.type === 'phone' && r.text.includes('83078'));
+        if (!phoneRedaction) {
+          errors.push("FAIL: Phone number in WhatsApp not redacted!");
+        } else {
+          console.log("[PASS] Phone number in WhatsApp redacted.");
+        }
+
+        // Check E: Preserved containers
+        const portalHeaderRedacted = redactions.some(r => r.elementId === 'portal-header' || (r.bbox.width >= 900 && r.bbox.y < 150));
+        if (portalHeaderRedacted) errors.push("FAIL: Portal header was blacked out!");
+
+        const waMainRedacted = redactions.some(r => r.elementId === 'wa-main' || (r.bbox.width >= 800 && r.bbox.height >= 400));
+        if (waMainRedacted) errors.push("FAIL: WhatsApp chat pane was blacked out!");
+
+        const tableContainerRedacted = redactions.some(r => r.elementId === 'student-table-container' || (r.bbox.width >= 900 && r.bbox.height >= 200));
+        if (tableContainerRedacted) errors.push("FAIL: Entire table was blacked out!");
+
+        window.testResults.errors = errors;
+        window.testResults.passed = (errors.length === 0);
+        window.testResults.redactions = redactions.map(r => ({
+          type: r.type,
+          text: r.text,
+          decision: r.decision,
+          confidence: r.confidence,
+          bbox: r.bbox
+        }));
+
+        console.log(`[TEST FINISHED] Result: ${window.testResults.passed ? 'ALL TESTS PASSED' : 'FAILED'}`);
+        document.body.innerHTML += `<div id="status">${window.testResults.passed ? 'SUCCESS' : 'FAILURE'}</div><pre id="output">${JSON.stringify(window.testResults, null, 2)}</pre>`;
+      } catch (err) {
+        window.testResults.errors.push(err.stack || err.message);
+        window.testResults.passed = false;
+        document.body.innerHTML += `<div id="status">ERROR</div><pre id="output">${err.stack || err.message}</pre>`;
+      }
+    }
+
+    window.onload = runTest;
+  </script>
+</body>
+</html>

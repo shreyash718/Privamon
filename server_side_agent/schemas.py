@@ -12,11 +12,15 @@ class InterpretRequest(BaseModel):
     sanitized_dom: str = ""
 
 class Action(BaseModel):
-    type: Literal["click", "type", "scroll", "wait", "done"]
+    type: Optional[str] = "click"
     target_bbox: Optional[list[int]] = None
     value: Optional[str] = None
     reasoning: Optional[str] = None
+    description: Optional[str] = None
+    target: Optional[str] = None
 
 class InterpretResponse(BaseModel):
-    actions: list[Action]
+    actions: list[Action] = []
     raw_model_output: str
+    thinking: Optional[str] = None
+    message: Optional[str] = None

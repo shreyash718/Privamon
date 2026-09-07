@@ -15,7 +15,7 @@
   'use strict';
 
   // ── Configuration ──
-  const MAX_ELEMENTS = 500;       // Safety cap
+  const MAX_ELEMENTS = 4000;      // Safety cap (supports dense data tables and enterprise dashboards)
   const MIN_ELEMENT_SIZE = 4;     // Skip elements smaller than 4px in either dimension
   const TEXT_MAX_LENGTH = 500;    // Truncate very long text content
 
@@ -56,8 +56,38 @@
     'otp', 'pin', 'account', 'routing', 'bank', 'tax', 'salary', 'income',
     'dob', 'birth', 'age', 'gender', 'sex', 'phone', 'mobile', 'email',
     'address', 'zip', 'postal', 'name', 'fname', 'lname', 'first_name',
-    'last_name', 'full_name'
+    'last_name', 'full_name', 'username', 'user_name', 'user_id', 'userid',
+    'roll_no', 'rollno', 'enrollment', 'student_id', 'login'
   ];
+
+  // Container tags that act as structural layout wrappers
+  const CONTAINER_TAGS = new Set([
+    'DIV', 'HEADER', 'FOOTER', 'MAIN', 'SECTION', 'ARTICLE', 'ASIDE', 'NAV',
+    'FORM', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'TR', 'UL', 'OL', 'DL', 'DETAILS'
+  ]);
+
+  // Block-level child tags that indicate a container should NOT extract their text
+  const CHILD_BLOCK_TAGS = new Set([
+    'DIV', 'P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'TD', 'TH',
+    'FORM', 'HEADER', 'FOOTER', 'SECTION', 'ARTICLE', 'ASIDE', 'MAIN', 'NAV',
+    'TABLE', 'THEAD', 'TBODY', 'TFOOT', 'TR', 'BLOCKQUOTE', 'PRE', 'BUTTON', 'INPUT', 'TEXTAREA'
+  ]);
+
+  /**
+   * Checks if an element is a structural container with child block elements.
+   */
+  function isStructuralContainer(el) {
+    if (el.tagName === 'TABLE' || el.tagName === 'THEAD' || el.tagName === 'TBODY' || el.tagName === 'TFOOT' || el.tagName === 'TR') {
+      return true;
+    }
+    if (!CONTAINER_TAGS.has(el.tagName)) return false;
+    for (let i = 0; i < el.children.length; i++) {
+      if (CHILD_BLOCK_TAGS.has(el.children[i].tagName)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   // ── Viewport Info ──
   let viewportWidth = window.innerWidth;
@@ -107,6 +137,17 @@
       if (style.visibility === 'hidden') return false;
       if (parseFloat(style.opacity) < 0.05) return false;
       if (style.position !== 'fixed' && style.position !== 'sticky') return false;
+    }
+
+    // Reject elements that are explicitly marked as hidden by the page.
+    // This covers WhatsApp Web chat list behind media viewer (aria-hidden="true"),
+    // React portals with inert attribute, and standard HTML hidden attribute.
+    // NOTE: We use the explicit hidden attribute check instead of a broad modal
+    // containment check, because apps like WhatsApp Web may render the media
+    // viewer image in a separate DOM subtree (portal, sibling, or canvas)
+    // that is NOT a descendant of the first div[role="dialog"] found.
+    if (el.closest && el.closest('[aria-hidden="true"], [inert], [hidden]')) {
+      return false;
     }
 
     const style = window.getComputedStyle(el);
@@ -186,6 +227,82 @@
   }
 
   /**
+   * Find table column header for a table cell using geometric alignment and DataTables awareness.
+   */
+  function findTableColumnHeader(el) {
+    const cell = el.closest('td, th');
+    if (!cell) return '';
+    const table = cell.closest('table');
+    if (!table) return '';
+
+    // Search thead row: direct, or inside DataTables scroll wrappers
+    let headerRow = table.querySelector('thead tr');
+    if (!headerRow) {
+      const dtWrapper = table.closest('.dataTables_scroll') || table.closest('.dataTables_wrapper');
+      if (dtWrapper) {
+        headerRow = dtWrapper.querySelector('.dataTables_scrollHead thead tr') || dtWrapper.querySelector('thead tr');
+      }
+    }
+    if (!headerRow) {
+      const prevTable = table.previousElementSibling?.tagName === 'TABLE' ? table.previousElementSibling : null;
+      if (prevTable) headerRow = prevTable.querySelector('thead tr');
+    }
+    if (!headerRow) {
+      headerRow = table.querySelector('tr');
+    }
+    if (!headerRow || !headerRow.children || headerRow.children.length === 0) return '';
+
+    // 1. Precise Geometric Horizontal Center Match (handles missing header cells, offsets, and colspans)
+    try {
+      const cellRect = cell.getBoundingClientRect();
+      if (cellRect.width > 0) {
+        const cellCenterX = cellRect.left + cellRect.width / 2;
+        for (let i = 0; i < headerRow.children.length; i++) {
+          const th = headerRow.children[i];
+          const thRect = th.getBoundingClientRect();
+          if (cellCenterX >= thRect.left - 4 && cellCenterX <= thRect.right + 4) {
+            const text = th.textContent.trim().slice(0, 100);
+            if (text) return text;
+          }
+        }
+      }
+    } catch (e) {
+      // Fall through to index-based lookup
+    }
+
+    // 2. Index-based fallback
+    const cellIndex = cell.cellIndex;
+    if (typeof cellIndex === 'number' && cellIndex >= 0 && headerRow.children[cellIndex]) {
+      return headerRow.children[cellIndex].textContent.trim().slice(0, 100);
+    }
+    return '';
+  }
+
+  /**
+   * Universal context label resolver for inputs, table cells, and text nodes.
+   */
+  function findContextLabel(el) {
+    if (el.tagName === 'INPUT' || el.tagName === 'SELECT' || el.tagName === 'TEXTAREA') {
+      return findLabel(el);
+    }
+
+    // Table cell column header
+    const colHeader = findTableColumnHeader(el);
+    if (colHeader) return colHeader;
+
+    // Preceding label/dt/th
+    const prev = el.previousElementSibling;
+    if (prev && (prev.tagName === 'LABEL' || prev.tagName === 'DT' || prev.tagName === 'TH')) {
+      return prev.textContent.trim().slice(0, 100);
+    }
+
+    const dt = el.closest('dl')?.querySelector('dt');
+    if (dt) return dt.textContent.trim().slice(0, 100);
+
+    return el.getAttribute('aria-label') || el.getAttribute('title') || '';
+  }
+
+  /**
    * Determine if a name/id attribute looks sensitive.
    */
   function matchesSensitiveKeyword(value) {
@@ -254,7 +371,10 @@
   function buildElementEntry(el, rect) {
     const tag = el.tagName;
     const isInput = (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT');
-    const isPixel = PIXEL_TAGS.has(tag);
+    let isPixel = PIXEL_TAGS.has(tag);
+    if (!isPixel && (el.getAttribute('role') === 'img' || (el.style && el.style.backgroundImage && el.style.backgroundImage.includes('url(')))) {
+      isPixel = true;
+    }
 
     const entry = {
       tag: tag.toLowerCase(),
@@ -267,10 +387,19 @@
       isPixelContent: isPixel,
     };
 
-    // Text content (only for text-bearing elements)
-    if (!isPixel) {
-      if (typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper) {
-        const res = Privamon.DOMRangeMapper.extractTextAndTokens(el, offsetLeft, offsetTop);
+    // Check if this is a layout container holding child block elements
+    const isContainer = isStructuralContainer(el);
+    entry.isContainer = isContainer;
+    entry.isHeader = (tag === 'TH');
+
+    // Text content (only for text-bearing leaf elements, never containers)
+    if (!isPixel && !isContainer) {
+      const rangeMapper = (typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper)
+                       || (typeof window !== 'undefined' && window.Privamon && window.Privamon.DOMRangeMapper)
+                       || (typeof globalThis !== 'undefined' && globalThis.Privamon && globalThis.Privamon.DOMRangeMapper);
+
+      if (rangeMapper) {
+        const res = rangeMapper.extractTextAndTokens(el, offsetLeft, offsetTop);
         if (res.text) {
           entry.text = res.text.slice(0, TEXT_MAX_LENGTH);
           entry.tokens = res.tokens;
@@ -289,6 +418,11 @@
     const testId = el.getAttribute('data-testid') || el.getAttribute('data-id');
     if (testId) entry.testId = testId;
     if (el.id) entry.id = el.id;
+    if (el.className) entry.className = String(el.className);
+
+    // Associated label / table column / preceding context (for all elements)
+    const label = findContextLabel(el);
+    if (label) entry.label = label;
 
     // Input-specific attributes
     if (isInput) {
@@ -297,19 +431,21 @@
       entry.isSensitiveType = SENSITIVE_INPUT_TYPES.has(inputType);
 
       const name = el.name;
-      if (name) {
-        entry.name = name;
-        entry.sensitiveNameMatch = matchesSensitiveKeyword(name);
-      }
+      if (name) entry.name = name;
+
+      const placeholder = el.placeholder;
+      if (placeholder) entry.placeholder = placeholder;
+
+      entry.sensitiveNameMatch = matchesSensitiveKeyword(name)
+        || matchesSensitiveKeyword(el.id)
+        || matchesSensitiveKeyword(placeholder)
+        || matchesSensitiveKeyword(entry.label);
 
       const autocomplete = el.getAttribute('autocomplete');
       if (autocomplete) {
         entry.autocomplete = autocomplete;
         entry.isSensitiveAutocomplete = SENSITIVE_AUTOCOMPLETE.has(autocomplete);
       }
-
-      const placeholder = el.placeholder;
-      if (placeholder) entry.placeholder = placeholder;
 
       // Capture the current value (will be sanitized later if PII)
       const value = el.value;
@@ -325,10 +461,6 @@
           nodeId: entry.id || entry.testId || null
         }];
       }
-
-      // Associated label
-      const label = findLabel(el);
-      if (label) entry.label = label;
 
       // Mark as definitely sensitive if password type
       if (inputType === 'password') {

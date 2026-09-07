@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Privamon Invoice & Document PII Detection Test</title>
+  <script src="../content/dom-range-mapper.js"></script>
+  <script src="../privacy/pii-detector.js"></script>
+  <script src="../privacy/coordinate-mapper.js"></script>
+  <script src="../privacy/ner-engine.js"></script>
+  <script src="../privacy/fusion.js"></script>
+  <script src="../privacy/redactor.js"></script>
+</head>
+<body>
+  <h1>Privamon Invoice & Document PII Detection Test</h1>
+  <div id="status"></div>
+  <pre id="output"></pre>
+
+  <script>
+    window.testResults = { passed: false, errors: [], detections: [] };
+
+    async function runTest() {
+      const errors = [];
+
+      try {
+        console.log('[TEST] Starting invoice bill PII detection test...');
+
+        // 1. Full reconstructed OCR text of the user's bill
+        const billOcrText = `
+TAX INVOICE
+M. 9034776586
+M. 9896478495
+Shop No. 2, Civil Road, Opp. Gopal Complex, ROHTAK, Rohtak, Haryana-124001
+Auth. Partner : Samsung, Nokia, Oppo, Vivo, MI, Apple, htc
+All Kind of Accessories
+Bill. No. 13495
+Date 20/07/2024
+Name................................ Sanjeet
+Mob No..................................... 9518408436
+PARTICULARS Qty. RATE Amount
+Model No. .... F34 1 13000 13000
+IMEI No. 350134240111891
+Battery No............................
+Charger No............................
+Smart Phone
+Total Amount Before Tax
+GST : 06ARGPS3388E1ZJ
+Customer Signature
+For SHRI SHYAM COMMUNICATION
+Signature
+        `.trim();
+
+        // 2. Run PII detection
+        const detections = Privamon.PIIDetector.detectPII(billOcrText, '', 'ocr');
+        console.log('[TEST] Raw detections count:', detections.length);
+
+        // Convert to candidates for fusion
+        const candidates = detections.map((d, i) => Privamon.PIIDetector.toCandidate({
+          type: d.type,
+          source: 'ocr',
+          text: d.text,
+          bbox: { x: 50, y: 50 + i * 30, width: 120, height: 25 },
+          boxes: [{ x: 50, y: 50 + i * 30, width: 120, height: 25 }],
+          confidence: d.confidence,
+          checksumValidated: d.checksumValidated,
+          reason: d.patternName,
+          coordinateSpace: 'screenshot'
+        }));
+
+        const fused = Privamon.PIIFusion.fuse(candidates);
+        const redactions = fused.redactions;
+        const reviews = fused.reviews;
+
+        console.log(`[TEST] Fused: ${redactions.length} REDACT, ${reviews.length} REVIEW, ${fused.kept.length} KEEP`);
+
+        // Check A: Customer Name "Sanjeet" must be REDACT
+        const nameRedacted = redactions.some(r => r.type === 'name' && r.text.toLowerCase().includes('sanjeet'));
+        if (!nameRedacted) {
+          errors.push("FAIL: Customer name 'Sanjeet' was NOT classified as REDACT!");
+        } else {
+          console.log("[PASS] Customer name 'Sanjeet' is REDACT.");
+        }
+
+        // Check B: Mobile number "9518408436" must be REDACT
+        const mobRedacted = redactions.some(r => r.type === 'phone' && r.text.includes('9518408436'));
+        if (!mobRedacted) {
+          errors.push("FAIL: Mobile number '9518408436' was NOT classified as REDACT!");
+        } else {
+          console.log("[PASS] Mobile number '9518408436' is REDACT.");
+        }
+
+        // Check C: Top right phones "9034776586" and "9896478495" must be REDACT
+        const phone1Redacted = redactions.some(r => r.type === 'phone' && r.text.includes('9034776586'));
+        const phone2Redacted = redactions.some(r => r.type === 'phone' && r.text.includes('9896478495'));
+        if (!phone1Redacted || !phone2Redacted) {
+          errors.push(`FAIL: Header phone numbers not redacted! (phone1: ${phone1Redacted}, phone2: ${phone2Redacted})`);
+        } else {
+          console.log("[PASS] Header phone numbers '9034776586' and '9896478495' are REDACT.");
+        }
+
+        // Check D: IMEI No "350134240111891" must be REDACT
+        const imeiRedacted = redactions.some(r => r.type === 'device_id' && (r.text.includes('350134240111891') || r.text.includes('3501342')));
+        if (!imeiRedacted) {
+          errors.push("FAIL: Device IMEI number '350134240111891' was NOT classified as REDACT!");
+        } else {
+          console.log("[PASS] Device IMEI number is REDACT.");
+        }
+
+        // Check E: GSTIN "06ARGPS3388E1ZJ" must be REDACT
+        const gstinRedacted = redactions.some(r => r.type === 'pan' && r.text.toUpperCase().includes('06ARGPS3388E1ZJ'));
+        if (!gstinRedacted) {
+          errors.push("FAIL: GSTIN '06ARGPS3388E1ZJ' was NOT classified as REDACT!");
+        } else {
+          console.log("[PASS] GSTIN '06ARGPS3388E1ZJ' is REDACT.");
+        }
+
+        // Check F: Signature must be REDACT
+        const signatureRedacted = redactions.some(r => r.type === 'signature');
+        if (!signatureRedacted) {
+          errors.push("FAIL: Signatures were NOT classified as REDACT!");
+        } else {
+          console.log("[PASS] Signature is REDACT.");
+        }
+
+        // Check G: Rate / Amount "13000" MUST NOT match IP address or trigger REVIEW
+        const fakeIpRate = [...redactions, ...reviews].some(r => r.type === 'ip' && (r.text.includes('13000') || r.text.includes('13.')));
+        if (fakeIpRate) {
+          errors.push("FAIL: Price amount '13000' falsely triggered IP detection!");
+        } else {
+          console.log("[PASS] Price amount '13000' did NOT falsely trigger IP address.");
+        }
+
+        // Check H: Transaction date "20/07/2024" MUST NOT match DOB
+        const fakeDob = [...redactions, ...reviews].some(r => r.type === 'dob' && r.text.includes('20/07/2024'));
+        if (fakeDob) {
+          errors.push("FAIL: Invoice date '20/07/2024' falsely triggered DOB detection!");
+        } else {
+          console.log("[PASS] Invoice date '20/07/2024' did NOT falsely trigger DOB.");
+        }
+
+        // Check I: Viewer UI items (You, Today at 9:46 pm, Navigation buttons) MUST NOT be marked as Name
+        const uiItems = [
+          { text: "You", source: "dom" },
+          { text: "Today at 9:46 pm", source: "dom" },
+          { text: "<", source: "dom" },
+          { text: "Download", source: "dom" },
+          { text: "Delete", source: "dom" }
+        ];
+
+        const uiNerMatches = await Privamon.NEREngine.detectEntities(uiItems);
+        const fakeUiNames = uiNerMatches.filter(m => m.type === 'name');
+        if (fakeUiNames.length > 0) {
+          errors.push(`FAIL: UI controls falsely detected as Names: ${fakeUiNames.map(f => f.text).join(', ')}`);
+        } else {
+          console.log("[PASS] UI controls (You, Navigation, Download, etc.) suppressed from false Name detection.");
+        }
+
+        window.testResults.errors = errors;
+        window.testResults.passed = (errors.length === 0);
+        window.testResults.redactions = redactions.map(r => ({ type: r.type, text: r.text, decision: r.decision }));
+        window.testResults.reviews = reviews.map(r => ({ type: r.type, text: r.text, decision: r.decision }));
+
+        document.getElementById('status').textContent = window.testResults.passed ? 'SUCCESS' : 'FAILURE';
+        document.getElementById('output').textContent = JSON.stringify(window.testResults, null, 2);
+      } catch (err) {
+        console.error(err);
+        window.testResults.errors.push(err.stack || err.message);
+        window.testResults.passed = false;
+        document.getElementById('status').textContent = 'ERROR';
+        document.getElementById('output').textContent = err.stack || err.message;
+      }
+    }
+
+    window.onload = runTest;
+  </script>
+</body>
+</html>
