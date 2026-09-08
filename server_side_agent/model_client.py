@@ -45,7 +45,7 @@ def get_model_for_provider(provider: str = None) -> str:
     _load_env_file()
     prov = (provider or get_vlm_provider()).lower()
     if prov == "openrouter":
-        return os.getenv("VLM_MODEL_OPENROUTER", "qwen/qwen2.5-vl-72b-instruct")
+        return os.getenv("VLM_MODEL_OPENROUTER", "qwen/qwen3-vl-8b-instruct")
     return os.getenv("VLM_MODEL_OLLAMA", "qwen3-vl:2b")
 
 # Strict Action Schema enforced across Ollama and OpenRouter
@@ -54,14 +54,6 @@ STRICT_ACTION_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "reasoning": {
-            "type": "string",
-            "description": "1-2 brief plain language sentences explaining the action"
-        },
-        "confidence": {
-            "type": "number",
-            "description": "Confidence score between 0.0 and 1.0"
-        },
         "action": {
             "type": "object",
             "additionalProperties": False,
@@ -85,15 +77,23 @@ STRICT_ACTION_SCHEMA = {
             },
             "required": ["type", "targetElementId", "value", "scrollDirection"]
         },
+        "confidence": {
+            "type": "number",
+            "description": "Confidence score between 0.0 and 1.0"
+        },
         "assumptions": {
             "type": "array",
             "items": {"type": "string"}
         },
         "needsClarification": {
             "type": "boolean"
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "1-2 brief plain language sentences explaining the action"
         }
     },
-    "required": ["reasoning", "confidence", "action", "assumptions", "needsClarification"]
+    "required": ["action", "confidence", "assumptions", "needsClarification", "reasoning"]
 }
 
 def optimize_image_b64(b64_str: str, max_dimension: int = 1152) -> str:
@@ -137,28 +137,42 @@ def optimize_image_b64(b64_str: str, max_dimension: int = 1152) -> str:
         print(f"[!] Warning: Image optimization failed: {e}. Using raw image.")
         return b64_str.split(",", 1)[1] if "," in b64_str and b64_str.startswith("data:") else b64_str
 
-def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: int = 40) -> str:
+def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: int = None) -> str:
     """
     Formats the sanitized DOM context into structured text lines containing
     elementIds, coarse positional tags [pos: ...], tags, labels, placeholders, and text.
+    Applies strict length limits per field to keep prompt token consumption minimal.
     """
     if not sanitized_dom:
         return "(No DOM elements available)"
     if isinstance(sanitized_dom, str):
-        return sanitized_dom[:3500]
+        return sanitized_dom[:2500]
 
+    limit = max_elements if max_elements is not None else int(os.getenv("VLM_DOM_MAX_ELEMENTS", "28"))
     lines = []
-    for el in sanitized_dom[:max_elements]:
+    for el in sanitized_dom[:limit]:
         el_id = el.get("elementId") or el.get("id") or "unknown"
         tag = el.get("tag") or "elem"
         pos = f" [pos: {el.get('pos')}]" if el.get("pos") else ""
         role = f" role=\"{el.get('role')}\"" if el.get("role") else ""
-        label = f" label=\"{el.get('label')}\"" if el.get("label") else ""
-        text = f" text=\"{el.get('text')}\"" if el.get("text") else ""
+        
+        raw_label = str(el.get("label") or "")
+        label_val = (raw_label[:60] + "...") if len(raw_label) > 60 else raw_label
+        label = f" label=\"{label_val}\"" if label_val else ""
+        
+        raw_text = str(el.get("text") or "").strip()
+        text_val = (raw_text[:60] + "...") if len(raw_text) > 60 else raw_text
+        text = f" text=\"{text_val}\"" if text_val else ""
+        
         attrs = el.get("attributes") or {}
         placeholder = attrs.get("placeholder") or el.get("placeholder")
-        ph = f" placeholder=\"{placeholder}\"" if placeholder else ""
-        val = f" value=\"{attrs.get('value')}\"" if attrs.get("value") else ""
+        if placeholder:
+            ph_val = str(placeholder)
+            ph_str = (ph_val[:50] + "...") if len(ph_val) > 50 else ph_val
+            ph = f" placeholder=\"{ph_str}\""
+        else:
+            ph = ""
+        val = f" value=\"{str(attrs.get('value'))[:50]}\"" if attrs.get("value") else ""
         inp_type = f" type=\"{attrs.get('type')}\"" if attrs.get("type") else ""
         lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}>{text}</{tag}>")
 
@@ -174,13 +188,13 @@ def build_reasoning_prompt(
     """
     Constructs the system prompt following the Privamon Server-Side Reasoning Agent specification.
     """
-    dom_text = format_dom_for_prompt(sanitized_dom, max_elements=40)
+    dom_text = format_dom_for_prompt(sanitized_dom)
     det_text = json.dumps(detection_summary) if detection_summary else "None"
     
     if prior_actions and isinstance(prior_actions, list):
-        prior_text = "\n".join(f"- {act}" for act in prior_actions)
+        prior_text = "\n".join(f"- {str(act)[:100]}" for act in prior_actions[-3:])
     elif prior_actions:
-        prior_text = str(prior_actions)
+        prior_text = str(prior_actions)[:250]
     else:
         prior_text = "None"
 
@@ -229,36 +243,13 @@ SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS (e.g. YouTube, Google, etc.):
      - Step 3 (Requested video is open and playing without membership gates or blocking prompts): The task is complete! Return action type "done" immediately. If a membership prompt or blocking overlay appears, click another available public video.
 
 VERIFYING TASK COMPLETION IN MULTI-STEP LOOPS (CRITICAL):
-- If prior actions or user task context indicate an action was executed (e.g. text typed and sent, button clicked, form submitted):
+- If prior actions or user task context indicate an action was executed (e.g. text typed, button clicked):
   1. Inspect the screen and DOM to verify if the goal has been achieved.
-  2. For messaging: If the requested message (e.g. "Hie" or "hie") is visible in the chat history/bubbles, OR the chat input is cleared/empty after sending, THE TASK IS COMPLETE! Return action type "done" immediately:
-     {{
-       "reasoning": "The requested message was successfully sent to the open chat. Task is verified complete.",
-       "confidence": 0.98,
-       "action": {{
-         "type": "done",
-         "targetElementId": null,
-         "value": null,
-         "scrollDirection": null
-       }},
-       "assumptions": ["Message is delivered and visible in the active conversation."],
-       "needsClarification": false
-     }}
-  3. For search & video tasks (e.g. "search X and play Y"): If the video watch page (/watch?v=...) is open on screen, or video is playing, THE TASK IS COMPLETE! Return action type "done" immediately:
-     {{
-       "reasoning": "The requested video is open and playing. Task is verified complete.",
-       "confidence": 0.98,
-       "action": {{
-         "type": "done",
-         "targetElementId": null,
-         "value": null,
-         "scrollDirection": null
-       }},
-       "assumptions": ["Video watch page is loaded and active."],
-       "needsClarification": false
-     }}
-  4. NEVER re-type or re-send the same message if prior actions show it was already executed and delivered. Repeating the message will spam the user's contacts. Return "done".
-  5. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button. DO NOT return "done" if the message text is still sitting unsubmitted inside the input field.
+  2. For messaging: If the requested message is visible in the chat history/bubbles, OR the chat input is cleared/empty after sending, THE TASK IS COMPLETE! Return action type "done":
+     Example: {{"type": "done", "targetElementId": null, "value": null, "scrollDirection": null}}
+  3. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button. DO NOT return "done" if the message text is still sitting unsubmitted inside the input field.
+  4. For search & video tasks: If the video watch page (/watch) is open or video is playing, THE TASK IS COMPLETE! Return action type "done".
+  5. NEVER re-type or re-send the same message if prior actions show it was already executed and delivered. Return "done".
 
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
@@ -325,9 +316,10 @@ def build_request_payload(
             "prompt": prompt,
             "stream": stream,
             "options": {
-                "num_ctx": options.get("num_ctx", 8192),
+                "num_ctx": options.get("num_ctx", 4096),
                 "num_predict": max_tokens,
-                "temperature": temp
+                "temperature": temp,
+                "repeat_penalty": options.get("repeat_penalty", 1.15)
             }
         }
         payload.update(build_format_param("ollama", schema))
@@ -367,7 +359,7 @@ def call_ollama(prompt: str, image_b64: str, schema: dict = None) -> tuple[str, 
         schema=schema or STRICT_ACTION_SCHEMA,
         model=model,
         stream=True,
-        options={"num_ctx": 8192, "num_predict": 512, "temperature": 0.2}
+        options={"num_ctx": 4096, "num_predict": 256, "temperature": 0.1, "repeat_penalty": 1.15}
     )
 
     print(f"[*] Sending request to Ollama ({model}) with strict schema grammar...")
@@ -390,6 +382,17 @@ def call_ollama(prompt: str, image_b64: str, schema: dict = None) -> tuple[str, 
                 print(f"\033[92m{chunk['response']}\033[0m", end="", flush=True)
 
     print("\n[*] Finished generation.")
+    if not full_response and full_thinking:
+        full_response = full_thinking
+    elif full_response and full_thinking:
+        try:
+            json.loads(extract_json_block(full_response))
+        except Exception:
+            try:
+                json.loads(extract_json_block(full_thinking))
+                full_response = full_thinking
+            except Exception:
+                pass
     return full_response.strip(), full_thinking.strip()
 
 def call_openrouter(prompt: str, image_b64: str, schema: dict = None, max_network_retries: int = 2) -> tuple[str, str]:
@@ -409,7 +412,7 @@ def call_openrouter(prompt: str, image_b64: str, schema: dict = None, max_networ
         schema=schema or STRICT_ACTION_SCHEMA,
         model=model,
         stream=False,
-        options={"num_predict": 512, "temperature": 0.2}
+        options={"num_predict": 200, "temperature": 0.2}
     )
 
     headers = {
@@ -449,15 +452,44 @@ def call_openrouter(prompt: str, image_b64: str, schema: dict = None, max_networ
             else:
                 raise Exception(f"OpenRouter connection failed after {max_network_retries + 1} attempts: {net_err}")
 
-def call_vlm(prompt: str, image_b64: str, provider: str = None, schema: dict = None) -> tuple[str, str]:
+def call_vlm(prompt: str, image_b64: str, provider: str = None, schema: dict = None) -> tuple[str, str, str]:
     """
     Dispatches to the active VLM provider (Ollama for local testing, OpenRouter for cloud).
+    Returns (raw_output, thinking, provider_used).
+    Both providers are 100% drop-in replacements with automatic failover if the primary provider
+    fails (e.g. OpenRouter 402/401/network or Ollama not running).
     """
-    prov = (provider or get_vlm_provider()).lower()
-    if prov == "openrouter":
-        return call_openrouter(prompt, image_b64, schema=schema)
+    _load_env_file()
+    primary = (provider or get_vlm_provider()).lower()
+    auto_failover = os.getenv("ENABLE_AUTO_FAILOVER", "true").lower() in ("1", "true", "yes")
+
+    if primary == "openrouter":
+        try:
+            raw, thinking = call_openrouter(prompt, image_b64, schema=schema)
+            return raw, thinking, "openrouter"
+        except Exception as e:
+            if auto_failover:
+                print(f"[!] Primary provider 'openrouter' failed: {e}. Automatically failing over to local Ollama...")
+                try:
+                    raw, thinking = call_ollama(prompt, image_b64, schema=schema)
+                    return raw, thinking, "ollama"
+                except Exception as ollama_err:
+                    raise Exception(f"OpenRouter ({e}) and Ollama failover ({ollama_err}) both failed.")
+            raise
     else:
-        return call_ollama(prompt, image_b64, schema=schema)
+        try:
+            raw, thinking = call_ollama(prompt, image_b64, schema=schema)
+            return raw, thinking, "ollama"
+        except Exception as e:
+            api_key = get_openrouter_api_key()
+            if auto_failover and api_key:
+                print(f"[!] Primary provider 'ollama' failed: {e}. Automatically failing over to OpenRouter...")
+                try:
+                    raw, thinking = call_openrouter(prompt, image_b64, schema=schema)
+                    return raw, thinking, "openrouter"
+                except Exception as or_err:
+                    raise Exception(f"Ollama ({e}) and OpenRouter failover ({or_err}) both failed.")
+            raise
 
 def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Optional[str]]:
     """
@@ -641,6 +673,78 @@ def _normalize_search_action(resp: InterpretResponse, task: str, sanitized_dom: 
 
     return resp
 
+def extract_message_text(task: str) -> Optional[str]:
+    """
+    Extracts the message body from tasks like:
+    - 'send message to this chat saying Hello' -> 'Hello'
+    - 'send message saying "How are you?" to John' -> 'How are you?'
+    - 'type Hello in the chat' -> 'Hello'
+    - 'say Hi there and press enter' -> 'Hi there'
+    """
+    if not task:
+        return None
+
+    # 1. Quoted string: "Hello" or 'Hello'
+    m = re.search(r'["\']([^"\']+)["\']', task)
+    if m:
+        return m.group(1).strip()
+
+    # 2. "saying <text>"
+    m = re.search(r'\bsaying\s+(.+)$', task, re.I)
+    if m:
+        val = m.group(1).strip()
+        val = re.sub(r'\s+and\s+(?:send|press|hit).*$', '', val, flags=re.I)
+        return val.strip()
+
+    # 3. "say <text>" or "type <text>" or "write <text>"
+    m = re.search(r'\b(?:say|type|write)\s+(.+?)(?:\s+(?:in|into|to|on)\s+.*)?$', task, re.I)
+    if m:
+        val = m.group(1).strip()
+        val = re.sub(r'\s+and\s+(?:send|press|hit).*$', '', val, flags=re.I)
+        return val.strip()
+
+    return None
+
+def _normalize_action(resp: InterpretResponse, task: str, sanitized_dom: Union[list, str, None]) -> InterpretResponse:
+    """
+    Normalizes and fixes model actions for search, chat/messaging, and clicks with text values.
+    """
+    if not resp or not resp.action:
+        return resp
+
+    # 1. Normalize search tasks
+    _normalize_search_action(resp, task, sanitized_dom)
+
+    # 2. If action has type='click' but non-empty value, model intended to type
+    if resp.action.type == "click" and resp.action.value:
+        print(f"[*] Auto-normalizing action: converted 'click' with value '{resp.action.value}' to 'type'")
+        resp.action.type = "type"
+
+    # 3. Chat/Messaging: if task is to send message and model clicked the textbox, convert to type
+    chat_intent = bool(re.search(r'\b(send|type|write|message|say|chat)\b', task, re.I))
+    if chat_intent and resp.action.targetElementId:
+        is_textbox = False
+        if isinstance(sanitized_dom, list):
+            for el in sanitized_dom:
+                el_id = el.get("elementId") or el.get("id")
+                if el_id == resp.action.targetElementId:
+                    tag = (el.get("tag") or "").lower()
+                    role = (el.get("role") or "").lower()
+                    attrs = el.get("attributes") or {}
+                    ph = (el.get("placeholder") or attrs.get("placeholder") or "").lower()
+                    if role == "textbox" or tag in ("textarea", "input") or "message" in ph or "type" in ph:
+                        is_textbox = True
+                    break
+        if is_textbox:
+            extracted = extract_message_text(task)
+            if extracted and (not resp.action.value or resp.action.type == "click"):
+                resp.action.value = extracted
+            if resp.action.type == "click":
+                resp.action.type = "type"
+                print(f"[*] Auto-normalizing chat action: converted 'click' on chat textbox to 'type' with value '{resp.action.value}'")
+
+    return resp
+
 def _populate_backward_compat(resp: InterpretResponse) -> None:
     """
     Populates legacy helper fields (actions, message, thinking) for backwards
@@ -691,8 +795,10 @@ def run_inference(
     6. Ensures 100% compliant schema response.
     Returns: (validated_response, latency_ms, retried_boolean)
     """
+    _load_env_file()
     start_time = time.perf_counter()
-    optimized_image = optimize_image_b64(image_b64, max_dimension=1152) if image_b64 else ""
+    max_dim = int(os.getenv("VLM_IMAGE_MAX_DIMENSION", "512"))
+    optimized_image = optimize_image_b64(image_b64, max_dimension=max_dim) if image_b64 else ""
 
     prompt = build_reasoning_prompt(
         task=task,
@@ -702,8 +808,8 @@ def run_inference(
         conversation_state=conversation_state
     )
 
-    # First attempt via active provider (Ollama / OpenRouter)
-    raw_output, thinking = call_vlm(prompt, optimized_image)
+    # First attempt via active provider (Ollama / OpenRouter with automatic failover)
+    raw_output, thinking, provider_used = call_vlm(prompt, optimized_image)
     validated, error = parse_and_validate(raw_output)
     if not validated and thinking:
         val_from_thinking, err_thinking = parse_and_validate(thinking)
@@ -715,9 +821,11 @@ def run_inference(
 
     if validated:
         latency = round((time.perf_counter() - start_time) * 1000, 2)
+        validated.provider = provider_used
+        validated.model = get_model_for_provider(provider_used)
         validated.raw_model_output = raw_output or thinking
         validated.thinking = thinking
-        _normalize_search_action(validated, task, sanitized_dom)
+        _normalize_action(validated, task, sanitized_dom)
         _populate_backward_compat(validated)
         return validated, latency, False
 
@@ -727,10 +835,10 @@ def run_inference(
         f"{prompt}\n\n"
         f"CRITICAL ERROR: Your previous response failed schema validation: {error}\n"
         f"Fix the error and output ONLY a valid JSON object matching the exact schema:\n"
-        f'{{"reasoning": "1-2 sentences", "confidence": 0.85, "action": {{"type": "click", "targetElementId": "exact_element_id_or_null", "value": null, "scrollDirection": null}}, "assumptions": [], "needsClarification": false}}\n'
+        f'{{"action": {{"type": "click", "targetElementId": "exact_element_id_or_null", "value": null, "scrollDirection": null}}, "confidence": 0.85, "assumptions": [], "needsClarification": false, "reasoning": "1-2 sentences"}}\n'
     )
 
-    raw_retry, thinking_retry = call_vlm(retry_prompt, image_b64="")
+    raw_retry, thinking_retry, provider_used_retry = call_vlm(retry_prompt, image_b64="", provider=provider_used)
     validated_retry, error_retry = parse_and_validate(raw_retry)
     if not validated_retry and thinking_retry:
         val_from_retry_thinking, err_retry = parse_and_validate(thinking_retry)
@@ -742,9 +850,11 @@ def run_inference(
     latency = round((time.perf_counter() - start_time) * 1000, 2)
 
     if validated_retry:
+        validated_retry.provider = provider_used_retry
+        validated_retry.model = get_model_for_provider(provider_used_retry)
         validated_retry.raw_model_output = raw_retry or thinking_retry
         validated_retry.thinking = thinking_retry or thinking
-        _normalize_search_action(validated_retry, task, sanitized_dom)
+        _normalize_action(validated_retry, task, sanitized_dom)
         _populate_backward_compat(validated_retry)
         return validated_retry, latency, True
 
@@ -757,7 +867,9 @@ def run_inference(
         assumptions=["Model output did not conform to JSON contract after retry; requesting user clarification."],
         needsClarification=True,
         raw_model_output=raw_retry or raw_output,
-        thinking=thinking_retry or thinking
+        thinking=thinking_retry or thinking,
+        provider=provider_used,
+        model=get_model_for_provider(provider_used)
     )
     _populate_backward_compat(fallback)
     return fallback, latency, True

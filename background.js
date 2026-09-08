@@ -978,9 +978,12 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
       priorActions = pastTurns.slice(-3).map((t, idx, arr) => {
         const isLast = (idx === arr.length - 1);
         const outcome = isLast && lastOutcome ? lastOutcome : (t.outcome || 'executed_successfully');
+        const valPreview = t.action?.value
+          ? '"' + (t.action.value.length > 50 ? t.action.value.slice(0, 50) + '...' : t.action.value) + '"'
+          : '';
         const actStr = t.action
-          ? `${t.action.type} ${t.action.targetElementId || ''} ${t.action.value ? '"' + t.action.value + '"' : ''}`.trim()
-          : `"${t.task}"`;
+          ? `${t.action.type} ${t.action.targetElementId || ''} ${valPreview}`.trim()
+          : `"${(t.task || '').length > 50 ? t.task.slice(0, 50) + '...' : t.task}"`;
 
         return `${actStr} [outcome: ${outcome}]`;
       });
@@ -1135,9 +1138,13 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
       });
 
       // Provide verification context to the model on subsequent steps
+      const prevAct = steps[steps.length - 1]?.action;
+      const prevValSnippet = prevAct?.value
+        ? '"' + (prevAct.value.length > 50 ? prevAct.value.slice(0, 50) + '...' : prevAct.value) + '"'
+        : '';
       const currentQuery = step === 0
         ? task
-        : `${task} [VERIFY TASK COMPLETION: The previous action (${steps[steps.length - 1]?.action?.type || 'action'} ${steps[steps.length - 1]?.action?.value ? '"' + steps[steps.length - 1].action.value + '"' : ''}) was executed. Inspect the screen: if the goal is accomplished (e.g. message is visible in chat history or input is cleared, video is playing, or page is loaded), return action type "done". If the message is still sitting in the input box and not yet sent, emit action type "click" targeting the Send button.]`;
+        : `${task} [VERIFY TASK COMPLETION: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the screen: if the goal is accomplished (e.g. message is visible in chat history or input is cleared, video is playing, or page is loaded), return action type "done". If the message is still sitting in the input box and not yet sent, emit action type "click" targeting the Send button.]`;
 
       // Run the full chat-with-agent pipeline (capture → redact → server query)
       let chatResult;
