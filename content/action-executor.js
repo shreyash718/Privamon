@@ -31,6 +31,8 @@
   const value = action.value || null;
   const scrollDirection = action.scrollDirection || null;
 
+  try {
+
   /**
    * Finds an element using multiple strategies:
    * 1. By DOM id attribute
@@ -374,14 +376,28 @@
     const idAttr = (targetNode.id || '').toLowerCase();
     const roleAttr = (targetNode.getAttribute('role') || '').toLowerCase();
     const placeholderAttr = (targetNode.getAttribute('placeholder') || '').toLowerCase();
+    const ariaLabel = (targetNode.getAttribute('aria-label') || '').toLowerCase();
+    const titleAttr = (targetNode.getAttribute('title') || '').toLowerCase();
+    const combinedAttrs = `${placeholderAttr} ${ariaLabel} ${nameAttr} ${idAttr} ${titleAttr}`;
+
     const isSearchInput = (
       idAttr === 'search' ||
       nameAttr === 'search_query' ||
       nameAttr === 'q' ||
       targetNode.type === 'search' ||
       roleAttr === 'searchbox' ||
-      (roleAttr === 'combobox' && /search/i.test(placeholderAttr + ' ' + ariaLabel + ' ' + idAttr)) ||
-      /search|find|query/i.test(placeholderAttr + ' ' + ariaLabel + ' ' + nameAttr + ' ' + idAttr)
+      (roleAttr === 'combobox' && /search/i.test(combinedAttrs)) ||
+      /search|find|query/i.test(combinedAttrs)
+    );
+
+    const isChatOrMessageInput = (
+      /message|chat|reply|type a message|send/i.test(combinedAttrs) ||
+      (isContentEditable && (roleAttr === 'textbox' || !isSearchInput)) ||
+      window.location.hostname.includes('whatsapp.com') ||
+      window.location.hostname.includes('telegram.org') ||
+      window.location.hostname.includes('messenger.com') ||
+      window.location.hostname.includes('slack.com') ||
+      window.location.hostname.includes('discord.com')
     );
 
     if (isSearchInput) {
@@ -430,38 +446,71 @@
         }, 80);
       }, 60);
     } else if (isChatOrMessageInput) {
-      // Dispatch Enter key sequence for instant send
-      setTimeout(() => {
-        const enterOpts = {
-          key: 'Enter',
-          code: 'Enter',
-          keyCode: 13,
-          which: 13,
-          charCode: 13,
+      // Dispatch input event for frameworks (Lexical/Draft/Slate)
+      try {
+        targetNode.dispatchEvent(new InputEvent('input', {
           bubbles: true,
-          cancelable: true
-        };
-        targetNode.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
-        targetNode.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
-        targetNode.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+          cancelable: true,
+          inputType: 'insertText',
+          data: value,
+          composed: true
+        }));
+      } catch (e) { /* ignore */ }
 
-        // Also check if a dedicated Send button appeared (strictly send, never voice/ptt/mic!)
-        setTimeout(() => {
-          const candidates = document.querySelectorAll(
-            'button[aria-label="Send"], span[data-icon="send"], [data-icon="send"], button[title="Send"]'
-          );
-          for (const btn of candidates) {
-            const clickTarget = btn.closest('button') || btn;
-            const label = (clickTarget.getAttribute('aria-label') || clickTarget.getAttribute('title') || '').toLowerCase();
-            const icon = (clickTarget.getAttribute('data-icon') || clickTarget.querySelector?.('[data-icon]')?.getAttribute('data-icon') || '').toLowerCase();
-            if (/voice|mic|ptt|audio|record/i.test(label) || icon === 'ptt') {
+      // Send the message ONCE using either the Send button OR the Enter key (never both)
+      setTimeout(() => {
+        let sent = false;
+
+        // Strategy 1: Check if a dedicated Send button is present in the UI
+        const sendSelectors = [
+          'button[aria-label="Send"]',
+          'button[aria-label="send"]',
+          'span[data-icon="send"]',
+          '[data-icon="send"]',
+          'span[data-testid="send"]',
+          '[data-testid="send"]',
+          'button[data-testid="compose-btn-send"]',
+          'button[data-tab="11"]',
+          'button[title="Send"]',
+          'button[title="send"]'
+        ];
+
+        for (const sel of sendSelectors) {
+          const found = document.querySelectorAll(sel);
+          for (const el of found) {
+            const btn = el.closest('button') || el;
+            const label = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
+            const icon = (btn.getAttribute('data-icon') || btn.querySelector?.('[data-icon]')?.getAttribute('data-icon') || '').toLowerCase();
+            const testId = (btn.getAttribute('data-testid') || btn.querySelector?.('[data-testid]')?.getAttribute('data-testid') || '').toLowerCase();
+            if (/voice|mic|ptt|audio|record/i.test(label) || icon === 'ptt' || testId.includes('ptt') || testId.includes('mic')) {
               continue;
             }
-            clickTarget.click();
+            console.log('[Privamon ActionExecutor] Clicking chat send button once');
+            btn.click();
+            sent = true;
             break;
           }
-        }, 120);
-      }, 60);
+          if (sent) break;
+        }
+
+        // Strategy 2: If no dedicated Send button was found, dispatch Enter key sequence ONCE
+        if (!sent) {
+          console.log('[Privamon ActionExecutor] No send button found; dispatching Enter key once');
+          const enterOpts = {
+            key: 'Enter',
+            code: 'Enter',
+            keyCode: 13,
+            which: 13,
+            charCode: 13,
+            bubbles: true,
+            cancelable: true,
+            composed: true
+          };
+          targetNode.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+          targetNode.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
+          targetNode.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+        }
+      }, 100);
     }
 
     // Visual feedback
@@ -578,4 +627,13 @@
     targetElementId: targetId,
     message: `Unknown action type: "${actionType}"`
   };
+  } catch (err) {
+    console.error('[Privamon ActionExecutor] Execution error:', err);
+    return {
+      success: false,
+      actionType: actionType,
+      targetElementId: targetId,
+      message: `Action execution error: ${err.message || String(err)}`
+    };
+  }
 })();

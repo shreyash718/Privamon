@@ -257,8 +257,8 @@ VERIFYING TASK COMPLETION IN MULTI-STEP LOOPS (CRITICAL):
        "assumptions": ["Video watch page is loaded and active."],
        "needsClarification": false
      }}
-  4. NEVER re-type or re-send the same message if prior actions show it was already executed. Repeating the message will spam the user's contacts. Return "done".
-  5. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button.
+  4. NEVER re-type or re-send the same message if prior actions show it was already executed and delivered. Repeating the message will spam the user's contacts. Return "done".
+  5. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button. DO NOT return "done" if the message text is still sitting unsubmitted inside the input field.
 
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:

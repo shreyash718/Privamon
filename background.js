@@ -1137,7 +1137,7 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
       // Provide verification context to the model on subsequent steps
       const currentQuery = step === 0
         ? task
-        : `${task} [VERIFY TASK COMPLETION: The previous action (${steps[steps.length - 1]?.action?.type || 'action'} ${steps[steps.length - 1]?.action?.value ? '"' + steps[steps.length - 1].action.value + '"' : ''}) was executed. Inspect the screen to verify if the goal is accomplished. If so, return action type "done".]`;
+        : `${task} [VERIFY TASK COMPLETION: The previous action (${steps[steps.length - 1]?.action?.type || 'action'} ${steps[steps.length - 1]?.action?.value ? '"' + steps[steps.length - 1].action.value + '"' : ''}) was executed. Inspect the screen: if the goal is accomplished (e.g. message is visible in chat history or input is cleared, video is playing, or page is loaded), return action type "done". If the message is still sitting in the input box and not yet sent, emit action type "click" targeting the Send button.]`;
 
       // Run the full chat-with-agent pipeline (capture → redact → server query)
       let chatResult;
