@@ -57,7 +57,7 @@ for (const { src, dest } of copies) {
 
 // Copy ONNX WASM files
 if (fs.existsSync(onnxWasmDir)) {
-  const wasmFiles = fs.readdirSync(onnxWasmDir).filter(f => f.endsWith('.wasm'));
+  const wasmFiles = fs.readdirSync(onnxWasmDir).filter(f => f.endsWith('.wasm') || f.endsWith('.mjs'));
   for (const f of wasmFiles) {
     copyFile(`node_modules/onnxruntime-web/dist/${f}`, `lib/onnx/${f}`);
   }
