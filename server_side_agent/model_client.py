@@ -148,7 +148,7 @@ def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: i
     if isinstance(sanitized_dom, str):
         return sanitized_dom[:2500]
 
-    limit = max_elements if max_elements is not None else int(os.getenv("VLM_DOM_MAX_ELEMENTS", "28"))
+    limit = max_elements if max_elements is not None else int(os.getenv("VLM_DOM_MAX_ELEMENTS", "35"))
     lines = []
     for el in sanitized_dom[:limit]:
         el_id = el.get("elementId") or el.get("id") or "unknown"
@@ -172,11 +172,26 @@ def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: i
             ph = f" placeholder=\"{ph_str}\""
         else:
             ph = ""
-        val = f" value=\"{str(attrs.get('value'))[:50]}\"" if attrs.get("value") else ""
-        inp_type = f" type=\"{attrs.get('type')}\"" if attrs.get("type") else ""
-        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}>{text}</{tag}>")
+        val_content = el.get("value") or attrs.get("value")
+        val = f" value=\"{str(val_content)[:50]}\"" if val_content else ""
+        
+        type_content = el.get("inputType") or attrs.get("type")
+        inp_type = f" type=\"{type_content}\"" if type_content else ""
+        
+        href_content = el.get("href") or attrs.get("href")
+        href = f" href=\"{str(href_content)[:60]}\"" if href_content else ""
+        
+        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}{href}>{text}</{tag}>")
 
     return "\n".join(lines)
+
+def clean_task_text(task: str) -> str:
+    """Strips runtime step guidance and bracketed prompt annotations from task text."""
+    if not task:
+        return ""
+    t = re.sub(r"\[(?:STEP GUIDANCE|VERIFY TASK COMPLETION|outcome|pos|REDACTED)[^\]]*\]", "", task, flags=re.DOTALL | re.I)
+    t = re.sub(r"\[.*?\]", "", t, flags=re.DOTALL)
+    return t.strip()
 
 def build_reasoning_prompt(
     task: str,
@@ -198,11 +213,15 @@ def build_reasoning_prompt(
     else:
         prior_text = "None"
 
+    clean_user_task = clean_task_text(task)
+    m_guide = re.search(r'\[(?:STEP GUIDANCE|VERIFY TASK COMPLETION):(.*?)\]', task, re.DOTALL | re.I)
+    guide_section = f"\nVERIFICATION & STEP GUIDANCE:\n{m_guide.group(1).strip()}\n" if m_guide else ""
+
     return f"""You are the server-side reasoning agent for Privamon. You receive a sanitized, redacted screen context (image + DOM) from a browser extension that has already stripped all PII locally. You do not receive raw pixels, passwords, or personal data — some regions of the image are solid black, and some DOM text is replaced with tokens like [REDACTED: email]. Your job is to understand the user's task, reason about the sanitized screen state, and return a structured, executable action for the browser client to carry out. You never see anything the client didn't choose to send you, so you must reason well despite missing information, not pretend it isn't missing.
 
 USER TASK:
-"{task}"
-
+"{clean_user_task}"
+{guide_section}
 AVAILABLE SANITIZED DOM ELEMENTS (target ONLY these elementId values):
 {dom_text}
 
@@ -223,24 +242,32 @@ HOW TO REASON UNDER REDACTION:
 8. State every assumption explicitly in the assumptions list.
 9. Don't hallucinate content behind a redaction.
 
-SPECIAL GUIDANCE FOR CHAT & MESSAGING:
-- When the user's task asks to send a message, write a message, or type into a chat (e.g. "send message to chat which is open ...", "say ..."):
-  1. Identify the open chat's message input or textbox (look for elements with role="textbox", contenteditable, or placeholder/label like "Type a message", "Message", or positioned at the bottom of the active conversation pane).
-  2. Use action type "type" targeting that element's exact elementId.
-  3. Extract the requested message text (e.g. text inside quotes, like "Hie") and place it into the "value" field.
-  4. DO NOT click sidebar chats, contact list items, or header buttons when the chat conversation is already open on screen.
-  5. CRITICAL: NEVER target a microphone or voice recording button (labeled "Voice message", "Microphone", "PTT", or "(Microphone / Voice Record Button - NOT A TEXTBOX)") for text tasks or "type" actions. A voice message button records audio from the microphone, it CANNOT accept typed text. Always target the actual TEXTBOX (labeled "Type a message", role="textbox", contenteditable).
+SPECIAL GUIDANCE FOR CHAT & MESSAGING (e.g. WhatsApp, Slack, Messenger):
+- Multi-Step Contact Search & Message Flow (e.g. "message Tanishq I will not be available", "search for contact Tanishq and message him...", "send 'Tanishq' a 10 line poem"):
+  * Step 1 (Search for contact): Type the contact name into the left contact search bar (look for placeholder "Search or start new chat", "Search", id="search", or role="textbox" on top-left at x < 400, y < 150). DO NOT type into the bottom message textbox on the right!
+  * Step 2 (Select contact from search list): In the search results under "Chats" on the left (x < 450, 65 <= y <= 400), click the FIRST/TOP contact result card that matches the contact name. DO NOT click the message textbox on the right yet.
+  * Step 3 (Open conversation pane): Once the contact's chat is open, identify the bottom message input box (placeholder "Type a message", role="textbox", contenteditable at bottom y > 500). Emit action type "type" targeting that elementId with the message content in "value". The browser client automatically types and sends the message.
+  * Step 4 (Task Complete): If the message has been sent or is visible in chat history, return action type "done".
 
-SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS (e.g. YouTube, Google, etc.):
-- When the user asks to search for something, find a video/song/topic, or look up information (e.g. "search Indias got latent and play most viewed video", "search 'Khat' and play first video", "search for ..."):
-  1. ALWAYS use action type "type" targeting the search input box (look for elements with placeholder/label "Search", id="search", name="search_query", or role="combobox" / type="text" at the top of the page).
-  2. DO NOT emit action type "click" on the search input box before typing. The browser client automatically focuses, types, and submits the search when you return action type "type". Emitting "click" first causes a redundant action and an infinite click loop.
-  3. Extract ONLY the clean search query into the "value" field (e.g. for "search Indias got latent and play most viewed video", value is "Indias got latent"; for "search 'Khat' and play first video", value is "Khat").
-  4. CRITICAL: NEVER click microphone or voice search buttons (labeled "Search with your voice", "Microphone", or "(Microphone / Voice Search / Audio Record Button)") for text search tasks.
-  5. Multi-Step Search & Video/Result Navigation:
-     - Step 1 (Search bar is empty or user is on home/start page): Emit action type "type" with the search query targeting the search input.
-     - Step 2 (Search results page is loaded with video listings/results): Emit action type "click" targeting the requested video title link or first result (look for <a> elements with video titles, e.g. id="video-title" or containing view count info). ALWAYS choose free public videos; DO NOT click videos labeled [MEMBERS ONLY] unless the user explicitly asked for members-only content.
-     - Step 3 (Requested video is open and playing without membership gates or blocking prompts): The task is complete! Return action type "done" immediately. If a membership prompt or blocking overlay appears, click another available public video.
+- Generative vs. Literal Messaging Rules:
+  * GENERATIVE / DRAFTING REQUESTS: If the user asks to compose, draft, or generate creative content, greetings, or wishes (e.g. "send 'Shivam' greeting message for his marriage", "send 'Tanishq' a beautiful 10 line poem", "wish Rahul happy birthday", "draft wedding wishes for Priya", "compose a formal apology", "congratulate him on his promotion"), you MUST draft and compose the FULL, warm, personalized message yourself and put it into action.value! (e.g. For marriage greetings: "Congratulations on your wedding, Shivam! Wishing you and your partner a lifetime of love, joy, and endless happiness together!"). NEVER send placeholder text, short summaries, or the literal task instruction words (e.g. NEVER send "greeting message for his marriage" or "wedding wishes").
+  * LITERAL REQUESTS: If the user gives an exact or specific message (e.g. "message Tanishq I will not be available for tomorrow", "say hello", "tell him meeting is cancelled"), send ONLY that exact message in action.value without adding poems, greetings, or creative embellishments.
+
+- CRITICAL: NEVER target a microphone or voice recording button (labeled "Voice message", "Microphone", "PTT", or "(Microphone / Voice Record Button - NOT A TEXTBOX)") for text tasks or "type" actions. Always target the actual TEXTBOX (labeled "Type a message", role="textbox", contenteditable).
+
+SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS (e.g. Flipkart, YouTube, Amazon, Google):
+- When the user asks to search for something, find a product/video/song/topic, or look up information (e.g. "search stylish watches for me", "search watches on flipkart", "search Indias got latent and play most viewed video", "search 'Khat' and play first video"):
+  1. ALWAYS use action type "type" targeting the search input box (look for elements with placeholder/label "Search", id="search", name="search_query", or tag="input" / role="combobox" / type="text" at the top of the page).
+  2. CRITICAL: NEVER emit action type "click" on a search button (Search Icon, magnifying glass button, submit button) when starting a search or when the search input is empty! The search button does NOTHING if the query is not in the search box.
+  3. DO NOT emit action type "click" on the search input box before typing. The browser client automatically focuses, types, and submits the search when you return action type "type".
+  4. Extract ONLY the clean search query into the "value" field (e.g. for "search stylish watches for me", value is "stylish watches"; for "search watches on flipkart", value is "watches"; for "search 'Khat' and play first video", value is "Khat").
+  5. CRITICAL: NEVER click microphone or voice search buttons (labeled "Search with your voice", "Microphone", or "(Microphone / Voice Search / Audio Record Button)") for text search tasks.
+  6. Multi-Step Search & Video/Result Navigation:
+     - Step 1 (Search bar is empty or user is on home/start page): Emit action type "type" with the search query targeting the search input textbox. NEVER emit action type "done" on the homepage!
+     - Step 2 (Search results page is loaded with video listings or product listings):
+       * If the user ONLY asked to search (e.g. "search stylish watches for me"), THE SEARCH IS COMPLETE! Return action type "done".
+       * If the user asked to play a video or click/open an item, emit action type "click" targeting the requested video title link or product card (look for <a> elements with video titles, e.g. id="video-title"). ALWAYS choose free public videos; DO NOT click videos labeled [MEMBERS ONLY].
+     - Step 3 (Requested video is open and playing without membership gates or blocking prompts): The task is complete! Return action type "done" immediately.
 
 VERIFYING TASK COMPLETION IN MULTI-STEP LOOPS (CRITICAL):
 - If prior actions or user task context indicate an action was executed (e.g. text typed, button clicked):
@@ -248,8 +275,16 @@ VERIFYING TASK COMPLETION IN MULTI-STEP LOOPS (CRITICAL):
   2. For messaging: If the requested message is visible in the chat history/bubbles, OR the chat input is cleared/empty after sending, THE TASK IS COMPLETE! Return action type "done":
      Example: {{"type": "done", "targetElementId": null, "value": null, "scrollDirection": null}}
   3. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button. DO NOT return "done" if the message text is still sitting unsubmitted inside the input field.
-  4. For search & video tasks: If the video watch page (/watch) is open or video is playing, THE TASK IS COMPLETE! Return action type "done".
-  5. NEVER re-type or re-send the same message if prior actions show it was already executed and delivered. Return "done".
+  4. For search tasks: NEVER return action type "done" on the homepage or when the search input is still empty! Homepage banners, carousels, or suggested items are NOT search results. You may only return "done" once the search results page (/search, /results, /s) is actually loaded with results for the user's specific query.
+  5. For video playback tasks: DO NOT return "done" on search results pages when the user asked to play a video! On search results, emit action type "click" targeting the requested/first video title link. Only return action type "done" once the video watch page (/watch) is open and playing.
+  6. NEVER re-type or re-send the same message if prior actions show it was already executed and delivered. Return "done".
+
+YOUTUBE-SPECIFIC GUIDANCE (CRITICAL FOR DEMO):
+- On YouTube search results, the top results may be videos, playlists (e.g. "Stanford CS229: Machine Learning • Playlist • 21 videos"), or courses (e.g. "Gate Smashers • Course • 55 lessons").
+- When asked to play a video or playlist, ALWAYS target the FIRST result card in the main search results section (look for elementId="video-title" or the top card with x >= 240). Never click sidebar navigation links (e.g. "Playlists", "Liked videos", or "History" on the left navigation guide).
+- A video or playlist is "playing" ONLY when the page URL contains "/watch?v=" or a playlist player is loaded. If the URL still contains "/results" you are on the search results page, NOT watching/playing the media.
+- When clicking a video or playlist title on YouTube, use action type "click" with the exact elementId of the title link. The browser extension will handle SPA navigation.
+- If multiple video-title or playlist elements exist, prefer the FIRST one that is NOT labeled [MEMBERS ONLY].
 
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
@@ -307,7 +342,7 @@ def build_request_payload(
     schema = schema or STRICT_ACTION_SCHEMA
     options = options or {}
     temp = options.get("temperature", 0.2)
-    max_tokens = options.get("num_predict", 512)
+    max_tokens = options.get("num_predict", int(os.getenv("VLM_MAX_TOKENS", "1024")))
     resolved_model = model or get_model_for_provider(prov)
 
     if prov == "ollama":
@@ -359,7 +394,7 @@ def call_ollama(prompt: str, image_b64: str, schema: dict = None) -> tuple[str, 
         schema=schema or STRICT_ACTION_SCHEMA,
         model=model,
         stream=True,
-        options={"num_ctx": 4096, "num_predict": 256, "temperature": 0.1, "repeat_penalty": 1.15}
+        options={"num_ctx": 4096, "num_predict": int(os.getenv("VLM_MAX_TOKENS", "1024")), "temperature": 0.1, "repeat_penalty": 1.15}
     )
 
     print(f"[*] Sending request to Ollama ({model}) with strict schema grammar...")
@@ -412,7 +447,7 @@ def call_openrouter(prompt: str, image_b64: str, schema: dict = None, max_networ
         schema=schema or STRICT_ACTION_SCHEMA,
         model=model,
         stream=False,
-        options={"num_predict": 200, "temperature": 0.2}
+        options={"num_predict": int(os.getenv("VLM_MAX_TOKENS", "1024")), "temperature": 0.2}
     )
 
     headers = {
@@ -602,74 +637,628 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
     except ValidationError as ve:
         return None, f"Schema validation error: {ve}"
 
+INVALID_CONTACT_NAMES = {
+    "this chat", "chat which is open", "the chat", "chat", "someone", "him", "her", "them",
+    "this", "open chat", "active chat", "user", "message", "a message", "the message", "poem", "song",
+    "story", "lines", "line", "love", "photo", "image", "video", "text", "a text", "the text", "audio", "note",
+    "somethin", "something", "everything", "anything", "that", "it", "its", "me", "you", "us", "he", "she", "they",
+    "a", "an", "the", "to", "for", "saying", "with", "about", "what", "which", "who", "whom", "whose", "where", "when", "why", "how", "all", "any", "some"
+}
+
+def is_valid_contact_name(name: Optional[str]) -> bool:
+    if not name:
+        return False
+    clean = name.strip("\"'“” ").strip()
+    if not clean or clean.isdigit() or re.match(r"^\d+$", clean):
+        return False
+    if clean.lower() in INVALID_CONTACT_NAMES:
+        return False
+    if re.match(r"^\d+(?:st|nd|rd|th)?$", clean, re.I):
+        return False
+    return True
+
+def parse_contact_task(task: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Extracts contact name and message body/intent from tasks like:
+    - 'message Tanishq I will be not availablle for tommorow' -> ('Tanishq', 'I will be not availablle for tommorow')
+    - 'search for contact Tanishq and message him that I will not be avilable' -> ('Tanishq', 'I will not be avilable')
+    - 'send "Tanishq" a beatifull 10 line poem' -> ('Tanishq', 'beatifull 10 line poem')
+    - 'tell Parth Bhaiya that meeting is cancelled' -> ('Parth Bhaiya', 'meeting is cancelled')
+    - 'send "shivam" greeting message for his marriage' -> ('shivam', 'greeting message for his marriage')
+    - 'send "shivam" message that I will not able to attend his lecture tommorow be polite' -> ('shivam', 'I will not able to attend his lecture tommorow be polite')
+    """
+    if not task:
+        return None, None
+    cleaned = clean_task_text(task)
+
+    # 1. "search (for contact) <contact> and message/tell/send/text him/her (that/saying) <msg>"
+    m = re.search(r"\b(?:search\s+(?:for\s+)?(?:contact\s+)?|find\s+)(.+?)\s+and\s+(?:message|tell|send|text)(?:\s+(?:him|her|them))?(?:\s+(?:that|saying))?\s+(.+)$", cleaned, re.I)
+    if m:
+        c = m.group(1).strip("\"'“” ")
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 2. "send message to <contact> saying/that <msg>"
+    m = re.search(r"\bsend\s+(?:a\s+)?message\s+to\s+(.+?)\s+(?:saying|that)\s+(.+)$", cleaned, re.I)
+    if m:
+        c = m.group(1).strip("\"'“” ")
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 3. Quoted contact: send/message/text "<contact>" [message that/saying/a] <msg>
+    m = re.search(r'\b(?:send|message|tell|text)\s+["\'\u201c\u201d]([^"\'\u201c\u201d]+)["\'\u201c\u201d]\s*(?:(?:a\s+)?(?:message|text|note|greeting|wish|chat)?\s*(?:that\s+|saying\s+|say\s+|to\s+)|a\s+|that\s+|saying\s+)?\s*(.+)$', cleaned, re.I)
+    if m:
+        c = m.group(1).strip()
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 4. Two-word capitalized contact name: e.g. "Parth Bhaiya"
+    m = re.search(r"\b(?:message|tell|text|send)\s+([A-Z][a-z0-9_]+\s+[A-Z][a-z0-9_]+)\s+(?:a\s+|that\s+|saying\s+)?(.+)$", cleaned)
+    if m:
+        c = m.group(1).strip()
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 5. Single word contact followed by "a" / "an" / "that" / "saying":
+    m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(?:a|an|that|saying)\s+(.+)$", cleaned, re.I)
+    if m:
+        c = m.group(1).strip()
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 6. Single word contact followed by message starting with pronoun or verb:
+    m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(?=(?:I|we|you|he|she|they|please|call|meeting|let|can|will|dont|am|are|is|hello|hi|hey)\b)(.+)$", cleaned, re.I)
+    if m:
+        c = m.group(1).strip()
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 7. Fallback: message/text <contact> <msg>
+    m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(.+)$", cleaned, re.I)
+    if m:
+        c = m.group(1).strip()
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    return None, None
+
+def is_creative_generation_task(task: str) -> bool:
+    """
+    Detects if the user asked for generative/creative content or message drafting like:
+    - 'send "shivam" greeting message for his marriage'
+    - 'send "shivam" message that I will not able to attend his lecture tommorow be polite'
+    - 'send "Tanishq" a beatifull 10 line poem'
+    - 'send shivam wedding wishes'
+    - 'wish rahul happy birthday'
+    - 'draft wedding message for priya'
+    - 'write a 5 line poem and send to Parth'
+    - '10 line poem on love'
+    - 'message him a love song of 10 lines'
+    - 'a love story about king and queen'
+    - 'generate a formal apology note'
+    - 'compose a congratulatory message'
+    - 'type atleast 10 lines of poetry'
+    """
+    if not task:
+        return False
+    return bool(re.search(
+        r"\b("
+        r"poem|poetry|rhyme|story|essay|haiku|compliment|joke|apology|speech|"
+        r"song|lyrics|letter|compose\w*|generate\w*|"
+        r"greeting\w*|wish\w*|blessing\w*|congratulat\w*|"
+        r"marriage|wedding|anniversary|birthday|promotion|festival|"
+        r"lines?\s+of|lines?\s+on|\d+\s+line|"
+        r"message\s+(?:about|for|wishing|congratulating)|"
+        r"write\s+(?:a\s+)?(?:message|note|greeting|wish)|"
+        r"draft\w*\s+(?:a\s+)?(?:\w+\s+)?(?:poem|song|story|greeting|wish|speech|lyrics|essay|message|note)|"
+        r"be\s+polite|politely|formal\w*|courteous\w*"
+        r")\b",
+        task,
+        re.I
+    ))
+
+def clean_composed_lines(text: str) -> str:
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    if lines and re.match(r"^(?:\d+\s+line|poem|here\s+is|title:|a\s+poem|song)\b", lines[0], re.I):
+        lines = lines[1:]
+    return "\n".join(lines)
+
+def is_prompt_echo(value: Optional[str], task: str) -> bool:
+    if not value or not str(value).strip():
+        return True
+    v = str(value).strip().lower().strip("\"'“” ")
+    t = clean_task_text(task).strip().lower()
+    if v == t:
+        return True
+
+    # Check against extracted body from parse_contact_task (e.g. 'greeting message for his marriage')
+    contact_name, body = parse_contact_task(task)
+    if body:
+        b = body.strip().lower().strip("\"'“” ")
+        if v == b or (b in v and len(v) <= len(b) + 15) or (v in b and len(v) >= 5):
+            return True
+
+    t_noprefix = re.sub(r'^(?:send(?:\s+him|\s+her|\s+them)?|message(?:\s+him|\s+her|\s+them)?|type|write|tell(?:\s+him|\s+her)?)\s+', '', t).strip()
+    if v == t_noprefix or (t_noprefix in v and len(v) <= len(t_noprefix) + 15):
+        return True
+
+    t_nocontact = re.sub(r'^["\'\u201c\u201d][^"\'\u201c\u201d]+["\'\u201c\u201d]\s*(?:a\s+|an\s+|that\s+|saying\s+)?', '', t_noprefix).strip()
+    if t_nocontact and (v == t_nocontact or (t_nocontact in v and len(v) <= len(t_nocontact) + 15) or (v in t_nocontact and len(v) >= 5)):
+        return True
+
+    if is_creative_generation_task(task):
+        if re.search(r'\b(greeting\s+message|wedding\s+wishes?|marriage\s+wishes?|birthday\s+wishes?|anniversary\s+wishes?|poem\s+on|\d+\s+line\s+poem|a\s+love\s+story|congratulatory\s+message)\b', v, re.I):
+            return True
+        if re.search(r'\b(?:poem|poetry|rhyme|lines?\s+of|\d+\s+line)\b', t, re.I):
+            lines = [l for l in str(value).split('\n') if l.strip()]
+            if len(lines) < 3:
+                return True
+        if len(v) < 15:
+            return True
+
+    return False
+
+CREATIVE_TEXT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "text": {
+            "type": "string",
+            "description": "The complete creative text, poem, story, or message requested by the user."
+        }
+    },
+    "required": ["text"],
+    "additionalProperties": False
+}
+
+def compose_creative_fallback(task: str) -> str:
+    """
+    Guarantees a beautiful composed creative poem, wedding/birthday greeting, or message even if model echoed prompt.
+    """
+    contact_name, body = parse_contact_task(task)
+    prompt = (
+        f"You are an expert message drafter and courteous assistant.\n"
+        f"Draft and write the complete, warm, beautifully written message requested by the user: {task!r}.\n"
+        f"If the request asks to be polite, apologize, or excuse oneself (e.g. unable to attend a lecture or meeting), draft a courteous, natural, polite message directly addressed to the recipient.\n"
+        f"If the request is for a wedding, marriage, birthday, anniversary, or greeting message, write a heartwarming, joyful greeting message directly addressed to the recipient.\n"
+        f"For poems, separate each line with a newline character (\\n).\n"
+        f"Do NOT include explanations, titles, or prompt echoes. Output ONLY the drafted message into the 'text' field."
+    )
+    try:
+        raw, _, _ = call_vlm(prompt, "", provider=get_vlm_provider(), schema=CREATIVE_TEXT_SCHEMA)
+        text = raw.strip()
+        if text.startswith("{"):
+            d = json.loads(text)
+            if "text" in d and d["text"]:
+                text = str(d["text"]).strip()
+            elif "action" in d and isinstance(d["action"], dict) and d["action"].get("value"):
+                text = str(d["action"]["value"]).strip()
+            elif "value" in d:
+                text = str(d["value"]).strip()
+        if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
+            text = text[1:-1].strip()
+        cleaned = clean_composed_lines(text)
+        if cleaned and len(cleaned) > 20 and not cleaned.startswith("{") and not is_prompt_echo(cleaned, task):
+            return cleaned
+    except Exception as e:
+        print("[!] Warning: Creative fallback composition call failed:", e)
+
+    # Built-in high quality greetings and lyrical poems by theme if offline/network issue
+    t_lower = task.lower()
+    c_name = contact_name or "my friend"
+    if any(k in t_lower for k in ("lecture", "attend", "class", "meeting", "absence", "unavailable", "polite")):
+        return (
+            f"Dear {c_name}, I wanted to let you know that I will not be able to attend your lecture tomorrow. "
+            "Sincerely apologize for any inconvenience caused!"
+        )
+    if any(k in t_lower for k in ("marriage", "wedding")):
+        return (
+            f"Heartiest congratulations on your wedding, {c_name}! "
+            "Wishing you and your partner a lifetime filled with immense love, joy, and endless happiness together. "
+            "May your journey together be blessed with beautiful memories every single day!"
+        )
+    if any(k in t_lower for k in ("birthday", "bday")):
+        return (
+            f"Wishing you a very Happy Birthday, {c_name}! "
+            "May your day be filled with lots of love, laughter, and wonderful moments. "
+            "Have a fantastic year ahead!"
+        )
+    if "anniversary" in t_lower:
+        return (
+            f"Happy Anniversary, {c_name}! "
+            "Wishing you both another year of wonderful togetherness, love, and cherished moments. "
+            "Congratulations!"
+        )
+    if any(k in t_lower for k in ("congratulat", "promotion", "success")):
+        return (
+            f"Huge congratulations, {c_name}! "
+            "So thrilled to hear this wonderful news. Wishing you continued success and the very best in everything you do!"
+        )
+    if any(k in t_lower for k in ("greeting", "wish")):
+        return (
+            f"Warmest greetings and best wishes to you, {c_name}! "
+            "Hope you are having a wonderful day and that everything is going great!"
+        )
+    if "love" in t_lower:
+        return (
+            "Love is a quiet flame that warms the soul,\n"
+            "It whispers through the silence, soft and bold.\n"
+            "It blooms in moments when the world feels cold,\n"
+            "And turns the darkest nights to golden gold.\n"
+            "It's found in laughter, tears, and every glance,\n"
+            "In hands that hold, and hearts that dare to dance.\n"
+            "It grows with time, though seasons may advance,\n"
+            "A constant rhythm in a fleeting trance.\n"
+            "It asks for nothing but to give anew,\n"
+            "Forever patient, beautiful, and true."
+        )
+    return (
+        "Beneath the sky of sapphire blue,\n"
+        "A gentle breeze begins anew.\n"
+        "The morning sun begins to rise,\n"
+        "Illuminating distant skies.\n"
+        "A golden warmth upon the sea,\n"
+        "A peaceful moment wild and free.\n"
+        "Through whispering trees the shadows play,\n"
+        "To welcome in another day.\n"
+        "With every breath a song takes flight,\n"
+        "From darkest dusk to morning light."
+    )
+
+def is_contact_result_item(el: dict, contact_name: Optional[str] = None) -> bool:
+    """Checks if a DOM element is a contact search result card in WhatsApp Web."""
+    if not isinstance(el, dict):
+        return False
+    if el.get("isAudioRecord"):
+        return False
+
+    tag = (el.get("tag") or "").lower()
+    role = (el.get("role") or "").lower()
+    attrs = el.get("attributes") or {}
+    ph = str(el.get("placeholder") or attrs.get("placeholder") or "").strip().lower()
+    lbl = str(el.get("label") or "").strip().lower()
+    txt = str(el.get("text") or "").strip().lower()
+    eid = str(el.get("elementId") or el.get("id") or "").lower()
+
+    # Reject search input fields and textboxes
+    if "search" in ph or "search" in lbl or "search" in eid or role in ("searchbox", "combobox"):
+        return False
+    if role == "textbox" and (tag in ("input", "textarea") or "search" in ph or "chat" in ph):
+        return False
+
+    if lbl in {"all", "unread", "favourites", "groups", "chats", "status", "channels", "communities", "archived", "filter chats by"}:
+        return False
+
+    bbox = el.get("bbox") or {}
+    x = bbox.get("x")
+    y = bbox.get("y")
+
+    # If contact name is known, check if it directly appears in label or text
+    if contact_name and len(contact_name) >= 2:
+        c_lower = contact_name.lower()
+        if c_lower in lbl or c_lower in txt:
+            if x is None or x < 500:
+                return True
+
+    # Spatial check for left-pane contact search result under "Chats"
+    if x is not None and y is not None:
+        if x < 450 and 65 <= y <= 450:
+            if role in ("listitem", "row", "gridcell") or tag in ("div", "span", "a", "button"):
+                return True
+
+    return False
+
+def find_contact_search_input(sanitized_dom: Union[list, str, None]) -> Optional[dict]:
+    """Finds the contact search input box on WhatsApp/chat (top-left pane)."""
+    if not isinstance(sanitized_dom, list):
+        return None
+    for el in sanitized_dom:
+        if el.get("isAudioRecord"):
+            continue
+        tag = (el.get("tag") or "").lower()
+        role = (el.get("role") or "").lower()
+        attrs = el.get("attributes") or {}
+        ph = str(el.get("placeholder") or attrs.get("placeholder") or "").lower()
+        lbl = str(el.get("label") or "").lower()
+        eid = str(el.get("id") or el.get("elementId") or "").lower()
+        bbox = el.get("bbox") or {}
+        x = bbox.get("x")
+        y = bbox.get("y")
+
+        if "search or start new chat" in ph or "search or start new chat" in lbl:
+            return el
+        if ("search" in ph or "search" in lbl or "search" in eid) and (role in ("textbox", "searchbox", "combobox") or tag in ("input", "textarea", "div")):
+            if x is None or (x < 450 and (y is None or y < 200)):
+                return el
+    return None
+
+def find_chat_message_textbox(sanitized_dom: Union[list, str, None]) -> Optional[dict]:
+    """Finds the active chat's message input textbox (typically at the bottom)."""
+    if not isinstance(sanitized_dom, list):
+        return None
+    for el in sanitized_dom:
+        if el.get("isAudioRecord"):
+            continue
+        tag = (el.get("tag") or "").lower()
+        role = (el.get("role") or "").lower()
+        attrs = el.get("attributes") or {}
+        ph = str(el.get("placeholder") or attrs.get("placeholder") or "").lower()
+        lbl = str(el.get("label") or "").lower()
+        is_contenteditable = bool(el.get("isContentEditable") or el.get("inputType") == "contenteditable" or attrs.get("type") == "contenteditable")
+
+        if "type a message" in ph or "type a message" in lbl:
+            return el
+        if (role == "textbox" or tag in ("textarea", "input") or is_contenteditable) and ("message" in ph or "message" in lbl or "chat" in ph):
+            return el
+        bbox = el.get("bbox") or {}
+        y = bbox.get("y")
+        if (role == "textbox" or is_contenteditable) and (y is not None and y > 450):
+            return el
+    return None
+
 def extract_search_query(task: str) -> Optional[str]:
     """
     Extracts the clean search query term from user tasks like:
+    - 'search stylish watches for me' -> 'stylish watches'
     - 'search Indias got latent and play most viewed video' -> 'Indias got latent'
     - 'search "Khat" and play first video that appears' -> 'Khat'
     - 'On this site search "Khat" and play first video that appears' -> 'Khat'
     - 'search lo fi songs on youtube' -> 'lo fi songs'
+    - 'search watches on flipkart' -> 'watches'
     """
     if not task:
         return None
-    cleaned = re.sub(r"^(?:on this (?:site|page|tab)\s*,?\s*|please\s*)", "", task.strip(), flags=re.I)
+    cleaned = clean_task_text(task)
 
-    # 1. Quoted query
+    # If this is a contact messaging task (e.g. "search for contact Tanishq and message him..."), do not treat as web/product search
+    contact_name, _ = parse_contact_task(cleaned)
+    if contact_name:
+        return None
+    cleaned = re.sub(r"^(?:on this (?:site|page|tab)\s*,?\s*|please\s*)", "", cleaned.strip(), flags=re.I)
+
+    # 1. Quoted query: search for "stylish watches" -> stylish watches
     m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+["\'\u201c\u201d]([^"\'\u201c\u201d]+)["\'\u201c\u201d]', cleaned, re.I)
     if m:
-        return m.group(1).strip()
+        q = m.group(1).strip()
+        q = re.sub(r'\s+(?:for\s+me|for\s+us|please)$', '', q, flags=re.I)
+        return q.strip()
     # 2. Compound task with "and play/watch/click/open/select"
     m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+(.+?)\s+and\s+(?:play|watch|click|open|select)', cleaned, re.I)
     if m:
-        return m.group(1).strip()
-    # 3. Simple search with trailing platform mention
-    m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+(.+?)(?:\s+(?:on|in)\s+(?:youtube|google|site|page|web))?$', cleaned, re.I)
+        q = m.group(1).strip()
+        q = re.sub(r'\s+(?:on|in)\s+(?:youtube|google|flipkart|amazon|myntra|meesho|site|page|web)$', '', q, flags=re.I)
+        q = re.sub(r'\s+(?:for\s+me|for\s+us|please)$', '', q, flags=re.I)
+        return q.strip()
+    # 3. Simple search with trailing platform mention or 'for me': search watches on flipkart -> watches
+    m = re.search(r'(?:search(?:\s+for)?|look\s*up|find)\s+(.+?)(?:\s+(?:on|in)\s+(?:youtube|google|flipkart|amazon|myntra|meesho|site|page|web|\w+\.\w+))?$', cleaned, re.I)
     if m:
         q = m.group(1).strip()
-        q = re.sub(r'\s+(?:on|in)\s+(?:youtube|google|site|page|web)$', '', q, flags=re.I)
+        q = re.sub(r'\s+(?:on|in)\s+(?:youtube|google|flipkart|amazon|myntra|meesho|site|page|web|\w+\.\w+)$', '', q, flags=re.I)
+        q = re.sub(r'\s+(?:for\s+me|for\s+us|please)$', '', q, flags=re.I)
         return q.strip()
     return None
 
-def _normalize_search_action(resp: InterpretResponse, task: str, sanitized_dom: Union[list, str, None]) -> InterpretResponse:
+def find_search_input(sanitized_dom: Union[list, str, None]) -> Optional[dict]:
+    """Finds the primary search input/textarea in the sanitized DOM."""
+    if not isinstance(sanitized_dom, list):
+        return None
+    for el in sanitized_dom:
+        if el.get("isAudioRecord"):
+            continue
+        tag = (el.get("tag") or "").lower()
+        role = (el.get("role") or "").lower()
+        if tag == "button" or role == "button":
+            continue
+        if tag in ("input", "textarea") or role in ("searchbox", "combobox", "textbox"):
+            attrs = el.get("attributes") or {}
+            ph = str(el.get("placeholder") or attrs.get("placeholder") or "").lower()
+            lbl = str(el.get("label") or "").lower()
+            nm = str(el.get("name") or attrs.get("name") or "").lower()
+            eid = str(el.get("id") or "").lower()
+            if (
+                "search" in ph or "search" in lbl or "query" in ph or
+                nm in ("q", "search_query") or eid in ("search", "twotabsearchtextbox") or
+                "search" in eid
+            ):
+                return el
+    return None
+
+def is_result_item(el: dict) -> bool:
+    """Checks if a DOM element is a search result item (video title, playlist card, course, product card link)."""
+    tag = (el.get("tag") or "").lower()
+    role = (el.get("role") or "").lower()
+    attrs = el.get("attributes") or {}
+    href = str(el.get("href") or attrs.get("href") or "").lower()
+    label = str(el.get("label") or "").lower()
+    el_id = str(el.get("elementId") or el.get("id") or "").lower()
+    text = str(el.get("text") or "").lower()
+    bbox = el.get("bbox") or {}
+    x = bbox.get("x") if isinstance(bbox, dict) else None
+
+    # Reject sidebar navigation items (left guide)
+    if el.get("isSidebar") or (x is not None and x < 200 and label in {"playlists", "liked videos", "subscriptions", "library", "history", "home", "shorts"}):
+        return False
+
+    # YouTube video or playlist result detection
+    if el_id == "video-title" or el.get("isSearchResult") or el.get("isPlaylist"):
+        return True
+    if "/watch" in href or "/playlist" in href or "/course" in href:
+        return True
+    if "views" in label or "playlist" in label or "course" in label or "lessons" in label:
+        return True
+    if "view full playlist" in text or "view full course" in text:
+        return True
+    # Broader YouTube video/playlist card detection: labels with view counts, duration, channel info
+    if tag in ("a", "yt-formatted-string") and (
+        re.search(r'\d+[KMkm]?\s*views', label) or
+        re.search(r'\d+\s*(hours?|minutes?|seconds?)\s*ago', label) or
+        re.search(r'\d+:\d+', label) or  # duration like 12:34
+        re.search(r'\d+[KMkm]?\s*views', text) or
+        re.search(r'\d+\s*(videos|lessons)', label) or
+        re.search(r'\d+\s*(videos|lessons)', text)
+    ):
+        return True
+    # E-commerce product result detection
+    if tag == "a" and ("/p/" in href or "/dp/" in href or "/product/" in href or "₹" in label or "rs." in label or "$" in label):
+        return True
+    return False
+
+def is_search_button(el: dict) -> bool:
+    """Checks if a DOM element is a search submit button / search icon."""
+    tag = (el.get("tag") or "").lower()
+    role = (el.get("role") or "").lower()
+    attrs = el.get("attributes") or {}
+    label = str(el.get("label") or "").lower()
+    elem_id = str(el.get("id") or "").lower()
+    btn_type = str(el.get("inputType") or attrs.get("type") or "").lower()
+
+    if tag == "button" or role == "button" or btn_type == "submit":
+        if "search" in label or "search" in elem_id or "submit" in elem_id or elem_id == "search-icon-legacy":
+            return True
+        if "search for products" in label or "find" in label:
+            return True
+    return False
+
+def _normalize_search_action(
+    resp: InterpretResponse,
+    task: str,
+    sanitized_dom: Union[list, str, None],
+    prior_actions: list = None
+) -> InterpretResponse:
     """
-    Ensures that if the user's task is a search task and the model returned 'click' on a search input,
-    the action is seamlessly normalized to 'type' with the clean extracted query.
+    Ensures search tasks reliably type the clean query into the search input box:
+    1. Clicks on video links or product cards are PRESERVED as clicks.
+    2. Premature 'done' actions on Step 0 are converted to 'type' with the search query.
+    3. Clicks on the search input itself are converted to 'type' with the search query.
+    4. Clicks on search buttons when the search input is empty are converted to 'type' on the search input.
+    5. 'type' actions accidentally targeting buttons are redirected to the search input.
+    6. Respects verified 'done' actions once a search action was executed in prior steps.
     """
-    if not resp or not resp.action or resp.action.type != "click" or not resp.action.targetElementId:
+    if not resp or not resp.action:
         return resp
 
-    has_search_intent = bool(re.search(r'\b(search|find|look\s*up)\b', task, re.I))
+    clean_task = clean_task_text(task)
+    # Skip if task is contact messaging (e.g. "search for contact Tanishq and message him...")
+    contact_name, _ = parse_contact_task(clean_task)
+    if contact_name:
+        return resp
+
+    has_search_intent = bool(re.search(r'\b(search|find|look\s*up)\b', clean_task, re.I))
     if not has_search_intent:
         return resp
 
-    query = extract_search_query(task)
+    query = extract_search_query(clean_task)
     if not query:
         return resp
 
-    is_search_bar = False
-    reasoning_lower = (resp.reasoning or "").lower()
-    if "search" in reasoning_lower and any(w in reasoning_lower for w in ("bar", "input", "box", "enter", "query")):
-        is_search_bar = True
-    elif isinstance(sanitized_dom, list):
-        for el in sanitized_dom:
-            el_id = el.get("elementId") or el.get("id")
-            if el_id == resp.action.targetElementId:
-                tag = (el.get("tag") or "").lower()
-                role = (el.get("role") or "").lower()
-                attrs = el.get("attributes") or {}
-                ph = (el.get("placeholder") or attrs.get("placeholder") or "").lower()
-                name = (el.get("name") or "").lower()
-                elem_id_str = str(el.get("id") or "").lower()
-                if tag in ("input", "textarea") or role in ("combobox", "searchbox", "textbox") or "search" in ph or "search" in name or elem_id_str == "search":
-                    is_search_bar = True
+    # Check if a search was already performed in prior actions
+    has_prior_search = False
+    if prior_actions:
+        for act in prior_actions:
+            act_str = str(act).lower()
+            if "type" in act_str:
+                has_prior_search = True
                 break
 
-    if is_search_bar:
-        print(f"[*] Auto-normalizing search action: converted 'click' on search bar {resp.action.targetElementId} to 'type' with query '{query}'")
-        resp.action.type = "type"
-        resp.action.value = query
-        resp.reasoning = f"Entering search query '{query}' into search bar and submitting."
-        resp.confidence = max(resp.confidence, 0.95)
+    search_input = find_search_input(sanitized_dom)
+
+    # Locate target element if one was specified
+    target_el = None
+    if isinstance(sanitized_dom, list) and resp.action.targetElementId:
+        for el in sanitized_dom:
+            if (el.get("elementId") or el.get("id")) == resp.action.targetElementId:
+                target_el = el
+                break
+
+    # CRITICAL: If target is explicitly a video link or product result item, PRESERVE IT AS CLICK!
+    if target_el and is_result_item(target_el):
+        return resp
+
+    if search_input:
+        search_input_id = search_input.get("elementId") or search_input.get("id")
+        raw_val = search_input.get("value") or (search_input.get("attributes") or {}).get("value")
+        current_input_val = str(raw_val or "").strip()
+        is_query_in_input = bool(
+            query and (
+                query.lower() in current_input_val.lower() or
+                (current_input_val and current_input_val.lower() in query.lower())
+            )
+        )
+
+        # Case A: Model returned 'done' on Step 0 (no prior search executed) but search query was never entered!
+        if resp.action.type == "done" and not is_query_in_input and not has_prior_search:
+            print(f"[*] Auto-normalizing search action: prevented premature 'done' on empty search page; converting to 'type' on {search_input_id} with query '{query}'")
+            resp.action.type = "type"
+            resp.action.targetElementId = search_input_id
+            resp.action.value = query
+            resp.reasoning = f"Entering search query '{query}' into search bar and submitting."
+            resp.confidence = max(resp.confidence, 0.95)
+            return resp
+
+        # Case B: Model returned 'click' on the search input itself
+        if resp.action.type == "click" and resp.action.targetElementId == search_input_id:
+            print(f"[*] Auto-normalizing search action: converted 'click' on search input {search_input_id} to 'type' with query '{query}'")
+            resp.action.type = "type"
+            resp.action.value = query
+            resp.reasoning = f"Entering search query '{query}' into search bar and submitting."
+            resp.confidence = max(resp.confidence, 0.95)
+            return resp
+
+        # Case C: Model returned 'click' on a search button/icon when input is empty and no prior search ran
+        if resp.action.type == "click" and target_el and is_search_button(target_el) and not is_query_in_input and not has_prior_search:
+            print(f"[*] Auto-normalizing search action: converted 'click' on search button {resp.action.targetElementId} with empty input to 'type' on {search_input_id} with query '{query}'")
+            resp.action.type = "type"
+            resp.action.targetElementId = search_input_id
+            resp.action.value = query
+            resp.reasoning = f"Entering search query '{query}' into search bar and submitting."
+            resp.confidence = max(resp.confidence, 0.95)
+            return resp
+
+        # Case D: Model returned 'type' targeting a button instead of the actual input
+        if resp.action.type == "type" and target_el and (target_el.get("tag") == "button" or target_el.get("role") == "button"):
+            print(f"[*] Auto-normalizing search action: redirecting 'type' from button {resp.action.targetElementId} to input {search_input_id}")
+            resp.action.targetElementId = search_input_id
+            if not resp.action.value:
+                resp.action.value = query
+            return resp
+
+        # Case E: Pure search task on Step 0 with empty input
+        is_compound_task = bool(re.search(r'\b(play|watch|click|open|select)\b', clean_task, re.I))
+        if not is_compound_task and not is_query_in_input and not has_prior_search and resp.action.type != "type":
+            print(f"[*] Auto-normalizing search action: pure search task on empty search input; converting to 'type' on {search_input_id} with query '{query}'")
+            resp.action.type = "type"
+            resp.action.targetElementId = search_input_id
+            resp.action.value = query
+            resp.reasoning = f"Entering search query '{query}' into search bar and submitting."
+            resp.confidence = max(resp.confidence, 0.95)
+            return resp
+
+    # Case F: Block premature 'done' on compound search+play tasks when search ran but video isn't playing
+    is_video_play_task = bool(re.search(r'\b(play|watch)\b', clean_task, re.I))
+    if resp.action.type == "done" and has_prior_search and is_video_play_task:
+        # If prior search ran but no click on a result has been done yet, find the first result item
+        has_prior_click_on_result = False
+        if prior_actions:
+            for act in prior_actions:
+                act_str = str(act).lower()
+                if "click" in act_str and ("video" in act_str or "watch" in act_str or "playlist" in act_str):
+                    has_prior_click_on_result = True
+                    break
+        if not has_prior_click_on_result and isinstance(sanitized_dom, list):
+            # Find first result item to click
+            for el in sanitized_dom:
+                if is_result_item(el):
+                    el_id = el.get("elementId") or el.get("id")
+                    label = el.get("label") or el.get("text") or "first media item"
+                    # Skip members-only videos
+                    if "members only" in str(label).lower():
+                        continue
+                    print(f"[*] Auto-normalizing: blocked premature 'done' on video/playlist play task; converting to 'click' on {el_id}")
+                    resp.action.type = "click"
+                    resp.action.targetElementId = el_id
+                    resp.action.value = None
+                    resp.reasoning = f"Clicking first video or playlist result to play it."
+                    resp.confidence = max(resp.confidence, 0.90)
+                    return resp
 
     return resp
 
@@ -680,24 +1269,44 @@ def extract_message_text(task: str) -> Optional[str]:
     - 'send message saying "How are you?" to John' -> 'How are you?'
     - 'type Hello in the chat' -> 'Hello'
     - 'say Hi there and press enter' -> 'Hi there'
+    - 'message Tanishq I will not be available for tomorrow' -> 'I will not be available for tomorrow'
     """
     if not task:
         return None
+    cleaned = clean_task_text(task)
 
-    # 1. Quoted string: "Hello" or 'Hello'
-    m = re.search(r'["\']([^"\']+)["\']', task)
+    # If it is a creative generation task (e.g. 10 line poem), let the model compose it
+    if is_creative_generation_task(cleaned):
+        return None
+
+    # Check contact task parsing first (e.g. "message Tanishq I will not be available")
+    contact_name, body = parse_contact_task(cleaned)
+    if body and not is_creative_generation_task(body):
+        return body
+
+    # 1. Quoted string: "Hello" or 'Hello' (avoid extracting contact name from send "Tanishq" a message)
+    m = re.search(r'["\']([^"\']+)["\']', cleaned)
     if m:
-        return m.group(1).strip()
+        val = m.group(1).strip()
+        if not re.search(r'(?:send|message|tell|text)\s+["\']' + re.escape(val) + r'["\']', cleaned, re.I):
+            return val
 
     # 2. "saying <text>"
-    m = re.search(r'\bsaying\s+(.+)$', task, re.I)
+    m = re.search(r'\bsaying\s+(.+)$', cleaned, re.I)
     if m:
         val = m.group(1).strip()
         val = re.sub(r'\s+and\s+(?:send|press|hit).*$', '', val, flags=re.I)
         return val.strip()
 
     # 3. "say <text>" or "type <text>" or "write <text>"
-    m = re.search(r'\b(?:say|type|write)\s+(.+?)(?:\s+(?:in|into|to|on)\s+.*)?$', task, re.I)
+    m = re.search(r'\b(?:say|type|write)\s+(.+?)(?:\s+(?:in|into|to|on)\s+.*)?$', cleaned, re.I)
+    if m:
+        val = m.group(1).strip()
+        val = re.sub(r'\s+and\s+(?:send|press|hit).*$', '', val, flags=re.I)
+        return val.strip()
+
+    # 4. "message that <text>" or "send him/her message that <text>"
+    m = re.search(r'\b(?:send\s+(?:\w+\s+)?message\s+that|message\s+that)\s+(.+)$', cleaned, re.I)
     if m:
         val = m.group(1).strip()
         val = re.sub(r'\s+and\s+(?:send|press|hit).*$', '', val, flags=re.I)
@@ -705,43 +1314,247 @@ def extract_message_text(task: str) -> Optional[str]:
 
     return None
 
-def _normalize_action(resp: InterpretResponse, task: str, sanitized_dom: Union[list, str, None]) -> InterpretResponse:
+def _normalize_contact_chat_action(
+    resp: InterpretResponse,
+    task: str,
+    sanitized_dom: Union[list, str, None],
+    prior_actions: list = None
+) -> InterpretResponse:
     """
-    Normalizes and fixes model actions for search, chat/messaging, and clicks with text values.
+    Normalizes multi-step contact messaging workflows (e.g. on WhatsApp Web):
+    - Step 1: Types contact name into contact search bar.
+    - Step 2: Clicks top contact result under Chats on the left.
+    - Step 3: Types message or generated poem into message textbox.
+    - Step 4: Handles verified completion / 'done'.
+    - Preserves generated creative content (poems/rhymes) when is_creative_generation_task is True.
     """
     if not resp or not resp.action:
         return resp
 
-    # 1. Normalize search tasks
-    _normalize_search_action(resp, task, sanitized_dom)
+    clean_task = clean_task_text(task)
+    contact_name, body = parse_contact_task(clean_task)
+    is_creative = is_creative_generation_task(clean_task)
 
-    # 2. If action has type='click' but non-empty value, model intended to type
+    has_chat_intent = bool(
+        contact_name or
+        is_creative or
+        re.search(r'\b(send|type|write|message|say|chat|tell|text|draft)\b', clean_task, re.I)
+    )
+    if not has_chat_intent:
+        return resp
+
+    # Check prior actions history
+    has_prior_search = False
+    has_prior_click_contact = False
+    has_prior_message_sent = False
+    if prior_actions:
+        target_words = [
+            w.lower() for w in re.findall(r'\b[a-zA-Z]{4,}\b', body or clean_task)
+            if w.lower() not in {"send", "message", "that", "with", "from", "about", "this", "will", "please", "polite"}
+        ]
+        for act in prior_actions:
+            act_str = str(act).lower()
+            if "click" in act_str:
+                if has_prior_search:
+                    has_prior_click_contact = True
+                elif contact_name and contact_name.lower() in act_str:
+                    has_prior_search = True
+                    has_prior_click_contact = True
+            elif "type" in act_str:
+                if contact_name and (f'"{contact_name.lower()}"' in act_str or f"'{contact_name.lower()}'" in act_str or "search" in act_str):
+                    has_prior_search = True
+                elif "executed" in act_str or "sent" in act_str:
+                    if target_words:
+                        matches = sum(1 for w in target_words if w in act_str)
+                        if matches >= min(2, len(target_words)):
+                            has_prior_message_sent = True
+                            break
+                    elif is_creative and any(k in act_str for k in ("poem", "congratulat", "wedding", "marriage", "lecture", "attend", "birthday")):
+                        has_prior_message_sent = True
+                        break
+
+    # Check if chat conversation is already open on screen with contact_name
+    if contact_name and not has_prior_click_contact and isinstance(sanitized_dom, list):
+        for el in sanitized_dom:
+            bbox = el.get("bbox") or {}
+            x = bbox.get("x") or 0
+            y = bbox.get("y") or 0
+            if x >= 350 and y <= 150:
+                txt = str(el.get("text") or el.get("label") or "").lower()
+                if contact_name.lower() in txt:
+                    has_prior_search = True
+                    has_prior_click_contact = True
+                    break
+
+    # 1. Circuit breaker: if message already sent, return 'done'
+    is_reasoning_done = bool(re.search(
+        r'\b(task is complete|already typed|already sent|visible in chat|goal is accomplished|message has been sent)\b',
+        resp.reasoning or '',
+        re.I
+    ))
+    if has_prior_message_sent and (is_reasoning_done or resp.action.type == "done" or (resp.action.type == "type" and not resp.action.value)):
+        print("[*] Auto-normalizing contact action: message was already sent in prior turn; converting to 'done'")
+        resp.action.type = "done"
+        resp.action.targetElementId = None
+        resp.action.value = None
+        resp.confidence = max(resp.confidence, 0.95)
+        return resp
+
+    contact_search_input = find_contact_search_input(sanitized_dom)
+    msg_textbox = find_chat_message_textbox(sanitized_dom)
+
+    # Step 1: If contact is specified and hasn't been searched yet
+    if contact_name and not has_prior_search:
+        if contact_search_input:
+            search_id = contact_search_input.get("elementId") or contact_search_input.get("id")
+            raw_val = contact_search_input.get("value") or (contact_search_input.get("attributes") or {}).get("value")
+            cur_val = str(raw_val or "").strip()
+            if contact_name.lower() not in cur_val.lower():
+                if resp.action.type in ("click", "done") or resp.action.targetElementId != search_id or not resp.action.value:
+                    print(f"[*] Auto-normalizing contact action: Step 1 typing contact '{contact_name}' into search input {search_id}")
+                    resp.action.type = "type"
+                    resp.action.targetElementId = search_id
+                    resp.action.value = contact_name
+                    resp.reasoning = f"Searching for contact '{contact_name}' in WhatsApp search bar."
+                    resp.confidence = max(resp.confidence, 0.95)
+                    return resp
+
+    # Step 2: Contact was searched in prior action, now must click top contact result card on the left
+    if contact_name and has_prior_search and not has_prior_click_contact:
+        contact_el = None
+        if isinstance(sanitized_dom, list):
+            # First pass: find element whose label or text explicitly contains contact_name
+            for el in sanitized_dom:
+                if is_contact_result_item(el, contact_name=contact_name):
+                    lbl = str(el.get("label") or "").lower()
+                    txt = str(el.get("text") or "").lower()
+                    if contact_name.lower() in lbl or contact_name.lower() in txt:
+                        contact_el = el
+                        break
+            # Second pass: fallback to top contact result item in the search list
+            if not contact_el:
+                for el in sanitized_dom:
+                    if is_contact_result_item(el, contact_name=contact_name):
+                        contact_el = el
+                        break
+        if contact_el:
+            contact_el_id = contact_el.get("elementId") or contact_el.get("id")
+            # If model already clicked contact_el, preserve it!
+            if resp.action.type == "click" and resp.action.targetElementId == contact_el_id:
+                return resp
+            # If model tried to type into bottom message box or emitted done prematurely, convert to click on contact
+            if resp.action.type in ("done", "type") or resp.action.targetElementId != contact_el_id:
+                print(f"[*] Auto-normalizing contact action: Step 2 selecting contact '{contact_name}' by clicking {contact_el_id}")
+                resp.action.type = "click"
+                resp.action.targetElementId = contact_el_id
+                resp.action.value = None
+                resp.reasoning = f"Clicking contact '{contact_name}' in search results to open chat conversation."
+                resp.confidence = max(resp.confidence, 0.95)
+                return resp
+
+    # Step 3: Contact conversation is open (or prior click occurred / direct chat task), handle message box
+    if msg_textbox:
+        msg_id = msg_textbox.get("elementId") or msg_textbox.get("id")
+        if resp.action.targetElementId == msg_id or (resp.action.type == "click" and not resp.action.targetElementId and (has_prior_click_contact or not contact_name)):
+            resp.action.type = "type"
+            resp.action.targetElementId = msg_id
+
+        if resp.action.targetElementId == msg_id:
+            resp.action.type = "type"
+            if is_creative:
+                if is_prompt_echo(resp.action.value, clean_task):
+                    print(f"[*] Auto-normalizing contact action: detected prompt echo or empty value '{resp.action.value}'; composing full creative text")
+                    resp.action.value = compose_creative_fallback(clean_task)
+                else:
+                    print(f"[*] Auto-normalizing contact action: preserved creative text in action.value ({len(resp.action.value)} chars)")
+            else:
+                extracted = extract_message_text(clean_task)
+                if extracted and (not resp.action.value or resp.action.type == "click"):
+                    resp.action.value = extracted
+                elif not resp.action.value and body:
+                    resp.action.value = body
+
+    return resp
+
+def _normalize_action(
+    resp: InterpretResponse,
+    task: str,
+    sanitized_dom: Union[list, str, None],
+    prior_actions: list = None
+) -> InterpretResponse:
+    """
+    Normalizes and fixes model actions for search, chat/messaging, contact selection, and clicks with text values.
+    """
+    if not resp or not resp.action:
+        return resp
+
+    # 1. Normalize contact search & messaging tasks (WhatsApp multi-step sequence)
+    _normalize_contact_chat_action(resp, task, sanitized_dom, prior_actions=prior_actions)
+
+    # 2. Normalize search tasks (YouTube, Flipkart, Amazon)
+    _normalize_search_action(resp, task, sanitized_dom, prior_actions=prior_actions)
+
+    # 3. If action has type='click' but non-empty value, model intended to type
     if resp.action.type == "click" and resp.action.value:
         print(f"[*] Auto-normalizing action: converted 'click' with value '{resp.action.value}' to 'type'")
         resp.action.type = "type"
 
-    # 3. Chat/Messaging: if task is to send message and model clicked the textbox, convert to type
-    chat_intent = bool(re.search(r'\b(send|type|write|message|say|chat)\b', task, re.I))
-    if chat_intent and resp.action.targetElementId:
-        is_textbox = False
-        if isinstance(sanitized_dom, list):
-            for el in sanitized_dom:
-                el_id = el.get("elementId") or el.get("id")
-                if el_id == resp.action.targetElementId:
-                    tag = (el.get("tag") or "").lower()
-                    role = (el.get("role") or "").lower()
-                    attrs = el.get("attributes") or {}
-                    ph = (el.get("placeholder") or attrs.get("placeholder") or "").lower()
-                    if role == "textbox" or tag in ("textarea", "input") or "message" in ph or "type" in ph:
-                        is_textbox = True
+    # 4. Standard chat/messaging fallback if not already handled
+    contact_name, _ = parse_contact_task(clean_task_text(task))
+    is_creative = is_creative_generation_task(task)
+    chat_intent = bool(
+        is_creative or
+        re.search(r'\b(send|type|write|message|say|chat|tell|text|draft)\b', task, re.I)
+    )
+    if chat_intent and not contact_name:
+        has_prior_message_sent = False
+        if prior_actions:
+            for act in prior_actions:
+                act_str = str(act).lower()
+                if "type" in act_str and ("sent" in act_str or "outcome: executed" in act_str or "message" in act_str):
+                    has_prior_message_sent = True
                     break
-        if is_textbox:
-            extracted = extract_message_text(task)
-            if extracted and (not resp.action.value or resp.action.type == "click"):
-                resp.action.value = extracted
-            if resp.action.type == "click":
-                resp.action.type = "type"
-                print(f"[*] Auto-normalizing chat action: converted 'click' on chat textbox to 'type' with value '{resp.action.value}'")
+
+        # If a prior message was already sent and reasoning indicates completion, or action is type with empty value:
+        is_reasoning_done = bool(re.search(r'\b(task is complete|already typed|already sent|visible in chat|goal is accomplished|message has been sent)\b', resp.reasoning or '', re.I))
+        if has_prior_message_sent and (is_reasoning_done or (resp.action.type == "type" and not resp.action.value)):
+            print("[*] Auto-normalizing chat action: message was already sent in prior turn; converting to 'done'")
+            resp.action.type = "done"
+            resp.action.targetElementId = None
+            resp.action.value = None
+            resp.confidence = max(resp.confidence, 0.95)
+            return resp
+
+        if resp.action.targetElementId and not has_prior_message_sent:
+            is_textbox = False
+            if isinstance(sanitized_dom, list):
+                for el in sanitized_dom:
+                    el_id = el.get("elementId") or el.get("id")
+                    if el_id == resp.action.targetElementId:
+                        tag = (el.get("tag") or "").lower()
+                        role = (el.get("role") or "").lower()
+                        attrs = el.get("attributes") or {}
+                        ph = (el.get("placeholder") or attrs.get("placeholder") or "").lower()
+                        lbl = (el.get("label") or attrs.get("aria-label") or "").lower()
+                        if "search" in ph or "search" in lbl or "search" in str(el_id).lower():
+                            is_textbox = False
+                            break
+                        if role == "textbox" or tag in ("textarea", "input") or "message" in ph or "type" in ph:
+                            is_textbox = True
+                        break
+            if is_textbox:
+                is_creative = is_creative_generation_task(task)
+                if is_creative:
+                    if is_prompt_echo(resp.action.value, task):
+                        print(f"[*] Auto-normalizing chat action: detected prompt echo or empty value '{resp.action.value}'; composing full creative text")
+                        resp.action.value = compose_creative_fallback(task)
+                else:
+                    extracted = extract_message_text(task)
+                    if extracted and (not resp.action.value or resp.action.type == "click"):
+                        resp.action.value = extracted
+                if resp.action.type == "click":
+                    resp.action.type = "type"
+                    print(f"[*] Auto-normalizing chat action: converted 'click' on chat textbox to 'type' with value '{resp.action.value}'")
 
     return resp
 
@@ -825,7 +1638,7 @@ def run_inference(
         validated.model = get_model_for_provider(provider_used)
         validated.raw_model_output = raw_output or thinking
         validated.thinking = thinking
-        _normalize_action(validated, task, sanitized_dom)
+        _normalize_action(validated, task, sanitized_dom, prior_actions=prior_actions)
         _populate_backward_compat(validated)
         return validated, latency, False
 
@@ -854,7 +1667,7 @@ def run_inference(
         validated_retry.model = get_model_for_provider(provider_used_retry)
         validated_retry.raw_model_output = raw_retry or thinking_retry
         validated_retry.thinking = thinking_retry or thinking
-        _normalize_action(validated_retry, task, sanitized_dom)
+        _normalize_action(validated_retry, task, sanitized_dom, prior_actions=prior_actions)
         _populate_backward_compat(validated_retry)
         return validated_retry, latency, True
 

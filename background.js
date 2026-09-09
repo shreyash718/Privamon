@@ -748,6 +748,7 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 35) {
 
   const hasClickIntent = /\b(click|press|tap|select|submit|choose|open|go|check|tick|play|watch)\b/i.test(task || '');
   const hasTypeIntent = /\b(type|enter|fill|input|write|search|set|send|message|reply|post|chat|say|text)\b/i.test(task || '') || /"[^"]+"/.test(task || '');
+  const hasChatIntent = /\b(send|message|chat|reply|text|contact|tell|draft)\b/i.test(task || '');
   const hasSearchIntent = /\b(search|find|look\s*up|query)\b/i.test(task || '');
   const hasVideoIntent = /\b(video|play|watch|first|views|most viewed|song|episode|listen)\b/i.test(task || '');
 
@@ -836,22 +837,57 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 35) {
       score += 15;
     }
 
-    // YouTube video title link match
-    const isVideoLinkEl = (tag === 'a' || role === 'link') && (
-      el.id === 'video-title' ||
-      /watch\?v=/i.test(el.href || '') ||
-      /views|subscribers|ago|video/i.test(el.label || '')
+    // WhatsApp contact search result item match (in left pane below search bar)
+    const isContactResultEl = !isAudioRecord && !isSearchInputEl && (
+      (el.bbox && el.bbox.x < 450 && el.bbox.y >= 65 && el.bbox.y <= 400)
+    ) && (
+      (role === 'listitem' || role === 'row' || role === 'gridcell' || tag === 'div' || tag === 'span') &&
+      !/^(all|unread|favourites|groups|archived|chats|status|channels|communities)$/i.test(el.label || el.text || '')
     );
-    if (hasVideoIntent && isVideoLinkEl) {
+    if ((hasChatIntent || hasSearchIntent) && isContactResultEl) {
+      score += 20;
+      if (el.bbox && el.bbox.y <= 200) {
+        score += 15; // Extra boost for the top contact card
+      }
+    }
+
+    // Heavy penalty for YouTube sidebar navigation links
+    const isSidebarEl = Boolean(
+      el.isSidebar ||
+      (el.bbox && el.bbox.x < 220 && (tag === 'a' || role === 'link' || tag === 'yt-formatted-string') &&
+       /^(home|shorts|subscriptions|you|history|playlists|watch later|liked videos|your videos|your clips|trending|music|gaming|news|sports)/i.test(el.label || el.text || ''))
+    );
+    if (isSidebarEl) {
+      score -= 40; // Never prioritize sidebar navigation links over search results
+    }
+
+    // YouTube video, playlist, and course result link match
+    const isPlayableMediaEl = (tag === 'a' || role === 'link' || tag === 'yt-formatted-string' || el.id === 'video-title') && (
+      el.id === 'video-title' ||
+      el.isSearchResult ||
+      el.isPlaylist ||
+      /watch\?v=|playlist\?list=|\/playlist|\/course/i.test(el.href || '') ||
+      /views|subscribers|ago|video|playlist|course|lessons/i.test(el.label || '') ||
+      /view full (playlist|course)/i.test(el.text || '')
+    ) && !isSidebarEl;
+
+    if (hasVideoIntent && isPlayableMediaEl) {
       score += 25;
+      if (el.isSearchResult || el.isPlaylist) {
+        score += 10; // Extra boost for verified search result / playlist card
+      }
       if (/\b(most viewed|popular)\b/i.test(task || '') && /\b\d+(\.\d+)?[Mm]\s+views/i.test(el.label || '')) {
         score += 10; // Boost million-view videos when asking for most viewed
       }
       if (/\b(first|top)\b/i.test(task || '') && pos && pos.startsWith('top')) {
-        score += 8;
+        score += 12;
+      }
+      // Prioritize the top-most main search result card (above-the-fold)
+      if (el.bbox && el.bbox.x >= 220 && el.bbox.y >= 60 && el.bbox.y <= 450) {
+        score += 20; // Primary above-the-fold search result boost
       }
       if (el.label && (el.label.includes('MEMBERS ONLY') || el.label.includes('Members only'))) {
-        score -= 50; // Ensure members-only videos are not picked over free public episodes
+        score -= 50; // Ensure members-only videos are not picked over free public items
       }
     }
 
@@ -881,10 +917,12 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 35) {
         width: Math.round(el.bbox.width),
         height: Math.round(el.bbox.height)
       } : null,
+      href: el.href || null,
       attributes: {
         type: el.inputType || (isContentEditable ? 'contenteditable' : null),
         placeholder: placeholderVal || null,
-        value: el.value ? String(el.value).slice(0, 40) : null
+        value: el.value ? String(el.value).slice(0, 40) : null,
+        href: el.href ? String(el.href).slice(0, 100) : null
       },
       _isInput: isInput,
       _score: score
@@ -944,8 +982,9 @@ async function sendToServerAgent(result, task, serverUrl = 'http://localhost:800
       const label = el.label ? ` label="${el.label}"` : '';
       const ph = el.attributes?.placeholder ? ` placeholder="${el.attributes.placeholder}"` : '';
       const val = el.attributes?.value ? ` val="${el.attributes.value}"` : '';
+      const href = el.href ? ` href="${el.href.slice(0, 60)}"` : '';
       const text = el.text ? ` text="${el.text}"` : '';
-      return `<${el.tag} id="${el.elementId}"${pos}${type}${label}${ph}${val}${text}/>`;
+      return `<${el.tag} id="${el.elementId}"${pos}${type}${label}${ph}${val}${href}${text}/>`;
     }).join('\n');
   }
 
@@ -1137,14 +1176,43 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
         message: `${stepPrefix}: Inspecting screen & verifying state...`
       });
 
-      // Provide verification context to the model on subsequent steps
+      // Provide intent-aware verification context to the model on subsequent steps
       const prevAct = steps[steps.length - 1]?.action;
       const prevValSnippet = prevAct?.value
         ? '"' + (prevAct.value.length > 50 ? prevAct.value.slice(0, 50) + '...' : prevAct.value) + '"'
         : '';
-      const currentQuery = step === 0
-        ? task
-        : `${task} [VERIFY TASK COMPLETION: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the screen: if the goal is accomplished (e.g. message is visible in chat history or input is cleared, video is playing, or page is loaded), return action type "done". If the message is still sitting in the input box and not yet sent, emit action type "click" targeting the Send button.]`;
+      
+      let stepGuidance = '';
+      const isVideoPlayTask = /\b(play|watch|video|song|episode|listen)\b/i.test(task);
+      const isContactMessagingTask = /\b(?:search\s+(?:for\s+)?(?:contact\s+)?|message\s+[A-Za-z0-9_]|send\s+[A-Za-z0-9_]|tell\s+[A-Za-z0-9_]|text\s+[A-Za-z0-9_])\b/i.test(task);
+      const isChatTask = /\b(send|message|chat|reply|type|text|draft)\b/i.test(task);
+      const isSearchTask = /\b(search|find|look\s*up)\b/i.test(task);
+
+      if (isVideoPlayTask) {
+        stepGuidance = `[STEP GUIDANCE: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the screen: If you are on search results with video/playlist/course cards, DO NOT return "done" yet — the user's task explicitly requires playing the video or playlist! Target the first public title link or thumbnail in the main search results (look for a#video-title or first card at x >= 240) with action type "click". NEVER click sidebar navigation links (e.g. "Playlists" or "Liked videos" on the left). ONLY return action type "done" when the video watch page (/watch) or playlist player is open and playing.]`;
+      } else if (isContactMessagingTask) {
+        const hasPriorContactSearch = steps.some(s => s.action && s.action.type === 'type' && (!s.execResult || !s.execResult.message || !s.execResult.message.includes('and sent message')));
+        const hasPriorContactClick = steps.some(s => s.action && s.action.type === 'click');
+        const hasPriorMessageSend = steps.some(s => s.action && s.action.type === 'type' && s.execResult && (s.execResult.message?.includes('and sent message') || s.action.isMessageSend));
+
+        if (hasPriorMessageSend) {
+          stepGuidance = `[VERIFY TASK COMPLETION: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the chat history: if the message is visible in the chat bubbles or the input is cleared, return action type "done". If the message is still sitting in the input box and not yet sent, emit action type "click" targeting the Send button.]`;
+        } else if (hasPriorContactClick || (hasPriorContactSearch && prevAct?.type === 'click')) {
+          stepGuidance = `[STEP GUIDANCE: The contact's chat conversation is now open on the right. Now type the requested message (or generate the requested poem/content) into the message input box at the bottom ("Type a message", role="textbox") with action type "type". The client will automatically send the message once typed.]`;
+        } else if (hasPriorContactSearch || prevAct?.type === 'type') {
+          stepGuidance = `[STEP GUIDANCE: The contact name was searched in the search bar. Inspect the left column under "Chats": click the FIRST/TOP contact result that appears in the search list to open their conversation pane. CRITICAL: DO NOT click or type into the message input box on the right until that contact's chat is open!]`;
+        } else {
+          stepGuidance = `[STEP GUIDANCE: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect screen state and take the next required step.]`;
+        }
+      } else if (isChatTask) {
+        stepGuidance = `[VERIFY TASK COMPLETION: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the screen: if the message is visible in chat history or input is cleared, return action type "done". If the message is still sitting in the input box and not yet sent, emit action type "click" targeting the Send button.]`;
+      } else if (isSearchTask) {
+        stepGuidance = `[STEP GUIDANCE: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the screen: If search results or product listings for the search query are displayed (URL /search, /results, /s), the search succeeded! Return action type "done" unless the user asked to click or open a specific item. CRITICAL: If you are still on the homepage or the search input is empty, DO NOT return "done" — homepage banners and suggested items are not search results!]`;
+      } else {
+        stepGuidance = `[STEP GUIDANCE: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect current screen state and take the next required step, or return "done" if fully complete.]`;
+      }
+
+      const currentQuery = step === 0 ? task : `${task} ${stepGuidance}`;
 
       // Run the full chat-with-agent pipeline (capture → redact → server query)
       let chatResult;
@@ -1169,6 +1237,11 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
 
       // Check stopping conditions: verified task completion
       if (!action || action.type === 'done') {
+        const isSearchOnly = isSearchTask && !isVideoPlayTask;
+        if (isSearchOnly && step === 0) {
+          console.warn('[Background] Model emitted premature "done" on Step 1 of search task without searching. Continuing loop.');
+          continue;
+        }
         steps.push({ step: step + 1, action: action || { type: 'done' }, result: 'Task complete', stopped: 'done' });
         forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'done', message: `✓ Task verified complete! (${step + 1} step${step > 0 ? 's' : ''})` });
         break;
@@ -1192,12 +1265,15 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
       }
 
       // Circuit-breaker: If model tries to repeatedly click the same input/element without state change during a search task
+      // BUT only if no prior type/search step has already succeeded (otherwise the model is correctly
+      // trying to click a video or result item and should NOT be converted to type)
       if (step > 0 && action.type === 'click' && action.targetElementId) {
         const priorSameClicks = steps.filter(s => s.action && s.action.type === 'click' && s.action.targetElementId === action.targetElementId);
-        if (priorSameClicks.length >= 1) {
+        const hasPriorTypeSuccess = steps.some(s => s.action && s.action.type === 'type' && s.execResult && s.execResult.success);
+        if (priorSameClicks.length >= 1 && !hasPriorTypeSuccess) {
           const isSearchTask = /\b(search|find|look\s*up)\b/i.test(task || '');
           if (isSearchTask) {
-            console.log('[Background] Circuit-breaker: Repeated click on search element detected. Auto-converting to type action.');
+            console.log('[Background] Circuit-breaker: Repeated click on search element detected (no prior search). Auto-converting to type action.');
             const qMatch = task.match(/(?:search(?:\s+for)?|look\s*up|find)\s+["'“”]?([^"'“”.,\n]+?)(?:["'“”]?(?:\s+and\s+(?:play|watch|click|open).*|$))/i);
             const queryVal = qMatch ? qMatch[1].trim() : task.replace(/^(?:please\s+)?search(?:\s+for)?\s+/i, '').split(/\s+and\s+/i)[0].trim();
             if (queryVal) {
@@ -1220,6 +1296,15 @@ async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000'
         steps.push({ step: step + 1, action, confidence, result: 'Low confidence', stopped: 'low_confidence' });
         forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: `Paused: low confidence (${Math.round(confidence * 100)}%)` });
         break;
+      }
+
+      // Strip leaked step guidance or verification text from action values before execution
+      if (action.value && typeof action.value === 'string') {
+        const cleanedValue = action.value.replace(/\[(?:STEP GUIDANCE|VERIFY TASK COMPLETION)[^\]]*\]/gi, '').trim();
+        if (cleanedValue !== action.value) {
+          console.log(`[Background] Stripped leaked guidance text from action value. Original length: ${action.value.length}, cleaned: ${cleanedValue.length}`);
+          action.value = cleanedValue;
+        }
       }
 
       // Execute the action

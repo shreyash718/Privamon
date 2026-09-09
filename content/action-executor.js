@@ -49,13 +49,14 @@
       const allWithId = document.querySelectorAll(`#${CSS.escape(elementId)}`);
       if (allWithId.length > 1) {
         for (const candidate of allWithId) {
-          const container = candidate.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer');
+          const container = candidate.closest('ytd-video-renderer, ytd-playlist-renderer, ytd-radio-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, yt-lockup-view-model');
           const isMembersOnly = container && (
             container.querySelector('.badge-style-type-members-only') ||
             /members\s*only/i.test(container.textContent || '')
           );
           const rect = candidate.getBoundingClientRect();
-          if (!isMembersOnly && rect.width > 5 && rect.height > 5 && rect.top >= 0 && rect.bottom <= window.innerHeight * 1.5) {
+          const isNotSidebar = rect.left >= 200;
+          if (!isMembersOnly && isNotSidebar && rect.width > 5 && rect.height > 5 && rect.top >= 0 && rect.bottom <= window.innerHeight * 1.5) {
             return candidate;
           }
         }
@@ -90,7 +91,25 @@
       });
 
       if (index >= 0 && index < visible.length) {
-        return visible[index];
+        let found = visible[index];
+
+        // YouTube media container resolution: if the matched element is inside a
+        // video, playlist, or course renderer, resolve to the actual playable link
+        // so that clicks navigate correctly in the SPA.
+        if (window.location.hostname.includes('youtube.com')) {
+          const mediaContainer = found.closest(
+            'ytd-video-renderer, ytd-playlist-renderer, ytd-radio-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, yt-lockup-view-model, ytd-playlist-video-renderer, ytd-grid-playlist-renderer'
+          );
+          if (mediaContainer) {
+            const mediaLink = mediaContainer.querySelector('a#video-title, a[href*="/watch"], a[href*="/playlist?list="], a[href*="/course/"], a#thumbnail');
+            if (mediaLink) {
+              console.log('[Privamon ActionExecutor] Resolved dom-tok element to YouTube media link inside container');
+              found = mediaLink;
+            }
+          }
+        }
+
+        return found;
       }
     }
 
@@ -249,15 +268,41 @@
       el.click();
     }
 
-    // YouTube SPA Video click fallback: If clicking a video title/link (id="video-title" or href*="/watch")
-    const href = el.href || el.getAttribute('href') || el.closest('a')?.href || el.closest('a')?.getAttribute('href');
-    if (window.location.hostname.includes('youtube.com') && href && href.includes('/watch')) {
-      setTimeout(() => {
-        if (!window.location.pathname.startsWith('/watch')) {
-          console.log('[Privamon ActionExecutor] Executing YouTube video navigation fallback to:', href);
-          window.location.href = href;
+    // YouTube SPA Video / Playlist / Course click fallback: robust resolution of playable links
+    if (window.location.hostname.includes('youtube.com')) {
+      let targetHref = null;
+      // Strategy 1: direct href on clicked element or parent <a>
+      const directHref = el.href || el.getAttribute('href') || el.closest('a')?.href || el.closest('a')?.getAttribute('href');
+      if (directHref && (/watch\?v=|playlist\?list=|\/playlist|\/course/i.test(directHref))) {
+        targetHref = directHref;
+      }
+      // Strategy 2: Find title link or playable thumbnail inside closest video/playlist container
+      if (!targetHref) {
+        const mediaContainer = el.closest(
+          'ytd-video-renderer, ytd-playlist-renderer, ytd-radio-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, ytd-reel-item-renderer, yt-lockup-view-model, ytd-playlist-video-renderer, ytd-grid-playlist-renderer'
+        );
+        if (mediaContainer) {
+          const mediaLink = mediaContainer.querySelector('a#video-title, a[href*="/watch"], a[href*="/playlist?list="], a[href*="/course/"], a#thumbnail, ytd-thumbnail-overlay-hover-text-renderer');
+          if (mediaLink) {
+            targetHref = mediaLink.href || mediaLink.getAttribute('href') || mediaLink.closest('a')?.href;
+            try { mediaLink.click(); } catch (e) {}
+          }
         }
-      }, 400);
+      }
+      // Strategy 3: If element is #video-title itself
+      if (!targetHref && (el.id === 'video-title' || el.querySelector?.('#video-title'))) {
+        targetHref = el.href || el.closest('a')?.href;
+      }
+
+      // If we found a playable target link and after 300ms the page is still on /results, execute SPA navigation fallback
+      if (targetHref && (/watch\?v=|playlist\?list=|\/playlist|\/course/i.test(targetHref))) {
+        setTimeout(() => {
+          if (window.location.pathname.startsWith('/results')) {
+            console.log('[Privamon ActionExecutor] Executing YouTube media navigation fallback to:', targetHref);
+            window.location.href = targetHref;
+          }
+        }, 300);
+      }
     }
 
     // Visual feedback — brief highlight
@@ -289,7 +334,13 @@
       };
     }
 
-    if (!value) {
+    // Strip any leaked step guidance or verification text from the value
+    let cleanValue = value;
+    if (cleanValue) {
+      cleanValue = cleanValue.replace(/\[(?:STEP GUIDANCE|VERIFY TASK COMPLETION)[^\]]*\]/gi, '').trim();
+    }
+
+    if (!cleanValue) {
       return {
         success: false,
         actionType: 'type',
@@ -341,17 +392,17 @@
         // 2. Native document.execCommand — Chromium automatically fires native beforeinput and input events.
         // DO NOT add synchronous textContent fallbacks here, as modern frameworks (Lexical/React)
         // update their internal DOM state asynchronously, which would falsely trigger the fallback and duplicate text!
-        document.execCommand('insertText', false, value);
+        document.execCommand('insertText', false, cleanValue);
       } catch (e) {
         console.warn('[Privamon ActionExecutor] ContentEditable typing error:', e);
-        targetNode.textContent = value;
+        targetNode.textContent = cleanValue;
         targetNode.dispatchEvent(new Event('input', { bubbles: true }));
       }
       targetNode.dispatchEvent(new Event('change', { bubbles: true }));
     } else if (targetNode.tagName === 'INPUT' || targetNode.tagName === 'TEXTAREA') {
       // Select all existing text and replace
       targetNode.select();
-      targetNode.value = value;
+      targetNode.value = cleanValue;
 
       // For React controlled components — invoke prototype setter
       const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
@@ -362,9 +413,9 @@
       )?.set;
 
       if (targetNode.tagName === 'INPUT' && nativeInputValueSetter) {
-        nativeInputValueSetter.call(targetNode, value);
+        nativeInputValueSetter.call(targetNode, cleanValue);
       } else if (targetNode.tagName === 'TEXTAREA' && nativeTextareaValueSetter) {
-        nativeTextareaValueSetter.call(targetNode, value);
+        nativeTextareaValueSetter.call(targetNode, cleanValue);
       }
 
       targetNode.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
@@ -401,8 +452,8 @@
     );
 
     if (isSearchInput) {
-      // Dispatch Enter key sequence to trigger search
       setTimeout(() => {
+        // 1. Dispatch Enter key sequence (keydown, keypress, keyup)
         const enterOpts = {
           key: 'Enter',
           code: 'Enter',
@@ -417,45 +468,67 @@
         targetNode.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
         targetNode.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
 
-        // Locate and click dedicated Search button (YouTube #search-icon-legacy, etc.)
+        // 2. Submit parent form directly if present (native HTML form submission for Flipkart, Amazon, etc.)
+        const parentForm = targetNode.form || targetNode.closest('form');
+        if (parentForm) {
+          try {
+            parentForm.requestSubmit();
+          } catch (e) {
+            try { parentForm.submit(); } catch (e2) {}
+          }
+        }
+
+        // 3. Locate and click dedicated Search button (Flipkart, YouTube #search-icon-legacy, Amazon, etc.)
         setTimeout(() => {
           const searchBtnCandidates = [
-            targetNode.closest('form, ytd-searchbox, [role="search"], div')?.querySelector(
-              'button#search-icon-legacy, button[aria-label="Search"], button[title="Search"], button[type="submit"]'
+            parentForm?.querySelector('button[type="submit"], input[type="submit"], button, [role="button"]'),
+            targetNode.closest('form, ytd-searchbox, [role="search"], div, header')?.querySelector(
+              'button#search-icon-legacy, button[aria-label*="Search" i], button[title*="Search" i], button[type="submit"]'
             ),
-            document.querySelector('button#search-icon-legacy, button[aria-label="Search"], button[title="Search"]')
+            document.querySelector('button#search-icon-legacy, button[aria-label*="Search" i], button[title*="Search" i]')
           ];
           for (const btn of searchBtnCandidates) {
             if (btn) {
-              const btnLabel = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
+              const btnLabel = (btn.getAttribute('aria-label') || btn.getAttribute('title') || btn.textContent || '').toLowerCase();
               if (/voice|mic|audio|record/i.test(btnLabel)) continue;
-              btn.click();
+              try { btn.click(); } catch (e) {}
               break;
             }
           }
 
-          // YouTube SPA Fallback: If still on homepage after 350ms, navigate directly to search results
-          if (window.location.hostname.includes('youtube.com')) {
+          // 4. SPA Navigation Fallbacks for popular platforms
+          const host = window.location.hostname;
+          if (host.includes('flipkart.com')) {
+            setTimeout(() => {
+              if (!window.location.pathname.startsWith('/search')) {
+                console.log('[Privamon ActionExecutor] Executing Flipkart search navigation fallback for:', cleanValue);
+                window.location.href = `/search?q=${encodeURIComponent(cleanValue)}`;
+              }
+            }, 350);
+          } else if (host.includes('youtube.com')) {
             setTimeout(() => {
               if (!window.location.pathname.startsWith('/results')) {
-                console.log('[Privamon ActionExecutor] Executing YouTube search results navigation fallback for:', value);
-                window.location.href = `/results?search_query=${encodeURIComponent(value)}`;
+                console.log('[Privamon ActionExecutor] Executing YouTube search navigation fallback for:', cleanValue);
+                window.location.href = `/results?search_query=${encodeURIComponent(cleanValue)}`;
+              }
+            }, 350);
+          } else if (host.includes('amazon.')) {
+            setTimeout(() => {
+              if (!window.location.pathname.startsWith('/s')) {
+                console.log('[Privamon ActionExecutor] Executing Amazon search navigation fallback for:', cleanValue);
+                window.location.href = `/s?k=${encodeURIComponent(cleanValue)}`;
               }
             }, 350);
           }
         }, 80);
       }, 60);
     } else if (isChatOrMessageInput) {
-      // Dispatch input event for frameworks (Lexical/Draft/Slate)
-      try {
-        targetNode.dispatchEvent(new InputEvent('input', {
-          bubbles: true,
-          cancelable: true,
-          inputType: 'insertText',
-          data: value,
-          composed: true
-        }));
-      } catch (e) { /* ignore */ }
+      // If NOT contentEditable (e.g. standard input or textarea), ensure input event is fired
+      if (!isContentEditable) {
+        try {
+          targetNode.dispatchEvent(new Event('input', { bubbles: true }));
+        } catch (e) { /* ignore */ }
+      }
 
       // Send the message ONCE using either the Send button OR the Enter key (never both)
       setTimeout(() => {
@@ -465,18 +538,22 @@
         const sendSelectors = [
           'button[aria-label="Send"]',
           'button[aria-label="send"]',
+          'button[aria-label*="Send" i]',
           'span[data-icon="send"]',
           '[data-icon="send"]',
           'span[data-testid="send"]',
           '[data-testid="send"]',
           'button[data-testid="compose-btn-send"]',
+          'button[data-testid*="send" i]',
           'button[data-tab="11"]',
           'button[title="Send"]',
-          'button[title="send"]'
+          'button[title="send"]',
+          'button[title*="Send" i]'
         ];
 
         for (const sel of sendSelectors) {
-          const found = document.querySelectorAll(sel);
+          let found;
+          try { found = document.querySelectorAll(sel); } catch(e) { continue; }
           for (const el of found) {
             const btn = el.closest('button') || el;
             const label = (btn.getAttribute('aria-label') || btn.getAttribute('title') || '').toLowerCase();
@@ -522,7 +599,7 @@
       success: true,
       actionType: 'type',
       targetElementId: targetId,
-      message: `Typed "${value.length > 50 ? value.slice(0, 50) + '...' : value}" into "${targetId}"${isChatOrMessageInput ? ' and sent message' : ''}`
+      message: `Typed "${cleanValue.length > 50 ? cleanValue.slice(0, 50) + '...' : cleanValue}" into "${targetId}"${isChatOrMessageInput ? ' and sent message' : ''}`
     };
   }
 

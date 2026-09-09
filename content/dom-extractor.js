@@ -33,6 +33,8 @@
     'SAMP', 'SECTION', 'SELECT', 'SMALL', 'SPAN', 'STRONG', 'SUB',
     'SUMMARY', 'SUP', 'TABLE', 'TBODY', 'TD', 'TEXTAREA', 'TFOOT',
     'TH', 'THEAD', 'TIME', 'TR', 'U', 'UL', 'VAR',
+    // YouTube-specific custom elements
+    'YT-FORMATTED-STRING',
     // Pixel content tags
     'CANVAS', 'VIDEO', 'SVG', 'OBJECT', 'EMBED', 'IFRAME'
   ]);
@@ -388,8 +390,27 @@
       // Ignore if element is read-only
     }
 
+    // YouTube-specific structural context detection
+    const isYouTube = window.location.hostname.includes('youtube.com');
+    const isSidebar = isYouTube && Boolean(el.closest && el.closest('#guide, ytd-guide-renderer, tp-yt-app-drawer, #sections, ytd-mini-guide-renderer'));
+    const isSearchResult = isYouTube && !isSidebar && Boolean(
+      el.closest && el.closest('ytd-video-renderer, ytd-playlist-renderer, ytd-radio-renderer, yt-lockup-view-model, ytd-item-section-renderer, #contents')
+    );
+    const rawLink = el.href || el.getAttribute?.('href') || el.closest?.('a')?.href;
+    const isPlaylist = isYouTube && Boolean(
+      (el.closest && el.closest('ytd-playlist-renderer, ytd-radio-renderer')) ||
+      /playlist\?list=|\/course/i.test(rawLink || '')
+    );
+
+    // For YouTube video-title and primary search result elements, preserve the actual DOM id as elementId
+    const isYtTitle = isYouTube && !isSidebar && (
+      el.id === 'video-title' ||
+      (tag === 'A' && el.querySelector?.('#video-title'))
+    );
+    const useStableId = isYtTitle;
+
     const entry = {
-      elementId: privamonId,
+      elementId: useStableId ? (el.id || 'video-title') : privamonId,
       tag: tag.toLowerCase(),
       bbox: {
         x: Math.round(rect.left - offsetLeft),
@@ -398,6 +419,9 @@
         height: Math.round(rect.height),
       },
       isPixelContent: isPixel,
+      isSidebar: isSidebar,
+      isSearchResult: isSearchResult,
+      isPlaylist: isPlaylist,
     };
 
     // Check if this is a layout container holding child block elements.
@@ -536,8 +560,8 @@
     }
 
     // Link href (for context, not the full URL)
-    if (tag === 'A' && el.href) {
-      entry.href = el.href.slice(0, 300);
+    if (rawLink) {
+      entry.href = String(rawLink).slice(0, 300);
     }
 
     // Image attributes
