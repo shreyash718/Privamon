@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privamon Test Suite — DOM Semantic Form PII</title>
+  <link rel="stylesheet" href="assets/shared.css">
+</head>
+<body>
+
+  <!-- Suite Navigation Bar -->
+  <nav class="suite-nav">
+    <a href="realistic-combined.html" class="suite-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      </svg>
+      Privamon Test Suite
+    </a>
+    <div class="suite-links">
+      <a href="dom-pii-form.html" class="suite-link active">1. DOM Form</a>
+      <a href="text-pii.html" class="suite-link">2. Text PII</a>
+      <a href="ocr-image-pii.html" class="suite-link">3. OCR Pixel</a>
+      <a href="face-detection.html" class="suite-link">4. Face Vision</a>
+      <a href="realistic-combined.html" class="suite-link">5. Realistic Combined</a>
+    </div>
+  </nav>
+
+  <main class="container">
+    <header class="page-header">
+      <div class="page-title">
+        <span>DOM-Semantic Form PII Validation</span>
+        <span class="badge badge-synthetic">100% Synthetic Data</span>
+      </div>
+      <p class="page-desc">
+        Validates client-side DOM-semantic detection via HTML attribute inspection (<code>type</code>, <code>autocomplete</code>, <code>name</code>, <code>id</code>, and associated labels), independent of the free-text regex engine.
+      </p>
+    </header>
+
+    <div class="notice-synthetic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <div>
+        <strong>Ground Truth Verification:</strong> Form fields marked with <span class="badge badge-redact">REDACT</span> should be classified as sensitive by Privamon's DOM extractor. Benign fields marked with <span class="badge badge-keep">KEEP</span> must be retained to verify that the pipeline avoids over-redacting non-sensitive form fields.
+      </div>
+    </div>
+
+    <!-- DOM Form -->
+    <form id="dom-semantic-test-form" onsubmit="return false;">
+
+      <!-- Section 1: Standard Input Types -->
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">1. Input Type Semantic Attributes</h2>
+          <span class="badge badge-redact">Expected: REDACT</span>
+        </div>
+        <div class="form-grid">
+          
+          <div class="form-group">
+            <label for="user-password" class="form-label">
+              <span>Account Password</span>
+              <span class="badge badge-redact">type="password"</span>
+            </label>
+            <input type="password" id="user-password" name="account_password" class="form-input" value="Synthetic#Pass2026!">
+            <span class="form-hint">Matches input[type=password] semantic classifier</span>
+          </div>
+
+          <div class="form-group">
+            <label for="account-email" class="form-label">
+              <span>Primary Email</span>
+              <span class="badge badge-redact">type="email"</span>
+            </label>
+            <input type="email" id="account-email" name="user_email" class="form-input" value="fake.developer@synthetic-lab.internal">
+            <span class="form-hint">Matches input[type=email] semantic classifier</span>
+          </div>
+
+          <div class="form-group">
+            <label for="phone-contact" class="form-label">
+              <span>Phone Contact</span>
+              <span class="badge badge-redact">type="tel"</span>
+            </label>
+            <input type="tel" id="phone-contact" name="user_phone" class="form-input" value="+91 98765 43210">
+            <span class="form-hint">Matches input[type=tel] semantic classifier</span>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Section 2: Autocomplete Attributes -->
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">2. Autocomplete Sensitive Tokens</h2>
+          <span class="badge badge-redact">Expected: REDACT</span>
+        </div>
+        <div class="form-grid">
+
+          <div class="form-group">
+            <label for="cc-number-field" class="form-label">
+              <span>Payment Card Number</span>
+              <span class="badge badge-redact">autocomplete="cc-number"</span>
+            </label>
+            <input type="text" id="cc-number-field" name="billing_card" autocomplete="cc-number" class="form-input" value="4111 1111 1111 1111">
+            <span class="form-hint">Matches sensitive autocomplete: cc-number</span>
+          </div>
+
+          <div class="form-group">
+            <label for="tel-national-field" class="form-label">
+              <span>Emergency Mobile Number</span>
+              <span class="badge badge-redact">autocomplete="tel"</span>
+            </label>
+            <input type="text" id="tel-national-field" name="emergency_contact" autocomplete="tel" class="form-input" value="+91 91234 56789">
+            <span class="form-hint">Matches sensitive autocomplete: tel</span>
+          </div>
+
+          <div class="form-group">
+            <label for="dob-field" class="form-label">
+              <span>Birth Date</span>
+              <span class="badge badge-redact">autocomplete="bday"</span>
+            </label>
+            <input type="text" id="dob-field" name="birth_date" autocomplete="bday" class="form-input" value="1992-08-14">
+            <span class="form-hint">Matches sensitive autocomplete: bday</span>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Section 3: Sensitive Name / ID Keyword Matching -->
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">3. Identity & Financial Keyword Fields</h2>
+          <span class="badge badge-redact">Expected: REDACT</span>
+        </div>
+        <div class="form-grid">
+
+          <div class="form-group">
+            <label for="ssn-field" class="form-label">
+              <span>Social Security Number</span>
+              <span class="badge badge-redact">name="ssn"</span>
+            </label>
+            <input type="text" id="ssn-field" name="ssn" class="form-input" value="987-65-4321">
+            <span class="form-hint">Matched by sensitive name keyword: ssn</span>
+          </div>
+
+          <div class="form-group">
+            <label for="aadhaar-field" class="form-label">
+              <span>Indian Aadhaar (UID)</span>
+              <span class="badge badge-redact">name="aadhaar"</span>
+            </label>
+            <input type="text" id="aadhaar-field" name="aadhaar" class="form-input" value="2345 6789 0124">
+            <span class="form-hint">Matched by sensitive name keyword: aadhaar</span>
+          </div>
+
+          <div class="form-group">
+            <label for="pan-field" class="form-label">
+              <span>Permanent Account Number (PAN)</span>
+              <span class="badge badge-redact">name="pan"</span>
+            </label>
+            <input type="text" id="pan-field" name="pan" class="form-input" value="ABCPE1234F">
+            <span class="form-hint">Matched by sensitive name keyword: pan</span>
+          </div>
+
+          <div class="form-group">
+            <label for="cvv-field" class="form-label">
+              <span>Card Security Code (CVV)</span>
+              <span class="badge badge-redact">name="cvv"</span>
+            </label>
+            <input type="text" id="cvv-field" name="cvv" class="form-input" value="842">
+            <span class="form-hint">Matched by sensitive name keyword: cvv</span>
+          </div>
+
+          <div class="form-group">
+            <label for="salary-field" class="form-label">
+              <span>Annual Base Salary</span>
+              <span class="badge badge-redact">name="salary"</span>
+            </label>
+            <input type="text" id="salary-field" name="salary" class="form-input" value="85,000 USD">
+            <span class="form-hint">Matched by sensitive name keyword: salary</span>
+          </div>
+
+          <div class="form-group">
+            <label for="ifsc-field" class="form-label">
+              <span>Bank Branch IFSC Code</span>
+              <span class="badge badge-redact">name="ifsc"</span>
+            </label>
+            <input type="text" id="ifsc-field" name="ifsc" class="form-input" value="SBIN0001234">
+            <span class="form-hint">Matched by sensitive keyword / context: ifsc</span>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Section 4: Benign Non-Sensitive Fields (Over-redaction Protection) -->
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">4. Non-Sensitive Fields (Over-Redaction Baseline)</h2>
+          <span class="badge badge-keep">Expected: KEEP</span>
+        </div>
+        <div class="form-grid">
+
+          <div class="form-group">
+            <label for="fav-color-field" class="form-label">
+              <span>Favorite Accent Color</span>
+              <span class="badge badge-keep">KEEP</span>
+            </label>
+            <input type="text" id="fav-color-field" name="fav_color" class="form-input" value="Electric Indigo">
+            <span class="form-hint">Benign user preference — should never be redacted</span>
+          </div>
+
+          <div class="form-group">
+            <label for="tshirt-size-field" class="form-label">
+              <span>Conference T-Shirt Size</span>
+              <span class="badge badge-keep">KEEP</span>
+            </label>
+            <select id="tshirt-size-field" name="tshirt_size" class="form-input">
+              <option value="S">Small (S)</option>
+              <option value="M" selected>Medium (M)</option>
+              <option value="L">Large (L)</option>
+              <option value="XL">Extra Large (XL)</option>
+            </select>
+            <span class="form-hint">Benign sizing preference — should never be redacted</span>
+          </div>
+
+          <div class="form-group">
+            <label for="pref-lang-field" class="form-label">
+              <span>Preferred Programming Language</span>
+              <span class="badge badge-keep">KEEP</span>
+            </label>
+            <input type="text" id="pref-lang-field" name="pref_lang" class="form-input" value="TypeScript & Python">
+            <span class="form-hint">Benign technical skill field — should never be redacted</span>
+          </div>
+
+          <div class="form-group">
+            <label for="feedback-field" class="form-label">
+              <span>General Feedback</span>
+              <span class="badge badge-keep">KEEP</span>
+            </label>
+            <input type="text" id="feedback-field" name="feedback" class="form-input" value="Privamon is extremely responsive and private!">
+            <span class="form-hint">Benign review comment — should never be redacted</span>
+          </div>
+
+        </div>
+      </section>
+
+      <div style="display: flex; justify-content: flex-end; gap: 1rem; margin-top: 1rem;">
+        <button type="reset" class="btn btn-secondary" id="btn-form-reset">Reset Form</button>
+        <button type="submit" class="btn btn-primary" id="btn-form-submit">Save Settings</button>
+      </div>
+
+    </form>
+  </main>
+
+</body>
+</html>

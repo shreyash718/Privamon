@@ -124,10 +124,12 @@ Privamon.PIIDetector = (() => {
   // Suppresses false positives where order IDs, invoices, tracking codes, or pin codes resemble phone/card/aadhaar
   const NEGATIVE_PREFIX_REGEX = /(?:order\s*(?:id|#|no|num)?|invoice\s*(?:id|#|no|num)?|tracking\s*(?:id|#|no|num)?|product\s*(?:code|id|#)?|item\s*(?:code|id|#|no)?|sku\s*(?:#|no)?|pin\s*(?:code)?|pincode|postal\s*(?:code)?|zip\s*(?:code)?)\s*[:#\-]?\s*$/i;
 
-  function hasNegativePrefix(fullText, matchStart) {
-    const windowStart = Math.max(0, matchStart - 40);
-    const preceding = fullText.slice(windowStart, matchStart);
-    return NEGATIVE_PREFIX_REGEX.test(preceding);
+  function hasNegativePrefix(fullText, matchStart, nearbyContext = '') {
+    const windowStart = Math.max(0, matchStart - 50);
+    const precedingInText = fullText.slice(windowStart, matchStart);
+    if (NEGATIVE_PREFIX_REGEX.test(precedingInText)) return true;
+    if (nearbyContext && NEGATIVE_PREFIX_REGEX.test(nearbyContext.trim())) return true;
+    return false;
   }
 
   // ── Ordered Compiled Regex Patterns ──
@@ -162,6 +164,22 @@ Privamon.PIIDetector = (() => {
       checksum: true // Valid Verhoeff promotes to 1.0 confidence
     },
     {
+      name: 'aadhaar_vid',
+      regex: /\b(?:VID\s*[:\-]?\s*)?([2-9]\d{3}\s\d{4}\s\d{4}\s\d{4})\b/g,
+      type: 'aadhaar',
+      baseConfidence: 0.95,
+      matchGroup: 1,
+      validator: (text, ctx) => {
+        const digits = text.replace(/\s/g, '');
+        if (digits.length !== 16) return false;
+        if (!ctx) return true;
+        const lowerCtx = ctx.toLowerCase();
+        return /\b(?:vid|virtual\s*id|aadhaar|aadhar|मेरा|आधार|पहचान|government|india|unique)\b/i.test(lowerCtx);
+      },
+      contextValidator: true,
+      checksum: false
+    },
+    {
       name: 'pan',
       regex: /\b[A-Z]{5}[0-9]{4}[A-Z]\b/g,
       type: 'pan',
@@ -176,14 +194,14 @@ Privamon.PIIDetector = (() => {
     },
     {
       name: 'phone_indian',
-      regex: /\b(?:\+91[\s\-]?)?(?:\(?0?\)?[\s\-]?)?[6-9](?:\d[\s\-]?){9}\b/g,
+      regex: /(?:(?:\+91[\s\-]?)|\b)[6-9](?:\d[\s\-]?){9}\b/g,
       type: 'phone',
-      baseConfidence: 0.80,
+      baseConfidence: 0.85,
       checksum: false
     },
     {
       name: 'phone_e164',
-      regex: /\b\+(?:[1-9]\d{0,2})[\s.\-]?(?:\(?\d{1,4}\)?[\s.\-]?)?\d{1,4}[\s.\-]?\d{1,4}[\s.\-]?\d{1,9}\b/g,
+      regex: /(?:(?:\+)|(?<=\s|\b|\())\+(?:[1-9]\d{0,2})[\s.\-]?(?:\(?\d{1,4}\)?[\s.\-]?)?\d{1,4}[\s.\-]?\d{1,4}[\s.\-]?\d{1,9}\b/g,
       type: 'phone',
       baseConfidence: 0.75,
       checksum: false
@@ -240,7 +258,7 @@ Privamon.PIIDetector = (() => {
       name: 'ip_address',
       regex: /\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b/g,
       type: 'ip',
-      baseConfidence: 0.25, // Demoted to avoid false-positive [REVIEW] on printed amounts/dates without technical context
+      baseConfidence: 0.85,
       validator: (text, ctx) => {
         const lowerCtx = (ctx || '').toLowerCase();
         // Reject amounts, item numbers, rates, invoice tables, or phone figures mistakenly parsed with periods
@@ -251,23 +269,34 @@ Privamon.PIIDetector = (() => {
           return false;
         }
         // Require explicit networking context keyword to confirm it is truly an IP address
-        return /\b(?:server|host|ip|client|network|dns|proxy|interface|subnet|router|dhcp|tcp|udp)\b/i.test(lowerCtx);
+        return /\b(?:server|host|ip|client|network|dns|proxy|interface|subnet|router|dhcp|tcp|udp|gateway|port|listen)\b/i.test(lowerCtx);
       },
       contextValidator: true,
+      checksum: false
+    },
+    {
+      name: 'ipv6_address',
+      regex: /\b(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}\b|\b(?:[0-9a-fA-F]{1,4}:){1,7}:[0-9a-fA-F]{0,4}\b|\b(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}(?::[0-9a-fA-F]{1,4})*\b/g,
+      type: 'ip',
+      baseConfidence: 0.85,
+      validator: (text) => {
+        const parts = text.split(':');
+        return parts.length >= 3 && parts.length <= 8 && parts.every(p => /^[0-9a-fA-F]{0,4}$/.test(p));
+      },
       checksum: false
     },
     {
       name: 'dob',
       regex: /\b(?:0?[1-9]|[12]\d|3[01])[\/\-\.](?:0?[1-9]|1[0-2])[\/\-\.](?:19|20)\d{2}\b/g,
       type: 'dob',
-      baseConfidence: 0.20, // Demoted so normal transaction/invoice dates default to KEEP
+      baseConfidence: 0.90,
       validator: (text, ctx) => {
         const lowerCtx = (ctx || '').toLowerCase();
-        // Reject invoice, receipt, or transaction dates
-        if (/\b(?:date|inv|invoice|bill|receipt|purchase|order|valid|expiry|due|payment|particulars|tax)\b/i.test(lowerCtx)) {
-          return false;
+        // If birth keywords are present, this IS a date of birth
+        if (/\b(?:birth|dob|born|birthday|age)\b/i.test(lowerCtx) || /जन्म/i.test(lowerCtx)) {
+          return true;
         }
-        return /\b(?:birth|dob|born|birthday|age)\b/i.test(lowerCtx);
+        return false;
       },
       contextValidator: true,
       checksum: false
@@ -333,25 +362,85 @@ Privamon.PIIDetector = (() => {
     },
     {
       name: 'name_labeled',
-      regex: /\b(?:name|customer(?:[^\S\r\n]*name)?|client(?:[^\S\r\n]*name)?|patient(?:[^\S\r\n]*name)?|buyer(?:[^\S\r\n]*name)?|holder(?:[^\S\r\n]*name)?|m\/s|shri|smt|mr\.)(?:\s*[:.\-_=~*]\s*|\s{2,}|\t+)([a-zA-Z][a-zA-Z0-9\.\'\-]+(?:[^\S\r\n]+[a-zA-Z\.\'\-]+){0,3})/gi,
+      regex: /\b(?:name|customer(?:[^\S\r\n]*name)?|client\s*name|patient(?:[^\S\r\n]*name)?|buyer(?:[^\S\r\n]*name)?|holder(?:[^\S\r\n]*name)?|m\/s|shri|smt|mr\.)(?:\s*[:=_~*]\s*|\s{2,}|\t+)([a-zA-Z\u0900-\u097F][a-zA-Z0-9\u0900-\u097F\.\'\-]+(?:[^\S\r\n]+[a-zA-Z0-9\u0900-\u097F\.\'\-]+){0,3})/gi,
       type: 'name',
       baseConfidence: 0.92,
       matchGroup: 1,
       validator: (text) => {
-        const lower = text.trim().toLowerCase();
+        let clean = text.trim();
+        // Truncate before subsequent field labels if accidentally captured
+        const labelCut = clean.search(/\b(?:email|mobile|phone|contact|aadhaar|aadhar|pan|address|date|id|code|order|invoice|vid|dob)\b/i);
+        if (labelCut > 2) {
+          clean = clean.slice(0, labelCut).trim();
+        }
+        const lower = clean.toLowerCase();
         const stopWords = new Set([
           'particulars', 'address', 'date', 'invoice', 'bill', 'model', 'amount', 'rate', 'total',
           'signature', 'sign', 'item', 'description', 'qty', 'status', 'gateway', 'home', 'no',
           'mob', 'mobile', 'phone', 'imei', 'battery', 'charger', 'tax', 'gst', 'gstin',
           'communication', 'communications', 'enterprises', 'store', 'shop', 'pvt', 'ltd', 'agency',
           'email', 'username', 'user', 'password', 'login', 'signup', 'submit', 'search', 'cancel', 'reset',
-          'or', 'and', 'not', 'id', 'account', 'number', 'code'
+          'or', 'and', 'not', 'id', 'account', 'number', 'code',
+          'aadhaar', 'aadhar', 'pan', 'ssn', 'cvv', 'cvc', 'ifsc', 'salary', 'income',
+          'dob', 'bday', 'attribute', 'badge', 'input', 'field', 'button', 'form', 'class', 'type', 'value',
+          'permanent', 'routing', 'swift', 'pin', 'otp', 'card', 'security',
+          'side', 'ocr', 'validation', 'pipeline', 'token', 'tokens', 'synthetic', 'record', 'official',
+          'slip', 'data', 'document', 'citizen', 'identity', 'resident', 'general', 'bilingual', 'english', 'hindi'
         ]);
-        if (/\b(?:communication|enterprises|store|shop|pvt|ltd|agency|telecom)\b/i.test(lower)) {
+        if (/\b(?:communication|enterprises|store|shop|pvt|ltd|agency|telecom|validation|pipeline)\b/i.test(lower)) {
+          return false;
+        }
+        if (clean.includes('=') || clean.includes('"') || clean.includes("'") || /^["'].*["']$/.test(clean)) {
           return false;
         }
         return !stopWords.has(lower) && lower.length >= 3;
       },
+      checksum: false
+    },
+    {
+      name: 'aadhaar_name_dob',
+      regex: /(?:^|\n)\s*([A-Za-z\u0900-\u097F]{2,25}(?:[^\S\r\n]+[A-Za-z\u0900-\u097F]{2,25}){0,3})\s*(?:\n\s*([A-Za-z\u0900-\u097F]{2,25}(?:[^\S\r\n]+[A-Za-z\u0900-\u097F]{2,25}){0,3})\s*)?(?=\n\s*(?:Date\s*of\s*Birth|DOB|जन्म\s*तिथि))/gi,
+      type: 'name',
+      baseConfidence: 0.92,
+      matchGroup: 1,
+      validator: (text) => {
+        const clean = text.trim().toLowerCase();
+        const nonNames = ['government', 'india', 'mera', 'aadhaar', 'meri', 'pehchan', 'unique', 'authority', 'male', 'female', 'transgender', 'purush', 'mahila'];
+        return clean.length >= 3 && !nonNames.some(w => clean.includes(w));
+      },
+      checksum: false
+    },
+    {
+      name: 'relative_guardian_name',
+      regex: /\b(?:S\/O|D\/O|W\/O|C\/O|Care\s+of|Son\s+of|Daughter\s+of|Wife\s+of)\s*[:\-]?\s*([A-Za-z\u0900-\u097F]{2,25}(?:[^\S\r\n]+[A-Za-z\u0900-\u097F]{2,25}){1,3})/gi,
+      type: 'name',
+      baseConfidence: 0.92,
+      matchGroup: 1,
+      validator: (text) => {
+        const clean = text.trim().toLowerCase();
+        const stop = ['address', 'post', 'dist', 'district', 'village', 'state', 'pin', 'pincode', 'road', 'street', 'house'];
+        return clean.length >= 3 && !stop.some(s => clean.startsWith(s));
+      },
+      checksum: false
+    },
+    {
+      name: 'address_labeled',
+      regex: /(?<!email\s)(?<!e-mail\s)\b(?:Address|पता)\s*[:\-]\s*([^\n\r]{10,120}(?:\n[^\n\r]{10,120}){0,3})/gi,
+      type: 'location',
+      baseConfidence: 0.88,
+      matchGroup: 1,
+      validator: (text) => {
+        const clean = text.trim();
+        if (/^[\w\.-]+@[\w\.-]+\.\w+$/.test(clean) || clean.startsWith('http') || clean.startsWith('www.')) return false;
+        return clean.length >= 10;
+      },
+      checksum: false
+    },
+    {
+      name: 'hindi_name',
+      regex: /\b(?:राहुल|सौरभ|प्रिया|अमित|अंजलि|रोहित|दीपक|पूजा|संजय|कविता|विकास|नेहा|अजय|मनीष|सुरेश|राजेश|मनोज|सुनील|रवि|विजय|संदीप|आलोक|दिनेश|अशोक|पवन|विशाल|अंकित|राकेश|सचिन|नवीन|प्रदीप|सुधीर|कमल|मुकेश|नितिन|तरुण|गौरव|सुमित|विवेक|आशीष|प्रशांत|मोहित|कुलदीप|संतोष|हेमंत|धर्मेन्द्र|जितेन्द्र|योगेश|हरीश|अनिल)(?:[^\S\r\n]+(?:वर्मा|यादव|शर्मा|सिंह|कुमार|गुप्ता|मिश्रा|तिवारी|पांडेय|दुबे|चौबे|त्रिपाठी|पाठक|झा|ठाकुर|चौहान|राठौड़|राजपूत|प्रसाद|मौर्या|सोनी|साहू|प्रजापति|विश्वकर्मा))?\b/g,
+      type: 'name',
+      baseConfidence: 0.90,
       checksum: false
     },
     {
@@ -395,6 +484,10 @@ Privamon.PIIDetector = (() => {
         if (text === '10000000' || text === '50000000') return false;
         if (ctx) {
           const lowerCtx = ctx.toLowerCase();
+          // Suppress if negative prefix / transaction order context
+          if (/\b(?:order|invoice|product|tracking|pin|pincode|postal|zip|item|sku|bill)\b/i.test(lowerCtx)) {
+            return false;
+          }
           if (/\b(?:roll\s*no|rollno|roll|enroll|student|reg\s*no|reg|user|account|hall|admission|id)\b/i.test(lowerCtx)) {
             return true;
           }
@@ -432,14 +525,27 @@ Privamon.PIIDetector = (() => {
         if (['firstname', 'first name', 'lastname', 'last name', 'fullname', 'full name', 'name', 'username', 'mob', 'mob no', 'mobile', 'mobile no', 'phone', 'phone no', 'contact', 'imei', 'imei no', 'gst', 'gstin'].includes(lowerText)) {
           return false;
         }
+        // Reject common form field labels, banking terms, ID titles
+        const nonNameKeywords = [
+          'aadhaar', 'aadhar', 'pan', 'ssn', 'ifsc', 'cvv', 'cvc', 'salary', 'income',
+          'permanent', 'account', 'number', 'security', 'code', 'branch', 'bank', 'date',
+          'birth', 'card', 'payment', 'credit', 'debit', 'contact', 'emergency', 'billing',
+          'identity', 'financial', 'attribute', 'expected', 'redact', 'keep', 'review', 'section',
+          'token', 'tokens', 'email', 'address', 'verhoeff', 'valid', 'verhoeff-valid',
+          'synthetic', 'record', 'official', 'slip', 'citizen', 'resident', 'bilingual',
+          'english', 'hindi', 'side', 'ocr', 'validation', 'dob', 'gender', 'male', 'female'
+        ];
+        if (nonNameKeywords.some(kw => lowerText.includes(kw))) {
+          return false;
+        }
         const lowerCtx = ctx.toLowerCase();
         const nameMatch = lowerCtx.match(/\b(?:name|first\s*name|firstname|last\s*name|lastname|full\s*name|fullname|student\s*name|candidate|holder|patient|emp\s*name|employee\s*name|applicant)\b/);
         if (!nameMatch) return false;
 
         const nameIdx = nameMatch.index;
         const candIdx = lowerCtx.indexOf(lowerText);
-        // Candidate must appear at or after the label (or within 10 chars before)
-        if (candIdx !== -1 && candIdx < nameIdx - 10) return false;
+        // Candidate must appear in context and be at or after the label (or within 10 chars before)
+        if (candIdx === -1 || candIdx < nameIdx - 10) return false;
 
         const blockedWords = new Set([
           'Home', 'Dashboard', 'Result', 'Update', 'Payment', 'Amount', 'Status', 'Search',
@@ -447,7 +553,8 @@ Privamon.PIIDetector = (() => {
           'ChallenNo', 'Successful', 'Unsuccessful', 'Initiated', 'Shipped', 'Pending', 'UPI', 'NetBanking',
           'Main', 'YMCA', 'Payment Gateway', 'Order_id', 'Order_status', 'Model', 'Particulars', 'Rate', 'Qty',
           'Battery', 'Charger', 'Smart Phone', 'Invoice', 'Bill', 'Tax', 'Date', 'All', 'Kind', 'Accessories',
-          'Samsung', 'Nokia', 'Oppo', 'Vivo', 'MI', 'Apple', 'HTC', 'Lenovo', 'Xiaomi', 'Micromax', 'Lava', 'OnePlus', 'Realme'
+          'Samsung', 'Nokia', 'Oppo', 'Vivo', 'MI', 'Apple', 'HTC', 'Lenovo', 'Xiaomi', 'Micromax', 'Lava', 'OnePlus', 'Realme',
+          'Tokens', 'Token', 'Email', 'Address', 'Email Address', 'Verhoeff', 'Valid', 'Verhoeff-valid', 'Side', 'OCR', 'Validation', 'Male', 'Female'
         ]);
         return !blockedWords.has(text.trim());
       },
@@ -536,7 +643,7 @@ Privamon.PIIDetector = (() => {
         }
 
         // 1. Negative prefix check
-        if (['phone', 'creditCard', 'aadhaar', 'financial'].includes(pattern.type) && hasNegativePrefix(text, matchStart)) {
+        if (['phone', 'creditCard', 'aadhaar', 'financial', 'username', 'device_id'].includes(pattern.type) && hasNegativePrefix(text, matchStart, nearbyContext)) {
           continue;
         }
 
@@ -591,7 +698,7 @@ Privamon.PIIDetector = (() => {
     'salary', 'dob', 'birth', 'account', 'password', 'passwd', 'pwd',
     'pin', 'otp', 'credit_card', 'card_number', 'income',
     'username', 'user_name', 'user_id', 'userid', 'login', 'roll_no', 'rollno',
-    'enrollment', 'student_id'
+    'enrollment', 'student_id', 'ifsc', 'routing', 'swift'
   ];
 
   /**
@@ -656,11 +763,23 @@ Privamon.PIIDetector = (() => {
                           (kw === 'ssn') ? 'ssn' :
                           (kw === 'cvv' || kw === 'credit_card' || kw === 'card_number') ? 'creditCard' :
                           (kw === 'dob' || kw === 'birth') ? 'dob' :
+                          (kw === 'ifsc' || kw === 'routing' || kw === 'swift') ? 'financial' :
                           (kw.includes('user') || kw.includes('login') || kw.includes('roll') || kw.includes('enroll') || kw.includes('student')) ? 'username' : 'sensitive_field';
             conf = Math.max(conf, 0.85);
             reason = `keyword:${kw}`;
             break;
           }
+        }
+      }
+
+      // Check input value with regex patterns if name/id keywords didn't match
+      if (!matchedType && element.value && typeof element.value === 'string' && element.value.trim().length >= 3) {
+        const valMatches = detectPII(element.value.trim(), contextStr, 'dom');
+        if (valMatches && valMatches.length > 0) {
+          const best = valMatches[0];
+          matchedType = best.type;
+          conf = best.confidence;
+          reason = `value:${best.patternName || best.type}`;
         }
       }
 
@@ -693,19 +812,34 @@ Privamon.PIIDetector = (() => {
         let matchedTokens = [];
 
         if (tokens && tokens.length > 0) {
-          // Find tokens overlapping this character span
-          const spanTokens = tokens.filter(t => t.start < match.span.end && t.end > match.span.start);
-          if (spanTokens.length > 0) {
-            matchedTokens = spanTokens.map(t => t.id);
-            matchedBoxes = spanTokens.map(t => t.bbox);
+          const rangeMapper = (typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper)
+                           || (typeof window !== 'undefined' && window.Privamon && window.Privamon.DOMRangeMapper)
+                           || (typeof globalThis !== 'undefined' && globalThis.Privamon && globalThis.Privamon.DOMRangeMapper);
 
-            // Compute enclosing box for these tokens
-            const minX = Math.min(...matchedBoxes.map(b => b.x));
-            const minY = Math.min(...matchedBoxes.map(b => b.y));
-            const maxX = Math.max(...matchedBoxes.map(b => b.x + b.width));
-            const maxY = Math.max(...matchedBoxes.map(b => b.y + b.height));
+          if (rangeMapper && typeof rangeMapper.mapSpanToDomBoxes === 'function') {
+            const mapped = rangeMapper.mapSpanToDomBoxes(match.span.start, match.span.end, tokens);
+            if (mapped.bbox && mapped.boxes && mapped.boxes.length > 0) {
+              matchedBbox = mapped.bbox;
+              matchedBoxes = mapped.boxes;
+              matchedTokens = mapped.tokens;
+            }
+          }
 
-            matchedBbox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+          if (!matchedBbox) {
+            // Find tokens overlapping this character span
+            const spanTokens = tokens.filter(t => t.start < match.span.end && t.end > match.span.start);
+            if (spanTokens.length > 0) {
+              matchedTokens = spanTokens.map(t => t.id);
+              matchedBoxes = spanTokens.flatMap(t => (t.boxes && t.boxes.length > 0) ? t.boxes : [t.bbox]);
+
+              // Compute enclosing box for these tokens
+              const minX = Math.min(...matchedBoxes.map(b => b.x));
+              const minY = Math.min(...matchedBoxes.map(b => b.y));
+              const maxX = Math.max(...matchedBoxes.map(b => b.x + b.width));
+              const maxY = Math.max(...matchedBoxes.map(b => b.y + b.height));
+
+              matchedBbox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+            }
           }
         }
 

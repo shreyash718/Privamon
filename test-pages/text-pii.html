@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privamon Test Suite — Free-Text Regex & Checksum PII</title>
+  <link rel="stylesheet" href="assets/shared.css">
+</head>
+<body>
+
+  <!-- Suite Navigation Bar -->
+  <nav class="suite-nav">
+    <a href="realistic-combined.html" class="suite-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      </svg>
+      Privamon Test Suite
+    </a>
+    <div class="suite-links">
+      <a href="dom-pii-form.html" class="suite-link">1. DOM Form</a>
+      <a href="text-pii.html" class="suite-link active">2. Text PII</a>
+      <a href="ocr-image-pii.html" class="suite-link">3. OCR Pixel</a>
+      <a href="face-detection.html" class="suite-link">4. Face Vision</a>
+      <a href="realistic-combined.html" class="suite-link">5. Realistic Combined</a>
+    </div>
+  </nav>
+
+  <main class="container">
+    <header class="page-header">
+      <div class="page-title">
+        <span>Free-Text Regex & Algorithmic Checksum Validation</span>
+        <span class="badge badge-synthetic">100% Synthetic Data</span>
+      </div>
+      <p class="page-desc">
+        Validates unstructured, live DOM text node PII detection across compiled regex patterns, Luhn mathematical credit card checksums, Verhoeff Aadhaar check digits, Indian tax PAN structures, API keys, JWT credentials, and false-positive context suppression.
+      </p>
+    </header>
+
+    <div class="notice-synthetic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <div>
+        <strong>Ground Truth Verification:</strong> In-line text items highlighted in red must trigger redaction candidates with high confidence ($C \ge 0.70$). Benign text and numbers preceded by negative prefixes (Order ID, Invoice #, Tracking Code, PIN Code) must be preserved as <span class="badge badge-keep">KEEP</span>.
+      </div>
+    </div>
+
+    <!-- Section 1: Contact Information -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">1. Contact Information in Body Prose</h2>
+        <span class="badge badge-redact">Expected: REDACT</span>
+      </div>
+      <div class="prose-block" id="prose-contact">
+        <p id="para-email">
+          For technical inquiries regarding the data sanitization architecture, feel free to contact the test engineer directly at <span class="highlight-pii">alex.morgan99@synthetic-cloud.internal</span> during normal operating hours.
+        </p>
+        <p id="para-phone">
+          In case of mission-critical system escalations, you may reach the on-call mobile support line at <span class="highlight-pii">+91 98765 43210</span> or through our secondary internal desk at <span class="highlight-pii">+91 91234 56789</span>.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 2: Mathematical Checksum Validated Identifiers -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">2. Algorithmic Checksum Identifiers (Luhn & Verhoeff)</h2>
+        <span class="badge badge-redact">Expected: REDACT (Confidence = 1.0)</span>
+      </div>
+      <div class="prose-block" id="prose-checksums">
+        <p id="para-credit-card">
+          The test billing transaction will simulate an authorized merchant charge using Visa test card number <span class="highlight-pii">4111 1111 1111 1111</span> and secondary backup Mastercard test number <span class="highlight-pii">5555 5555 5555 4444</span>. Both cards mathematically pass the Luhn algorithm sum check.
+        </p>
+        <p id="para-aadhaar">
+          The employee identity verification file has recorded a synthetic Aadhaar UID number <span class="highlight-pii">4921 5832 9010</span> as well as supplementary record <span class="highlight-pii">3141 5926 5351</span>. Both 12-digit numbers strictly validate against the Verhoeff multiplication and permutation matrices ($D_{c, P_{i, d}} = 0$).
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 3: Structured Tax & Banking Identifiers -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">3. Structured Tax & Banking Codes</h2>
+        <span class="badge badge-redact">Expected: REDACT</span>
+      </div>
+      <div class="prose-block" id="prose-tax-banking">
+        <p id="para-pan">
+          Corporate tax compliance records verify that synthetic individual PAN <span class="highlight-pii">XYZPC9876L</span> and business partner PAN <span class="highlight-pii">ABCPE1234F</span> have submitted their annual declarations. Both match the 10-character Indian Income Tax alphanumeric format with valid entity category 'P'.
+        </p>
+        <p id="para-ifsc">
+          Settlement wire transfers will be routed via the National Electronic Funds Transfer gateway through branch IFSC code <span class="highlight-pii">SBIN0001234</span> located at the central treasury clearing house.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 4: Network Architecture & Developer Secrets -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">4. Network Addresses & API Credentials</h2>
+        <span class="badge badge-redact">Expected: REDACT</span>
+      </div>
+      <div class="prose-block" id="prose-network-tokens">
+        <p id="para-ip">
+          The secure database replica is listening on internal server host ip <span class="highlight-pii">192.168.1.105</span> with cluster dual-stack routing mapped to IPv6 gateway <span class="highlight-pii">2001:0db8:85a3:0000:0000:8a2e:0370:7334</span>.
+        </p>
+        <p id="para-api-key">
+          Integration testing requires a live authorization bearer key with write scope: <span class="highlight-pii">sk_live_synthetic9876543210abcdef</span>.
+        </p>
+        <p id="para-jwt">
+          Authentication handshakes pass a signed test session JWT token: <span class="highlight-pii">eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IlN5bnRoZXRpYyBUZXN0In0.fake_signature_hash_bytes_123456</span>.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 5: False-Positive Suppression (Negative Prefix Filters) -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">5. Negative Prefix Suppression (False Positive Filter)</h2>
+        <span class="badge badge-keep">Expected: KEEP</span>
+      </div>
+      <div class="prose-block" id="prose-negative-prefixes">
+        <p id="para-order-id">
+          Customer shipment was fulfilled under Order ID: <span class="highlight-keep">9876543210</span> and billed under Invoice No: <span class="highlight-keep">4111111111111111</span>. Although these digits match phone and credit card lengths, the preceding keywords must trigger negative prefix suppression.
+        </p>
+        <p id="para-product-code">
+          Warehouse dispatch recorded Product Code: <span class="highlight-keep">234567890124</span> and package delivery was confirmed for regional Pin Code: <span class="highlight-keep">110001</span> under courier Tracking No: <span class="highlight-keep">9876543210</span>.
+        </p>
+      </div>
+    </section>
+
+    <!-- Section 6: Benign Prose Paragraphs (Zero False Positives) -->
+    <section class="card">
+      <div class="card-header">
+        <h2 class="card-title">6. Completely Benign Prose (Zero False Positives)</h2>
+        <span class="badge badge-keep">Expected: KEEP</span>
+      </div>
+      <div class="prose-block" id="prose-benign">
+        <p id="para-benign-space">
+          The exploration rover landed successfully in Jezero Crater on Mars, transmitting high-resolution multispectral imagery of ancient delta deposits and basaltic sedimentary rock layers. Geological samples were hermetically sealed in titanium containers for potential future retrieval missions.
+        </p>
+        <p id="para-benign-weather">
+          The meteorological observatory reported a crisp autumnal morning with ambient atmospheric temperature steady at 18 degrees Celsius. Barometric pressure registered 1013.25 millibars with light variable southwesterly breezes and negligible relative humidity throughout the valley basin.
+        </p>
+        <p id="para-benign-tech">
+          Modern web application architecture prioritizes modular micro-frontends, edge computing, asynchronous message queues, and zero-knowledge privacy pipelines to guarantee real-time latency and mathematical confidentiality across distributed clusters.
+        </p>
+      </div>
+    </section>
+
+  </main>
+
+</body>
+</html>

@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privamon Test Suite — Realistic End-to-End KYC & Profile Flow</title>
+  <link rel="stylesheet" href="assets/shared.css">
+  <style>
+    .layout-split {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    /* Profile Avatar Section */
+    .profile-hero {
+      display: flex;
+      align-items: center;
+      gap: 1.5rem;
+      margin-bottom: 1.5rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-md);
+      padding: 1.25rem 1.5rem;
+    }
+    .profile-avatar-wrapper {
+      position: relative;
+      width: 96px;
+      height: 96px;
+      border-radius: 50%;
+      overflow: hidden;
+      border: 3px solid var(--border-focus);
+      flex-shrink: 0;
+    }
+    .profile-avatar-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .profile-info h3 {
+      font-size: 1.35rem;
+      color: var(--text-primary);
+    }
+    .profile-info p {
+      color: var(--text-secondary);
+      font-size: 0.875rem;
+    }
+
+    /* Interactive Simulation Overlay */
+    .sim-redacted {
+      position: relative;
+    }
+    .sim-redacted.sim-active::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: #000000 !important;
+      border-radius: var(--radius-sm);
+      z-index: 50;
+      pointer-events: none;
+      box-shadow: 0 0 0 2px #ef4444;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Suite Navigation Bar with Duplicate Action 1 (Top-Right) -->
+  <nav class="suite-nav">
+    <a href="realistic-combined.html" class="suite-logo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+      </svg>
+      Privamon Portal
+    </a>
+    <div class="suite-links">
+      <a href="dom-pii-form.html" class="suite-link">1. DOM Form</a>
+      <a href="text-pii.html" class="suite-link">2. Text PII</a>
+      <a href="ocr-image-pii.html" class="suite-link">3. OCR Pixel</a>
+      <a href="face-detection.html" class="suite-link">4. Face Vision</a>
+      <a href="realistic-combined.html" class="suite-link active">5. Realistic Combined</a>
+    </div>
+    <!-- Duplicate Action Button 1 (pos: top-right) -->
+    <div style="display: flex; gap: 0.5rem; align-items: center;">
+      <span class="badge badge-pos">pos: top-right</span>
+      <button type="button" id="btn-save-profile-top" class="btn btn-primary" style="padding: 0.4rem 0.9rem; font-size: 0.8rem;">
+        Save Changes
+      </button>
+    </div>
+  </nav>
+
+  <main class="container" style="max-width: 1200px;">
+    
+    <header class="page-header">
+      <div class="page-title">
+        <span>Combined Identity, Profile &amp; Checkout Flow</span>
+        <span class="badge badge-synthetic">Multi-Modal Pipeline Validation</span>
+      </div>
+      <p class="page-desc">
+        A comprehensive production-style workflow uniting all Privamon detection layers: DOM Semantic Forms, Verhoeff &amp; Luhn Mathematical Checksums, ONNX Vision Face Detection, Tesseract Client-Side OCR, Spatial Multi-Modal Fusion, and Positional Disambiguation.
+      </p>
+    </header>
+
+    <div class="notice-synthetic">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="12" y1="8" x2="12" y2="12"></line>
+        <line x1="12" y1="16" x2="12.01" y2="16"></line>
+      </svg>
+      <div>
+        <strong>Realistic Test Flow:</strong> Demonstrates an end-to-end user profile and identity clearance workflow. All personal data on this page is mathematically valid yet completely synthetic.
+      </div>
+    </div>
+
+    <!-- Main Layout Split -->
+    <div class="layout-split">
+      
+      <!-- Primary Application Column -->
+      <div class="portal-main">
+
+        <!-- 1. Profile Avatar & Identity Hero (Vision Detector) -->
+        <div class="profile-hero" id="section-profile">
+          <div class="profile-avatar-wrapper" id="profile-avatar-box">
+            <img id="img-profile-face" src="assets/synthetic_face.jpg" alt="User profile photo" class="profile-avatar-img">
+          </div>
+          <div class="profile-info">
+            <div style="display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.25rem;">
+              <h3 id="user-display-name">Alex M. Morgan</h3>
+              <span class="badge badge-synthetic">Verified Account</span>
+            </div>
+            <p>Senior Infrastructure Lead &bull; Synthetic Security Labs</p>
+            <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.35rem;">
+              Account Status: Active &bull; Tier: Enterprise KYC Level 3
+            </p>
+          </div>
+        </div>
+
+        <form id="combined-portal-form" onsubmit="return false;">
+
+          <!-- 2. Account Credentials Section (DOM Semantic: type="email", type="password") -->
+          <section class="card" id="card-credentials">
+            <div class="card-header">
+              <h2 class="card-title">1. Account Authentication Credentials</h2>
+              <span class="badge badge-redact">DOM Semantics</span>
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label for="portal-email" class="form-label">
+                  <span>Sign-in Email</span>
+                  <span class="badge badge-redact">input[type=email]</span>
+                </label>
+                <input type="email" id="portal-email" name="email" class="form-input" value="alex.morgan99@synthetic-cloud.internal">
+              </div>
+
+              <div class="form-group">
+                <label for="portal-password" class="form-label">
+                  <span>Current Master Password</span>
+                  <span class="badge badge-redact">input[type=password]</span>
+                </label>
+                <input type="password" id="portal-password" name="password" class="form-input" value="Vault#Pass9988!">
+              </div>
+            </div>
+          </section>
+
+          <!-- 3. Indian Identity & Address Verification (Verhoeff Aadhaar, PAN, Phone) -->
+          <section class="card" id="card-identity">
+            <div class="card-header">
+              <h2 class="card-title">2. Government Identity &amp; Contact Verification</h2>
+              <span class="badge badge-redact">Checksums &amp; Tax Rules</span>
+            </div>
+            <div class="form-grid">
+
+              <div class="form-group">
+                <label for="portal-phone" class="form-label">
+                  <span>Verified Phone Number</span>
+                  <span class="badge badge-redact">type="tel"</span>
+                </label>
+                <input type="tel" id="portal-phone" name="phone" autocomplete="tel" class="form-input" value="+91 98765 43210">
+                <span class="form-hint">E.164 Indian mobile format</span>
+              </div>
+
+              <div class="form-group">
+                <label for="portal-aadhaar" class="form-label">
+                  <span>Aadhaar Number (UID)</span>
+                  <span class="badge badge-redact">Verhoeff Valid</span>
+                </label>
+                <input type="text" id="portal-aadhaar" name="aadhaar" class="form-input" value="2345 6789 0124">
+                <span class="form-hint">12-digit number passing Verhoeff permutation check</span>
+              </div>
+
+              <div class="form-group">
+                <label for="portal-pan" class="form-label">
+                  <span>Permanent Account Number (PAN)</span>
+                  <span class="badge badge-redact">Tax Entity 'P'</span>
+                </label>
+                <input type="text" id="portal-pan" name="pan" class="form-input" value="ABCPE1234F">
+                <span class="form-hint">Matches 10-character Indian PAN tax individual format</span>
+              </div>
+
+              <div class="form-group">
+                <label for="portal-dob" class="form-label">
+                  <span>Date of Birth</span>
+                  <span class="badge badge-redact">autocomplete="bday"</span>
+                </label>
+                <input type="text" id="portal-dob" name="dob" autocomplete="bday" class="form-input" value="1994-06-22">
+                <span class="form-hint">Semantic date of birth classifier</span>
+              </div>
+
+            </div>
+          </section>
+
+          <!-- 4. Payment Details (Luhn Checksum, CVV) -->
+          <section class="card" id="card-payment">
+            <div class="card-header">
+              <h2 class="card-title">3. Corporate Payment Method</h2>
+              <span class="badge badge-redact">Luhn Validated</span>
+            </div>
+            <div class="form-grid">
+
+              <div class="form-group" style="grid-column: 1 / -1;">
+                <label for="portal-cc" class="form-label">
+                  <span>Corporate Billing Card</span>
+                  <span class="badge badge-redact">Luhn Checksum Valid</span>
+                </label>
+                <input type="text" id="portal-cc" name="card_number" autocomplete="cc-number" class="form-input" value="4111 1111 1111 1111">
+                <span class="form-hint">Standard Visa test card mathematically passing Luhn modulo 10</span>
+              </div>
+
+              <div class="form-group">
+                <label for="portal-exp" class="form-label">
+                  <span>Expiration Date</span>
+                  <span class="badge badge-keep">KEEP</span>
+                </label>
+                <input type="text" id="portal-exp" name="exp" autocomplete="cc-exp" class="form-input" value="09/29">
+              </div>
+
+              <div class="form-group">
+                <label for="portal-cvv" class="form-label">
+                  <span>Security Code (CVV)</span>
+                  <span class="badge badge-redact">name="cvv"</span>
+                </label>
+                <input type="text" id="portal-cvv" name="cvv" class="form-input" value="739">
+                <span class="form-hint">Sensitive card verification token</span>
+              </div>
+
+            </div>
+          </section>
+
+          <!-- 5. Scanned KYC Document (Client-Side Tesseract.js OCR) -->
+          <section class="card" id="card-ocr-doc">
+            <div class="card-header">
+              <h2 class="card-title">4. Scanned KYC Verification Document (Pixel Canvas)</h2>
+              <span class="badge badge-pos">Target: Tesseract OCR (hin + eng)</span>
+            </div>
+            <p style="font-size: 0.875rem; color: var(--text-secondary); margin-bottom: 1rem;">
+              Document preview drawn directly onto an HTML5 canvas. Contains baked pixel text with both English and Hindi PII tokens that the DOM extractor cannot see directly.
+            </p>
+
+            <div style="display: flex; justify-content: center; overflow-x: auto;">
+              <canvas id="kyc-doc-canvas" width="680" height="280" style="background: #ffffff; border: 1px solid #334155; border-radius: var(--radius-sm); max-width: 100%; height: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3);"></canvas>
+            </div>
+          </section>
+
+          <!-- 6. Non-Sensitive Settings & Negative Prefix Contexts -->
+          <section class="card" id="card-benign">
+            <div class="card-header">
+              <h2 class="card-title">5. Benign Preferences &amp; Suppressed Prefixes</h2>
+              <span class="badge badge-keep">Expected: KEEP</span>
+            </div>
+            <div class="form-grid">
+
+              <div class="form-group">
+                <label for="portal-theme" class="form-label">
+                  <span>Theme Preference</span>
+                  <span class="badge badge-keep">KEEP</span>
+                </label>
+                <input type="text" id="portal-theme" name="theme" class="form-input" value="Obsidian Slate Dark">
+              </div>
+
+              <div class="form-group">
+                <label for="portal-timezone" class="form-label">
+                  <span>Timezone</span>
+                  <span class="badge badge-keep">KEEP</span>
+                </label>
+                <input type="text" id="portal-timezone" name="timezone" class="form-input" value="Asia/Kolkata (IST +05:30)">
+              </div>
+
+              <div class="form-group" style="grid-column: 1 / -1;">
+                <label class="form-label">
+                  <span>Dispatch &amp; Order Audit Reference</span>
+                  <span class="badge badge-keep">Negative Prefix Filter</span>
+                </label>
+                <div class="inline-code" style="padding: 0.6rem 0.8rem; display: block; font-size: 0.85rem; color: var(--text-secondary);">
+                  Billing Reference: Order ID: 9876543210 &bull; Dispatch Pin Code: 110001 &bull; Courier Tracking No: 9876543210
+                </div>
+                <span class="form-hint">Phone-length sequences preceded by negative prefix keywords are preserved</span>
+              </div>
+
+            </div>
+          </section>
+
+          <!-- Duplicate Action Bar (pos: bottom-right) -->
+          <div class="card" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+            <div>
+              <span style="font-size: 0.85rem; color: var(--text-muted);">Privamon Test Harness &bull; Verified Compliance</span>
+            </div>
+            <div style="display: flex; align-items: center; gap: 0.75rem;">
+              <span class="badge badge-pos">pos: bottom-right</span>
+              <button type="reset" id="btn-cancel-bottom" class="btn btn-secondary">Discard Changes</button>
+              <!-- Duplicate Action Button 2 (pos: bottom-right) -->
+              <button type="submit" id="btn-save-profile-bottom" class="btn btn-primary">Save Changes</button>
+            </div>
+          </div>
+
+        </form>
+
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // ── Render Baked Scanned KYC Document on Canvas ──
+    window.addEventListener('DOMContentLoaded', () => {
+      const canvas = document.getElementById('kyc-doc-canvas');
+      if (!canvas) return;
+
+      const ctx = canvas.getContext('2d');
+      // Background
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, 680, 280);
+
+      // Header strip
+      ctx.fillStyle = '#0f172a';
+      ctx.fillRect(0, 0, 680, 42);
+
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('IDENTITY VERIFICATION & KYC CLEARANCE RECORD', 20, 27);
+
+      // Document Body
+      ctx.fillStyle = '#334155';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Authorized Resident Name:', 20, 75);
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('Alex M. Morgan', 230, 75);
+
+      ctx.fillStyle = '#334155';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Aadhaar (UIDAI Verified):', 20, 115);
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 15px monospace';
+      ctx.fillText('2345 6789 0124', 230, 115);
+
+      ctx.fillStyle = '#334155';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Permanent Account (PAN):', 20, 155);
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 15px monospace';
+      ctx.fillText('ABCPE1234F', 230, 155);
+
+      ctx.fillStyle = '#334155';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('स्थानीय पता (Hindi Address):', 20, 195);
+      ctx.fillStyle = '#000000';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('सेक्टर ११, फरीदाबाद, हरियाणा (Sector 11, Faridabad)', 230, 195);
+
+      ctx.fillStyle = '#334155';
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Internal Audit Code:', 20, 235);
+      ctx.fillStyle = '#475569';
+      ctx.font = '13px monospace';
+      ctx.fillText('Order ID: 9876543210 (Negative Prefix Test)', 230, 235);
+
+      // Security perimeter
+      ctx.strokeStyle = '#94a3b8';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(1, 1, 678, 278);
+    });
+  </script>
+
+</body>
+</html>

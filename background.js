@@ -162,6 +162,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Async response
   }
 
+  // Pure on-device testing: Run redaction pipeline only without server transmission
+  if (message.action === 'testRedactionOnly') {
+    handleTestRedactionOnly()
+      .then(response => {
+        try {
+          sendResponse(response);
+        } catch (e) {
+          console.warn('[Background] Message channel already closed when sending test response:', e.message);
+        }
+      })
+      .catch(err => {
+        try {
+          sendResponse({ success: false, error: err.message });
+        } catch (e) {}
+      });
+    return true; // Async response
+  }
+
   // Retrieve chat history
   if (message.action === 'getChatHistory') {
     chrome.storage.local.get(['privamon_chat_history'], (res) => {
@@ -243,31 +261,62 @@ function isRestrictedUrl(url) {
   );
 }
 
+let lastOperableTabId = null;
+
 /**
  * Gets an accessible browser tab for Privamon operations.
- * If the current active tab is restricted (e.g. chrome://extensions), it finds and switches
- * to an open web tab (preferring WhatsApp Web or standard http/https pages) in the same window.
+ * If the current active tab is restricted (e.g. chrome://extensions or results.html),
+ * it returns to the last analyzed tab, or finds an open web tab (across all windows).
  */
 async function getOperableTab() {
   const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
   if (activeTab && !isRestrictedUrl(activeTab.url)) {
+    lastOperableTabId = activeTab.id;
     return activeTab;
   }
 
-  // Active tab is restricted (like chrome://extensions/)
-  const allTabs = await chrome.tabs.query({ currentWindow: true });
+  // 1. Check if our last analyzed tab is still open and operable
+  if (lastOperableTabId) {
+    try {
+      const lastTab = await chrome.tabs.get(lastOperableTabId);
+      if (lastTab && !isRestrictedUrl(lastTab.url)) {
+        console.log(`[Background] Switching back to last analyzed tab: ${lastTab.url}`);
+        if (lastTab.windowId) {
+          await chrome.windows.update(lastTab.windowId, { focused: true }).catch(() => {});
+        }
+        await chrome.tabs.update(lastTab.id, { active: true });
+        await new Promise(r => setTimeout(r, 450));
+        return lastTab;
+      }
+    } catch (e) {
+      lastOperableTabId = null;
+    }
+  }
 
-  // Look for WhatsApp Web tab or any accessible web tab
-  const whatsappTab = allTabs.find(t => t.url && t.url.includes('web.whatsapp.com'));
-  const accessibleWebTab = allTabs.find(t => t.url && (t.url.startsWith('http://') || t.url.startsWith('https://')));
-  const candidate = whatsappTab || accessibleWebTab;
+  // 2. Search tabs in the current window first
+  const isAccessible = (t) => t && t.url && !isRestrictedUrl(t.url);
+  const currentWindowTabs = await chrome.tabs.query({ currentWindow: true });
+
+  let candidate = currentWindowTabs.find(t => t.url && t.url.includes('web.whatsapp.com'))
+               || currentWindowTabs.find(isAccessible);
+
+  // 3. If not found in current window, search across all open browser windows
+  if (!candidate) {
+    const allTabs = await chrome.tabs.query({});
+    candidate = allTabs.find(t => t.url && t.url.includes('web.whatsapp.com'))
+             || allTabs.find(isAccessible);
+  }
 
   if (candidate) {
-    console.log(`[Background] Active tab is restricted (${activeTab?.url || 'unknown'}). Switching to web tab: ${candidate.url}`);
+    console.log(`[Background] Active tab is restricted (${activeTab?.url || 'unknown'}). Switching to operable tab: ${candidate.url}`);
+    if (candidate.windowId) {
+      await chrome.windows.update(candidate.windowId, { focused: true }).catch(() => {});
+    }
     await chrome.tabs.update(candidate.id, { active: true });
     // Brief settle delay for Chrome to bring tab into focus
-    await new Promise(r => setTimeout(r, 400));
+    await new Promise(r => setTimeout(r, 450));
+    lastOperableTabId = candidate.id;
     return candidate;
   }
 
@@ -647,6 +696,133 @@ async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
     });
 
     return { success: true, turn };
+  } finally {
+    clearInterval(keepAliveInterval);
+  }
+}
+
+/**
+ * Executes on-device privacy redaction testing on the active tab without server transmission.
+ * 1. Captures visible tab screenshot.
+ * 2. Extracts DOM elements.
+ * 3. Runs full in-browser redaction pipeline (PII detection, face detection, solid redactions, verification).
+ * 4. Stores result in chrome.storage.session for results.html inspection.
+ * 5. Returns redacted result directly to caller with ZERO server network calls.
+ */
+async function handleTestRedactionOnly() {
+  console.log('[Background] Test Redaction requested (Zero Server Transmission)');
+
+  const keepAliveInterval = setInterval(() => {
+    chrome.runtime.getPlatformInfo().catch(() => {});
+  }, 3500);
+
+  try {
+    const tab = await getOperableTab();
+    await waitForTabReady(tab.id, 6000);
+
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'capture',
+      status: 'active',
+      statusText: 'Capturing screen for testing...',
+    });
+
+    let screenshot = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+        if (screenshot) break;
+      } catch (capErr) {
+        console.warn(`[Background] captureVisibleTab retry ${attempt + 1}:`, capErr.message);
+        await new Promise(r => setTimeout(r, 450));
+      }
+    }
+    if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure tab is active and visible.');
+
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'dom',
+      status: 'active',
+      statusText: 'Extracting DOM elements for testing...',
+    });
+
+    let domData = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const domResults = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
+        });
+        domData = domResults[0]?.result;
+        if (domData) break;
+      } catch (scriptErr) {
+        console.warn(`[Background] DOM extraction retry ${attempt + 1}:`, scriptErr.message);
+        await new Promise(r => setTimeout(r, 550));
+      }
+    }
+    if (!domData) throw new Error('DOM extraction returned no data. Page may still be loading.');
+
+    forwardToPopup({
+      type: 'pipelineProgress',
+      stageId: 'redaction',
+      status: 'active',
+      statusText: 'Running on-device redaction pipeline (Zero Server)...',
+    });
+
+    await ensureOffscreenDocument();
+    const pipelineResult = await runPipelineAsync(screenshot, domData, 'Redaction Test (Local Only)');
+
+    // Store in session storage so results.html / full tab can inspect immediately
+    try {
+      await chrome.storage.session.set({
+        privamon_result: {
+          sanitizedScreenshot: pipelineResult.sanitizedScreenshot,
+          originalScreenshot: screenshot,
+          detections: pipelineResult.detections,
+          allCandidates: pipelineResult.allCandidates || pipelineResult.detections,
+          redactions: pipelineResult.redactions || [],
+          reviews: pipelineResult.reviews || [],
+          kept: pipelineResult.kept || [],
+          ocrWords: pipelineResult.ocrWords || [],
+          detectionSummary: pipelineResult.detectionSummary,
+          sanitizedDom: pipelineResult.sanitizedDom,
+          ocrRawText: pipelineResult.ocrRawText,
+          timings: pipelineResult.timings,
+          metadata: pipelineResult.metadata,
+          timestamp: Date.now(),
+          isTestOnly: true,
+          pageTitle: tab.title || 'Tested Page',
+          pageUrl: tab.url || ''
+        }
+      });
+    } catch (storeErr) {
+      console.warn('[Background] Failed to store full result in session storage:', storeErr.message);
+    }
+
+    forwardToPopup({
+      type: 'pipelineComplete',
+      result: {
+        detectionSummary: pipelineResult.detectionSummary,
+        timings: pipelineResult.timings,
+      },
+    });
+
+    console.log('[Background] Test Redaction complete. Returning sanitized page without server transmission.');
+
+    return {
+      success: true,
+      sanitizedScreenshot: pipelineResult.sanitizedScreenshot,
+      originalScreenshot: screenshot,
+      detections: pipelineResult.detections || [],
+      redactions: pipelineResult.redactions || [],
+      reviews: pipelineResult.reviews || [],
+      kept: pipelineResult.kept || [],
+      detectionSummary: pipelineResult.detectionSummary || { total: 0, byType: {}, bySource: {} },
+      timings: pipelineResult.timings || {},
+      verificationPassed: pipelineResult.verificationPassed,
+      pageTitle: tab.title || 'Web Page',
+      pageUrl: tab.url || ''
+    };
   } finally {
     clearInterval(keepAliveInterval);
   }

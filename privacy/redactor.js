@@ -22,7 +22,49 @@ Privamon.Redactor = (() => {
   'use strict';
 
   const REDACT_FILL_COLOR = '#000000';
-  const DEFAULT_SAFETY_PADDING = 2; // px padding to prevent font antialiasing bleed
+  const DEFAULT_SAFETY_PADDING = 3; // px padding to prevent font antialiasing bleed
+
+  /**
+   * Merges boxes on the same horizontal line into continuous bounding bars.
+   * Eliminates transparent gaps between spaced digits/words (e.g. 4111 1111 1111 1111, Aadhaar, Phone)
+   * while correctly preserving distinct rectangles for multi-line wrapped entities.
+   */
+  function mergeLineBoxes(boxes) {
+    if (!boxes || boxes.length <= 1) return boxes || [];
+
+    const sorted = [...boxes].sort((a, b) => a.y - b.y || a.x - b.x);
+    const lines = [];
+
+    for (const box of sorted) {
+      if (!box || box.width <= 0 || box.height <= 0) continue;
+      // Find an existing line box that overlaps vertically by at least 40% AND has small horizontal gap
+      const line = lines.find(l => {
+        const overlapY = Math.min(l.y + l.height, box.y + box.height) - Math.max(l.y, box.y);
+        const minH = Math.min(l.height, box.height);
+        if (overlapY < minH * 0.40) return false;
+
+        // Ensure horizontal proximity so distant tokens on the same horizontal row are NOT merged
+        const gapX = Math.max(0, Math.max(l.x, box.x) - Math.min(l.x + l.width, box.x + box.width));
+        const maxGap = Math.max(18, minH * 1.2);
+        return gapX <= maxGap;
+      });
+
+      if (line) {
+        const nx = Math.min(line.x, box.x);
+        const ny = Math.min(line.y, box.y);
+        const nr = Math.max(line.x + line.width, box.x + box.width);
+        const nb = Math.max(line.y + line.height, box.y + box.height);
+        line.x = nx;
+        line.y = ny;
+        line.width = nr - nx;
+        line.height = nb - ny;
+      } else {
+        lines.push({ ...box });
+      }
+    }
+
+    return lines;
+  }
 
   /**
    * Loads an image from a data URL into an HTMLImageElement.
@@ -64,9 +106,12 @@ Privamon.Redactor = (() => {
     const redactList = candidates.filter(c => c && c.decision === 'REDACT' && c.bbox);
 
     for (const candidate of redactList) {
-      const boxesToDraw = (candidate.boxes && candidate.boxes.length > 0)
+      const rawBoxes = (candidate.boxes && candidate.boxes.length > 0)
         ? candidate.boxes
         : [candidate.bbox];
+
+      // Merge collinear/same-line boxes so multi-word tokens render as gapless solid black rectangles
+      const boxesToDraw = mergeLineBoxes(rawBoxes);
 
       for (const box of boxesToDraw) {
         if (!box || box.width <= 0 || box.height <= 0) continue;

@@ -103,8 +103,8 @@ Privamon.OCREngine = (() => {
         let scale = 1.0;
         if (maxDim < 500) {
           scale = Math.min(2.0, 900 / maxDim);
-        } else if (maxDim > 1200) {
-          scale = 1200 / maxDim; // Downscale large images to keep OCR fast and responsive
+        } else if (maxDim > 2000) {
+          scale = 2000 / maxDim; // Downscale extreme images while keeping resolution crisp for OCR
         }
 
         const pad = 30; // 30px boundary margin for Tesseract line segmenter
@@ -345,34 +345,68 @@ Privamon.OCREngine = (() => {
 
     let fullText = '';
     const tokens = [];
+    const lineItems = [];
     let tokenIndex = 0;
 
     for (let li = 0; li < lines.length; li++) {
       const line = lines[li];
+      let lineText = '';
+      const lineTokens = [];
+
       for (let wi = 0; wi < line.length; wi++) {
         const word = line[wi];
         const start = fullText.length;
         fullText += word.text;
         const end = fullText.length;
         tokenIndex++;
-        tokens.push({
+        const tok = {
           id: `ocr_${String(tokenIndex).padStart(4, '0')}`,
           text: word.text,
           start,
           end,
           bbox: word.bbox,
           confidence: word.confidence,
+        };
+        tokens.push(tok);
+
+        const lStart = lineText.length;
+        lineText += word.text;
+        const lEnd = lineText.length;
+        lineTokens.push({
+          id: tok.id,
+          text: word.text,
+          start: lStart,
+          end: lEnd,
+          bbox: word.bbox,
+          confidence: word.confidence,
         });
+
         if (wi < line.length - 1) {
           fullText += ' ';
+          lineText += ' ';
         }
       }
+
+      if (line.length > 0 && lineText.trim()) {
+        const lx1 = Math.min(...line.map(w => w.bbox.x));
+        const ly1 = Math.min(...line.map(w => w.bbox.y));
+        const lx2 = Math.max(...line.map(w => w.bbox.x + w.bbox.width));
+        const ly2 = Math.max(...line.map(w => w.bbox.y + w.bbox.height));
+        lineItems.push({
+          text: lineText,
+          tokens: lineTokens,
+          bbox: { x: lx1, y: ly1, width: lx2 - lx1, height: ly2 - ly1 },
+          source: 'ocr',
+          coordinateSpace: 'screenshot'
+        });
+      }
+
       if (li < lines.length - 1) {
         fullText += '\n';
       }
     }
 
-    return { text: fullText, tokens };
+    return { text: fullText, tokens, lineItems };
   }
 
   function computeTokenSubBox(token, spanStart, spanEnd) {
@@ -452,11 +486,162 @@ Privamon.OCREngine = (() => {
   }
 
   /**
+   * Detects official identity card documents (Aadhaar, PAN, Passport, Voter ID, Driving Licence).
+   * Rather than relying solely on character-level OCR across complex Devanagari scripts and small fonts,
+   * high-confidence header/authority and card signatures trigger an opaque full-card privacy shield.
+   * This also protects unparsed embedded QR codes, barcodes, and printed biometric photos.
+   */
+  function detectIdentityDocumentShield(regionText, regionBbox, ocrWords = [], piiMatches = []) {
+    if (!regionBbox) return null;
+    const regW = regionBbox.width;
+    const regH = regionBbox.height;
+    if (regW < 80 || regH < 50) return null;
+
+    const lower = (regionText || '').toLowerCase();
+
+    // ── Direct Check: Check if PII detector already found confirmed identity credentials in this region ──
+    const hasAadhaarPii = Array.isArray(piiMatches) && piiMatches.some(m => 
+      m.type === 'aadhaar' || 
+      (m.patternName && m.patternName.includes('aadhaar'))
+    );
+    const hasPanPii = Array.isArray(piiMatches) && piiMatches.some(m => 
+      m.type === 'pan' || 
+      (m.patternName && m.patternName.includes('pan'))
+    );
+    const hasVoterPii = Array.isArray(piiMatches) && piiMatches.some(m => 
+      m.type === 'voter_id' || 
+      (m.patternName && m.patternName.includes('voter'))
+    );
+
+    // ── 1. PAN Card Signature (Permanent Account Number) ──
+    const hasPanNumber = hasPanPii || /\b[A-Z]{5}[0-9]{4}[A-Z]\b/.test(regionText);
+    const hasPanAuth = (
+      /inco?me\s*tax\s*dep[a-z]*|आयकर\s*विभाग/i.test(regionText) ||
+      /govt\.?\s*of\s*ind[li1|]a.*?(?:tax|pan|income|nsdl|utiitsl)/i.test(regionText) ||
+      /\b(?:nsdl|utiitsl|protean)\b/i.test(lower)
+    );
+    const hasPanDoc = (
+      /permanent\s*account\s*number|स्थायी\s*लेखा\s*संख्या/i.test(regionText) ||
+      /\bpan\s*(?:card|no|number)\b/i.test(regionText)
+    );
+
+    if (
+      (hasPanNumber && (hasPanAuth || hasPanDoc || /father|birth|signature|permanent/i.test(lower))) ||
+      (hasPanAuth && hasPanDoc) ||
+      /permanent\s*account\s*number|स्थायी\s*लेखा\s*संख्या/i.test(regionText)
+    ) {
+      return {
+        id: 'pan',
+        label: 'PAN Card Document',
+        reason: 'document_shield:pan_card',
+        confidence: 1.0,
+        bbox: regionBbox
+      };
+    }
+
+    // ── 2. Aadhaar Card Signature ──
+    // a. Checksum-validated Aadhaar number OR 16-digit VID pattern in region text
+    const hasAadhaarNumber = hasAadhaarPii || /\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b/.test(regionText) || /\b\d{4}\s\d{4}\s\d{4}\s\d{4}\b/.test(regionText);
+    
+    // b. Authority keywords (tolerant of OCR typos like Govemment, Indla, U1DAI, Uldai)
+    const hasAadhaarAuth = (
+      /uni?que\s*identifi?cation\s*auth?ori?ty|भारतीय\s*विशिष्ट\s*पहचान|uidai|u1dai|uldai/i.test(regionText) ||
+      /gove?rn?me?nt\s*of\s*ind[li1|]a|govt\.?\s*of\s*ind[li1|]a|भारत\s*सरकार/i.test(regionText)
+    );
+
+    // c. Identity anchors
+    const hasAadhaarDoc = (
+      /\b(?:aadhaar|aadhar|आधार)\b/i.test(regionText) ||
+      /\b(?:vid|virtual\s*id)\b/i.test(regionText) ||
+      /mera\s*aadhaar|मेरा\s*आधार|meri\s*pehchan|मेरी\s*पहचान|uidai\.gov\.in|helpdesk\s*:\s*1947|\b1947\b/i.test(regionText) ||
+      /enrol(?:l)?ment\s*(?:no|number)|नामांकन\s*संख्या/i.test(regionText)
+    );
+
+    // Trigger Aadhaar Shield:
+    // 1) Aadhaar number / VID is present in the image
+    // 2) UIDAI or Mera Aadhaar keyword is present
+    // 3) Aadhaar doc keyword is present
+    // 4) Govt of India + identity anchor (DOB, Gender, Address, Enrollment)
+    if (
+      hasAadhaarNumber ||
+      /uidai|u1dai|uldai|mera\s*aadhaar|मेरा\s*आधार|meri\s*pehchan|मेरी\s*पहचान/i.test(regionText) ||
+      hasAadhaarDoc ||
+      (hasAadhaarAuth && /dob|birth|male|female|gender|address|s\/o|d\/o|w\/o|enrol/i.test(regionText))
+    ) {
+      return {
+        id: 'aadhaar',
+        label: 'Aadhaar Card Document',
+        reason: 'document_shield:aadhaar_card',
+        confidence: 1.0,
+        bbox: regionBbox
+      };
+    }
+
+    // ── 3. Voter ID / EPIC Card (Election Commission of India) ──
+    const hasVoterNumber = hasVoterPii || /\b[A-Z]{3}[0-9]{7}\b/.test(regionText);
+    const hasVoterAuth = /election\s*commission\s*of\s*ind[li1|]a|भारत\s*निर्वाचन\s*आयोग/i.test(regionText);
+    const hasVoterDoc = (
+      /elector\s*photo\s*identity\s*card|मतदाता\s*फोटो\s*पहचान\s*पत्र/i.test(regionText) ||
+      /\b(?:epic\s*no|voter\s*id|elector\s*name)\b/i.test(regionText)
+    );
+    if ((hasVoterNumber && (hasVoterAuth || hasVoterDoc)) || (hasVoterAuth && hasVoterDoc) || /elector\s*photo\s*identity/i.test(regionText)) {
+      return {
+        id: 'voter_id',
+        label: 'Voter ID Card Document',
+        reason: 'document_shield:voter_id',
+        confidence: 1.0,
+        bbox: regionBbox
+      };
+    }
+
+    // ── 4. Indian Passport ──
+    const hasPassportAuth = (
+      /republic\s*of\s*ind[li1|]a|भारत\s*गणराज्य/i.test(regionText) ||
+      /ministry\s*of\s*external\s*affairs|विदेश\s*मंत्रालय/i.test(regionText)
+    );
+    const hasPassportDoc = (
+      /\b(?:passport|पासपोर्ट)\b/i.test(regionText) ||
+      /type\s*<\s*p|p\s*<\s*ind|country\s*code\s*ind/i.test(regionText) ||
+      /passport\s*no|पासपोर्ट\s*संख्या/i.test(regionText)
+    );
+    if ((hasPassportAuth && hasPassportDoc) || /p\s*<\s*ind/i.test(regionText)) {
+      return {
+        id: 'passport',
+        label: 'Indian Passport Document',
+        reason: 'document_shield:passport',
+        confidence: 1.0,
+        bbox: regionBbox
+      };
+    }
+
+    // ── 5. Driving Licence (Union of India / State Transport Department) ──
+    const hasDlAuth = (
+      /union\s*of\s*ind[li1|]a|transport\s*dep[a-z]*|motor\s*vehicles/i.test(regionText) ||
+      /state\s*transport|regional\s*transport|\brto\b/i.test(regionText)
+    );
+    const hasDlDoc = (
+      /driving\s*licen[cs]e|ड्राइविंग\s*लाइसेंस/i.test(regionText) ||
+      /\b(?:dl\s*no|form\s*7|authorisation\s*to\s*drive)\b/i.test(regionText)
+    );
+    if ((hasDlAuth && hasDlDoc) || /driving\s*licen[cs]e/i.test(regionText)) {
+      return {
+        id: 'driving_licence',
+        label: 'Driving Licence Document',
+        reason: 'document_shield:driving_licence',
+        confidence: 1.0,
+        bbox: regionBbox
+      };
+    }
+
+    return null;
+  }
+
+  /**
    * Detect form field anchors in documents, receipts, and invoices.
    * Cursive handwriting on paper forms cannot be reliably transcribed by typographic OCR,
    * but the printed labels define the geometric location of the sensitive handwritten values.
    */
-  function detectFormFieldAnchors(ocrWords, regionBbox) {
+  function detectFormFieldAnchors(ocrWords, regionBbox, existingMatches = []) {
     if (!ocrWords || !ocrWords.length) return [];
     const anchors = [];
     const regX = regionBbox.x;
@@ -484,11 +669,11 @@ Privamon.OCREngine = (() => {
     }
 
     const fullDocText = ocrWords.map(w => w.text).join(' ').toLowerCase();
-    const isInvoiceOrForm = /invoice|bill|tax|gst|particulars|cash|receipt|challan|order|model/i.test(fullDocText);
+    const isInvoiceOrForm = /\b(?:tax\s*invoice|retail\s*invoice|invoice|bill\s*of\s*supply|cash\s*memo|cash\s*receipt|challan)\b/i.test(fullDocText);
 
-    let foundName = false;
-    let foundMob = false;
-    let foundImei = false;
+    let foundName = existingMatches.some(m => m.type === 'name');
+    let foundMob = existingMatches.some(m => m.type === 'phone');
+    let foundImei = existingMatches.some(m => m.type === 'device_id');
     let foundSignature = false;
 
     for (const line of lines) {
@@ -514,12 +699,12 @@ Privamon.OCREngine = (() => {
           const dateWord = line.find(other => other.bbox.x > startX && /date/i.test(other.text));
           const limitRight = dateWord ? (dateWord.bbox.x - 8) : (regX + regW * 0.78);
           const subsequent = getSubsequent(startX).filter(sw => sw.bbox.x < limitRight);
-          let valW = Math.round(regW * 0.55);
+          let valW = Math.round(regW * 0.40);
           if (subsequent.length > 0) {
             const maxRight = Math.max(...subsequent.map(sw => sw.bbox.x + sw.bbox.width));
             valW = Math.max(valW, maxRight - startX + 10);
           }
-          valW = Math.min(limitRight - startX, valW);
+          valW = Math.min(limitRight - startX, Math.min(220, valW));
 
           anchors.push({
             type: 'name',
@@ -555,12 +740,12 @@ Privamon.OCREngine = (() => {
           const startX = refWord.bbox.x + refWord.bbox.width + 4;
           const limitRight = regX + regW * 0.85;
           const subsequent = getSubsequent(startX).filter(sw => sw.bbox.x < limitRight);
-          let valW = Math.round(regW * 0.60);
+          let valW = Math.round(regW * 0.45);
           if (subsequent.length > 0) {
             const maxRight = Math.max(...subsequent.map(sw => sw.bbox.x + sw.bbox.width));
             valW = Math.max(valW, maxRight - startX + 10);
           }
-          valW = Math.min(limitRight - startX, valW);
+          valW = Math.min(limitRight - startX, Math.min(220, valW));
 
           anchors.push({
             type: 'phone',
@@ -572,7 +757,7 @@ Privamon.OCREngine = (() => {
               x: startX,
               y: Math.max(regY + 2, refWord.bbox.y - 4),
               width: Math.max(80, valW),
-              height: Math.max(refWord.bbox.height + 10, 28)
+              height: Math.max(refWord.bbox.height + 10, 26)
             }
           });
           foundMob = true;
@@ -588,12 +773,12 @@ Privamon.OCREngine = (() => {
           const startX = refWord.bbox.x + refWord.bbox.width + 4;
           const limitRight = regX + regW * 0.72;
           const subsequent = getSubsequent(startX).filter(sw => sw.bbox.x < limitRight);
-          let valW = Math.round(regW * 0.50);
+          let valW = Math.round(regW * 0.45);
           if (subsequent.length > 0) {
             const maxRight = Math.max(...subsequent.map(sw => sw.bbox.x + sw.bbox.width));
             valW = Math.max(valW, maxRight - startX + 10);
           }
-          valW = Math.min(limitRight - startX, valW);
+          valW = Math.min(limitRight - startX, Math.min(220, valW));
 
           anchors.push({
             type: 'device_id',
@@ -631,12 +816,12 @@ Privamon.OCREngine = (() => {
       }
     }
 
-    // ── Form Structure Fallback (when labels are faint on printed receipt) ──
+    // ── Form Structure Fallback (only for confirmed printed tax invoices/bills) ──
     if (isInvoiceOrForm) {
       if (!foundName) {
         const nameX = regX + Math.round(regW * 0.17);
         const nameY = regY + Math.round(regH * 0.27);
-        const nameW = Math.round(regW * 0.62);
+        const nameW = Math.min(220, Math.round(regW * 0.50));
         anchors.push({
           type: 'name',
           text: 'Customer Name Field (Form Region)',
@@ -650,7 +835,7 @@ Privamon.OCREngine = (() => {
       if (!foundMob) {
         const mobX = regX + Math.round(regW * 0.18);
         const mobY = regY + Math.round(regH * 0.32);
-        const mobW = Math.round(regW * 0.63);
+        const mobW = Math.min(220, Math.round(regW * 0.50));
         anchors.push({
           type: 'phone',
           text: 'Mobile Number Field (Form Region)',
@@ -664,7 +849,7 @@ Privamon.OCREngine = (() => {
       if (!foundImei) {
         const imeiX = regX + Math.round(regW * 0.28);
         const imeiY = regY + Math.round(regH * 0.47);
-        const imeiW = Math.round(regW * 0.54);
+        const imeiW = Math.min(220, Math.round(regW * 0.50));
         anchors.push({
           type: 'device_id',
           text: 'IMEI / Serial Field (Form Region)',
@@ -672,20 +857,6 @@ Privamon.OCREngine = (() => {
           decision: 'REDACT',
           reason: 'form_field_anchor:imei_slot',
           bbox: { x: imeiX, y: imeiY, width: imeiW, height: 28 }
-        });
-      }
-
-      if (!foundSignature) {
-        const sigX = regX + Math.round(regW * 0.68);
-        const sigY = regY + Math.round(regH * 0.84);
-        const sigW = Math.round(regW * 0.29);
-        anchors.push({
-          type: 'signature',
-          text: 'Signature Ink (Form Region)',
-          confidence: 0.95,
-          decision: 'REDACT',
-          reason: 'form_field_anchor:signature_slot',
-          bbox: { x: sigX, y: sigY, width: sigW, height: 58 }
         });
       }
     }
@@ -745,22 +916,44 @@ Privamon.OCREngine = (() => {
           });
         }
 
-        const { text: regionText, tokens: tokenList } = buildTextAndTokens(ocrResults);
+        const { text: regionText, tokens: tokenList, lineItems } = buildTextAndTokens(ocrResults);
 
         if (regionText.trim()) {
           fullRawText += `\n--- Region ${rId} ---\n${regionText}\n`;
 
-          // Track for NER batching
-          itemsForNER.push({
-            text: regionText,
-            tokens: tokenList,
-            source: 'ocr',
-            bbox: screenshotBbox,
-            coordinateSpace: 'screenshot'
-          });
-
-          // Feed into shared PII detector (same rules as DOM)
+          // Feed into shared PII detector FIRST so detected PII matches can be used for document shielding
           const piiMatches = Privamon.PIIDetector.detectPII(regionText, '', 'ocr');
+
+          // 1. Identity Document Shield Detection (Full-Card Redaction for Aadhaar, PAN, Passport, Voter ID, Driving Licence)
+          const docShield = detectIdentityDocumentShield(regionText, screenshotBbox, ocrResults, piiMatches);
+          if (docShield) {
+            console.log(`[OCREngine] 🛡️ Identity Document Shield activated: ${docShield.label} for region ${rId}`);
+            allOcrDetections.push(Privamon.PIIDetector.toCandidate({
+              type: 'identity_document',
+              source: 'ocr_document_shield',
+              text: `[${docShield.label} - Full Shield]`,
+              bbox: docShield.bbox,
+              boxes: [docShield.bbox],
+              tokens: tokenList.map(t => t.id),
+              confidence: docShield.confidence,
+              decision: 'REDACT',
+              reason: docShield.reason,
+              coordinateSpace: 'screenshot'
+            }));
+          }
+
+          // Track line-level items for NER batching with accurate line bounding boxes
+          if (lineItems && lineItems.length > 0) {
+            itemsForNER.push(...lineItems);
+          } else {
+            itemsForNER.push({
+              text: regionText,
+              tokens: tokenList,
+              source: 'ocr',
+              bbox: screenshotBbox,
+              coordinateSpace: 'screenshot'
+            });
+          }
 
           for (const match of piiMatches) {
             const mappedBoxes = mapSpanToBoxes(match.span.start, match.span.end, tokenList);
@@ -778,23 +971,23 @@ Privamon.OCREngine = (() => {
               }));
             }
           }
-        }
 
-        // Form field anchor detection (handles handwritten cursive names, phones, IMEIs, and signatures)
-        const formAnchors = detectFormFieldAnchors(ocrResults, screenshotBbox);
-        for (const anchor of formAnchors) {
-          allOcrDetections.push(Privamon.PIIDetector.toCandidate({
-            type: anchor.type,
-            source: 'ocr',
-            text: anchor.text,
-            bbox: anchor.bbox,
-            boxes: [anchor.bbox],
-            tokens: [],
-            confidence: anchor.confidence,
-            decision: anchor.decision || 'REDACT',
-            reason: anchor.reason,
-            coordinateSpace: 'screenshot'
-          }));
+          // Form field anchor detection (handles handwritten cursive names, phones, IMEIs, and signatures)
+          const formAnchors = detectFormFieldAnchors(ocrResults, screenshotBbox, piiMatches);
+          for (const anchor of formAnchors) {
+            allOcrDetections.push(Privamon.PIIDetector.toCandidate({
+              type: anchor.type,
+              source: 'ocr',
+              text: anchor.text,
+              bbox: anchor.bbox,
+              boxes: [anchor.bbox],
+              tokens: [],
+              confidence: anchor.confidence,
+              decision: anchor.decision || 'REDACT',
+              reason: anchor.reason,
+              coordinateSpace: 'screenshot'
+            }));
+          }
         }
       }
 

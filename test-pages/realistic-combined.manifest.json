@@ -1,0 +1,165 @@
+{
+  "page": "realistic-combined.html",
+  "description": "Ground truth manifest for realistic combined signup, KYC, and payment flow uniting DOM, OCR, Vision, Checksums, and Disambiguation",
+  "expectedDetections": [
+    {
+      "type": "face",
+      "value": "User profile avatar photo",
+      "elementId": "img-profile-face",
+      "location": "Hero Section -> Profile Avatar",
+      "modality": "vision",
+      "model": "UltraFace RFB-320",
+      "shouldRedact": true
+    },
+    {
+      "type": "email",
+      "value": "alex.morgan99@synthetic-cloud.internal",
+      "elementId": "portal-email",
+      "location": "Card 1: Account Authentication Credentials -> Sign-in Email",
+      "modality": "dom",
+      "matchCriteria": "input[type=email]",
+      "shouldRedact": true
+    },
+    {
+      "type": "password",
+      "value": "Vault#Pass9988!",
+      "elementId": "portal-password",
+      "location": "Card 1: Account Authentication Credentials -> Master Password",
+      "modality": "dom",
+      "matchCriteria": "input[type=password]",
+      "shouldRedact": true
+    },
+    {
+      "type": "phone",
+      "value": "+91 98765 43210",
+      "elementId": "portal-phone",
+      "location": "Card 2: Identity Verification -> Verified Phone Number",
+      "modality": "dom",
+      "matchCriteria": "input[type=tel]",
+      "shouldRedact": true
+    },
+    {
+      "type": "aadhaar",
+      "value": "2345 6789 0124",
+      "elementId": "portal-aadhaar",
+      "location": "Card 2: Identity Verification -> Aadhaar Number (UID)",
+      "modality": "dom+checksum",
+      "matchCriteria": "name=\"aadhaar\"",
+      "checksumValid": true,
+      "shouldRedact": true
+    },
+    {
+      "type": "pan",
+      "value": "ABCPE1234F",
+      "elementId": "portal-pan",
+      "location": "Card 2: Identity Verification -> Permanent Account Number (PAN)",
+      "modality": "dom+regex",
+      "matchCriteria": "name=\"pan\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "dob",
+      "value": "1994-06-22",
+      "elementId": "portal-dob",
+      "location": "Card 2: Identity Verification -> Date of Birth",
+      "modality": "dom",
+      "matchCriteria": "autocomplete=\"bday\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "creditCard",
+      "value": "4111 1111 1111 1111",
+      "elementId": "portal-cc",
+      "location": "Card 3: Corporate Payment Method -> Corporate Billing Card",
+      "modality": "dom+checksum",
+      "matchCriteria": "autocomplete=\"cc-number\"",
+      "checksumValid": true,
+      "shouldRedact": true
+    },
+    {
+      "type": "creditCard",
+      "value": "739",
+      "elementId": "portal-cvv",
+      "location": "Card 3: Corporate Payment Method -> Security Code (CVV)",
+      "modality": "dom",
+      "matchCriteria": "name=\"cvv\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "name",
+      "value": "Alex M. Morgan",
+      "targetElement": "canvas#kyc-doc-canvas",
+      "location": "Card 4: Scanned KYC Verification Document -> Authorized Resident Name",
+      "modality": "ocr",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "aadhaar",
+      "value": "2345 6789 0124",
+      "targetElement": "canvas#kyc-doc-canvas",
+      "location": "Card 4: Scanned KYC Verification Document -> Aadhaar (UIDAI Verified)",
+      "modality": "ocr+checksum",
+      "checksumValid": true,
+      "shouldRedact": true
+    },
+    {
+      "type": "pan",
+      "value": "ABCPE1234F",
+      "targetElement": "canvas#kyc-doc-canvas",
+      "location": "Card 4: Scanned KYC Verification Document -> Permanent Account (PAN)",
+      "modality": "ocr",
+      "shouldRedact": true
+    },
+    {
+      "type": "none",
+      "value": "09/29",
+      "elementId": "portal-exp",
+      "location": "Card 3: Corporate Payment Method -> Expiration Date",
+      "reason": "Card expiry date; kept to preserve payment form usability",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "value": "Obsidian Slate Dark",
+      "elementId": "portal-theme",
+      "location": "Card 5: Benign Preferences -> Theme Preference",
+      "reason": "Benign preference",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "value": "9876543210",
+      "location": "Card 5: Benign Preferences -> Billing Reference Order ID",
+      "reason": "Suppressed by negative prefix: 'Order ID:'",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "value": "110001",
+      "location": "Card 5: Benign Preferences -> Dispatch Pin Code",
+      "reason": "Suppressed by negative prefix: 'Pin Code:'",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "elementId": "btn-save-profile-top",
+      "tag": "BUTTON",
+      "visibleLabel": "Save Changes",
+      "expectedPosTag": "top-right",
+      "location": "Suite Navigation Bar -> Right",
+      "reason": "Duplicate element disambiguated via [pos: top-right]",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "elementId": "btn-save-profile-bottom",
+      "tag": "BUTTON",
+      "visibleLabel": "Save Changes",
+      "expectedPosTag": "bottom-right",
+      "location": "Bottom Action Bar -> Right",
+      "reason": "Duplicate element disambiguated via [pos: bottom-right]",
+      "shouldRedact": false
+    }
+  ]
+}

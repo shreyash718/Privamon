@@ -1,0 +1,51 @@
+{
+  "page": "face-detection.html",
+  "description": "Ground truth manifest for ONNX Runtime Web face detection and scale heuristics",
+  "expectedDetections": [
+    {
+      "type": "none",
+      "value": "Tiny avatar image (12x12 px)",
+      "elementId": "img-face-tiny",
+      "location": "Section 1: Multi-Scale Face Detection Scenarios -> Tiny Avatar Icon",
+      "dimensions": "12x12",
+      "reason": "Filtered by MIN_FACE_REGION_SIZE = 16 threshold",
+      "shouldRedact": false
+    },
+    {
+      "type": "face",
+      "value": "Medium profile avatar (160x160 px)",
+      "elementId": "img-face-medium",
+      "location": "Section 1: Multi-Scale Face Detection Scenarios -> Medium Profile Photo",
+      "dimensions": "160x160",
+      "model": "UltraFace RFB-320",
+      "shouldRedact": true
+    },
+    {
+      "type": "face",
+      "value": "Large portrait photo (320x320 px)",
+      "elementId": "img-face-large",
+      "location": "Section 1: Multi-Scale Face Detection Scenarios -> Large Photo Portrait",
+      "dimensions": "320x320",
+      "model": "UltraFace RFB-320",
+      "shouldRedact": true
+    },
+    {
+      "type": "face",
+      "value": "Adjacent face asset (200x200 px)",
+      "elementId": "img-face-adjacent",
+      "location": "Section 2: Adjacent Graphic Discrimination -> Human Face Asset",
+      "dimensions": "200x200",
+      "model": "UltraFace RFB-320",
+      "shouldRedact": true
+    },
+    {
+      "type": "none",
+      "value": "Adjacent geometric shield logo (200x200 px)",
+      "elementId": "img-logo-adjacent",
+      "location": "Section 2: Adjacent Graphic Discrimination -> Company Shield Logo",
+      "dimensions": "200x200",
+      "reason": "Non-face geometric emblem; zero face confidence",
+      "shouldRedact": false
+    }
+  ]
+}

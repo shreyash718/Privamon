@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>User Image Debug</title>
+  <script src="/lib/tesseract/tesseract.min.js"></script>
+  <script src="/content/dom-range-mapper.js"></script>
+  <script src="/privacy/coordinate-mapper.js"></script>
+  <script src="/privacy/pii-detector.js"></script>
+  <script src="/privacy/pii-classifier.js"></script>
+  <script src="/privacy/ner-engine.js"></script>
+  <script src="/privacy/fusion.js"></script>
+  <script src="/privacy/redactor.js"></script>
+  <script src="/privacy/verifier.js"></script>
+  <script src="/privacy/image-resizer.js"></script>
+  <script src="/vision/vision-model.js"></script>
+  <script src="/vision/face-detector.js"></script>
+  <script src="/vision/ocr-engine.js"></script>
+  <script src="/pipeline/sanitize-pipeline.js"></script>
+</head>
+<body>
+  <img id="user-card" src="/scratch/cards_in_viewer.png" style="display:block;">
+
+  <script>
+    window.addEventListener('DOMContentLoaded', async () => {
+      const img = document.getElementById('user-card');
+      await new Promise(r => {
+        if (img.complete) r();
+        else img.onload = r;
+      });
+
+      const rImg = img.getBoundingClientRect();
+      const sw = Math.max(800, rImg.width + 100);
+      const sh = Math.max(600, rImg.height + 100);
+
+      const sCanvas = document.createElement('canvas');
+      sCanvas.width = sw;
+      sCanvas.height = sh;
+      const sCtx = sCanvas.getContext('2d');
+      sCtx.fillStyle = '#111';
+      sCtx.fillRect(0, 0, sw, sh);
+      sCtx.drawImage(img, 20, 20);
+
+      const screenshotDataUrl = sCanvas.toDataURL('image/png');
+
+      const regions = [{
+        elementId: 'user-card',
+        tag: 'IMG',
+        bbox: { x: 20, y: 20, width: rImg.width, height: rImg.height },
+        boxes: [{ x: 20, y: 20, width: rImg.width, height: rImg.height }],
+        area: rImg.width * rImg.height
+      }];
+
+      const mapper = {
+        mapBbox: b => b,
+        mapBoxes: bx => bx,
+        scaleX: 1,
+        scaleY: 1
+      };
+
+      const ocrOutput = await Privamon.OCREngine.processRegions(screenshotDataUrl, regions, mapper);
+
+      const payload = {
+        rawText: ocrOutput.rawText,
+        detections: ocrOutput.detections,
+        imgWidth: rImg.width,
+        imgHeight: rImg.height,
+        aspect: rImg.width / Math.max(rImg.height, 1)
+      };
+
+      await fetch('http://localhost:8997/results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    });
+  </script>
+</body>
+</html>

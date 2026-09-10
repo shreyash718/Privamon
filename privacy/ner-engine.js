@@ -23,6 +23,7 @@ Privamon.NEREngine = (() => {
 
   let nerPipeline = null;
   let initPromise = null;
+  let modelLoadPromise = null;
   let isAvailable = false;
   let initFailed = false;
 
@@ -46,13 +47,22 @@ Privamon.NEREngine = (() => {
     'profile', 'group', 'online', 'offline', 'typing', 'recording', 'unread', 'read', 'delivered', 'sent',
     'home', 'dashboard', 'report', 'update', 'payment', 'amount', 'rate', 'total', 'bill', 'invoice', 'order',
     'particulars', 'model', 'battery', 'charger', 'tax', 'gst', 'cgst', 'sgst', 'igst', 'subtotal', 'item', 'items',
-    'qty', 'price', 'signature', 'sign', 'customer', 'shri', 'smt', 'mr', 'mrs', 'dr', 'opp', 'road', 'complex'
+    'qty', 'price', 'signature', 'sign', 'customer', 'shri', 'smt', 'mr', 'mrs', 'dr', 'opp', 'road', 'complex',
+    'arrow', 'chevron', 'left', 'right', 'up', 'down', 'share', 'options', 'zoom', 'rotate', 'fullscreen',
+    'gallery', 'filmstrip', 'thumbnail', 'valid', 'validity', 'efficiency', 'hackathon', 'card', 'slip',
+    'tokens', 'token', 'english', 'hindi', 'side', 'ocr', 'validation', 'pipeline', 'download date', 'issue date', 'issue'
   ]);
 
   function isValidPersonName(text) {
     if (!text || typeof text !== 'string') return false;
     const clean = text.trim();
     if (clean.length < 3 || clean.length > 50) return false;
+    // Check against blocked words
+    const lower = clean.toLowerCase();
+    if (BLOCKED_NAME_WORDS.has(lower)) return false;
+    const parts = lower.split(/\s+/);
+    if (parts.some(p => BLOCKED_NAME_WORDS.has(p))) return false;
+
     // Disallow strings containing any digits (timestamps like "9:46", counts like "5 of 5", phone numbers)
     if (/\d/.test(clean)) return false;
     // Disallow UI symbols, arrows, brackets
@@ -62,7 +72,7 @@ Privamon.NEREngine = (() => {
     // Disallow common prepositions/conjunctions
     if (/\b(?:of|at|by|in|on|to|for|from|with|and|or)\b/i.test(clean)) return false;
     // Disallow UI action words
-    if (/\b(?:you|me|we|us|download|delete|menu|close|attach|emoji|more|details|view|edit|save|send|cancel|reply|star|starred|chats|calls|status|settings|profile|group|back|next|previous)\b/i.test(clean)) return false;
+    if (/\b(?:you|me|we|us|download|delete|menu|close|attach|emoji|more|details|view|edit|save|send|cancel|reply|star|starred|chats|calls|status|settings|profile|group|back|next|previous|chevron|arrow)\b/i.test(clean)) return false;
     // Must contain at least one vowel
     if (!/[aeiouy]/i.test(clean)) return false;
     // Must have mostly alphabetical characters
@@ -154,25 +164,45 @@ Privamon.NEREngine = (() => {
           env.useBrowserCache = true;
         }
 
-        // 4. Load quantized model with timeout
-        const loadPromise = pipeline('token-classification', 'Xenova/bert-base-NER', {
-          quantized: true,
-        });
+        // 4. Load quantized model with timeout (reuse promise if already downloading in background)
+        if (!modelLoadPromise) {
+          modelLoadPromise = pipeline('token-classification', 'Xenova/bert-base-NER', {
+            quantized: true,
+          });
+
+          // Let download continue in background to populate browser CacheStorage
+          modelLoadPromise.then(p => {
+            nerPipeline = p;
+            isAvailable = true;
+            console.log('[NEREngine] Background download complete! Xenova/bert-base-NER is cached and active.');
+          }).catch(err => {
+            // If offline or blocked, keep heuristic fallback active
+            console.debug('[NEREngine] Background download status:', err.message);
+            modelLoadPromise = null;
+          });
+        }
 
         const timeoutPromise = new Promise((_, reject) =>
           setTimeout(() => reject(new Error('NER model load timeout')), INIT_TIMEOUT_MS)
         );
 
-        nerPipeline = await Promise.race([loadPromise, timeoutPromise]);
-        isAvailable = true;
-        console.log(`[NEREngine] Initialized Xenova/bert-base-NER in ${Math.round(performance.now() - tStart)}ms`);
-        return nerPipeline;
+        try {
+          nerPipeline = await Promise.race([modelLoadPromise, timeoutPromise]);
+          isAvailable = true;
+          console.log(`[NEREngine] Initialized Xenova/bert-base-NER in ${Math.round(performance.now() - tStart)}ms`);
+          return nerPipeline;
+        } catch (raceErr) {
+          console.warn(`[NEREngine] Client-side ML NER unavailable, heuristic fallback active: ${raceErr.message}`);
+          return null;
+        }
       } catch (err) {
         console.warn('[NEREngine] Client-side ML NER unavailable, heuristic fallback active:', err.message);
         initFailed = true;
         isAvailable = false;
         nerPipeline = null;
         return null;
+      } finally {
+        initPromise = null;
       }
     })();
 
@@ -225,7 +255,7 @@ Privamon.NEREngine = (() => {
             if (item.bbox && item.bbox.width <= 350 && item.bbox.height <= 50 && matchText.length >= text.length * 0.6) {
               matchedBbox = item.bbox;
               matchedBoxes = [item.bbox];
-            } else if (item.bbox && text.length > 0) {
+            } else if (item.bbox && item.bbox.width <= 300 && item.bbox.height <= 45 && text.length > 0) {
               const charWidth = item.bbox.width / Math.max(1, text.length);
               const subX = item.bbox.x + Math.round(matchStart * charWidth);
               const subW = Math.max(20, Math.round(matchText.length * charWidth));
@@ -353,7 +383,7 @@ Privamon.NEREngine = (() => {
             if (item.bbox && item.bbox.width <= 350 && item.bbox.height <= 50 && entText.length >= text.length * 0.6) {
               matchedBbox = item.bbox;
               matchedBoxes = [item.bbox];
-            } else if (item.bbox && text.length > 0 && typeof ent.start === 'number') {
+            } else if (item.bbox && item.bbox.width <= 300 && item.bbox.height <= 45 && text.length > 0 && typeof ent.start === 'number') {
               const charWidth = item.bbox.width / Math.max(1, text.length);
               const subX = item.bbox.x + Math.round(ent.start * charWidth);
               const subW = Math.max(20, Math.round(entText.length * charWidth));

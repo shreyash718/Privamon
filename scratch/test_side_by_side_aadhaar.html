@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Side-by-Side Aadhaar Verification</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #111;
+      color: #eee;
+      font-family: sans-serif;
+    }
+  </style>
+  <script src="/lib/tesseract/tesseract.min.js"></script>
+  <script src="/content/dom-range-mapper.js"></script>
+  <script src="/privacy/coordinate-mapper.js"></script>
+  <script src="/privacy/pii-detector.js"></script>
+  <script src="/privacy/pii-classifier.js"></script>
+  <script src="/privacy/ner-engine.js"></script>
+  <script src="/privacy/fusion.js"></script>
+  <script src="/privacy/redactor.js"></script>
+  <script src="/privacy/verifier.js"></script>
+  <script src="/privacy/image-resizer.js"></script>
+  <script src="/vision/vision-model.js"></script>
+  <script src="/vision/face-detector.js"></script>
+  <script src="/vision/ocr-engine.js"></script>
+  <script src="/pipeline/sanitize-pipeline.js"></script>
+</head>
+<body>
+  <h1>WhatsApp-Style Side-by-Side Aadhaar Lightbox</h1>
+  <!-- Two cards side by side in a single 1300x420 canvas (Aspect Ratio = 3.1) -->
+  <canvas id="dual-aadhaar-canvas" width="1300" height="420" style="display:block; margin: 20px auto; background:#fff; border-radius:8px;"></canvas>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', async () => {
+      const cvs = document.getElementById('dual-aadhaar-canvas');
+      const ctx = cvs.getContext('2d');
+
+      // Card Background (dark frame with two white cards)
+      ctx.fillStyle = '#1e1e1e';
+      ctx.fillRect(0, 0, 1300, 420);
+
+      // --- Left Card (Front: 600x380) ---
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(30, 20, 600, 380);
+
+      // Orange & Blue Stripe
+      ctx.fillStyle = '#ea580c';
+      ctx.fillRect(30, 20, 600, 16);
+      ctx.fillStyle = '#1e3a8a';
+      ctx.fillRect(30, 36, 600, 30);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 15px sans-serif';
+      ctx.fillText('भारत सरकार / Government of India', 50, 56);
+
+      // Portrait Photo Placeholder
+      ctx.fillStyle = '#cbd5e1';
+      ctx.fillRect(50, 90, 110, 140);
+      ctx.fillStyle = '#475569';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('Photo', 85, 165);
+
+      // Front Card Text
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('Saurabh Yadav', 180, 115);
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Date of Birth/DOB: 10/08/2006', 180, 145);
+      ctx.fillText('Male/ MALE', 180, 175);
+
+      // Aadhaar UID Number (Valid Verhoeff: 8681 0123 8525)
+      ctx.font = 'bold 22px monospace';
+      ctx.fillText('8681 0123 8525', 180, 245);
+
+      ctx.font = '13px sans-serif';
+      ctx.fillText('VID: 9142 4555 7100 2245', 180, 285);
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText('मेरा आधार, मेरी पहचान', 220, 340);
+
+
+      // --- Right Card (Back: 600x380) ---
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(670, 20, 600, 380);
+
+      // Header
+      ctx.fillStyle = '#0284c7';
+      ctx.fillRect(670, 20, 600, 35);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText('भारतीय विशिष्ट पहचान प्राधिकरण / Unique Identification Authority of India', 685, 43);
+
+      // Back Details
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 13px sans-serif';
+      ctx.fillText('Address:', 690, 85);
+      ctx.font = '13px sans-serif';
+      ctx.fillText('S/O: Dinesh Kumar Yadav, Kailawar, Jaunpur,', 690, 110);
+      ctx.fillText('Uttar Pradesh - 222105', 690, 130);
+
+      // QR Code Box Placeholder
+      ctx.fillStyle = '#334155';
+      ctx.fillRect(1030, 80, 200, 200);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('QR CODE', 1105, 185);
+
+      // Back Aadhaar Number & VID
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 20px monospace';
+      ctx.fillText('8681 0123 8525', 690, 245);
+
+      ctx.font = '13px sans-serif';
+      ctx.fillText('VID: 9142 4555 7100 2245', 690, 280);
+      ctx.fillText('help@uidai.gov.in | www.uidai.gov.in', 780, 360);
+
+      await new Promise(r => setTimeout(r, 600));
+
+      // Extract DOM
+      const resp = await fetch('/content/dom-extractor.js');
+      const code = await resp.text();
+      const domData = eval(code);
+
+      // Build screenshot
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
+      const sCanvas = document.createElement('canvas');
+      sCanvas.width = sw;
+      sCanvas.height = sh;
+      const sCtx = sCanvas.getContext('2d');
+      sCtx.fillStyle = '#111111';
+      sCtx.fillRect(0, 0, sw, sh);
+
+      const rCvs = cvs.getBoundingClientRect();
+      sCtx.drawImage(cvs, rCvs.left, rCvs.top);
+
+      const screenshotDataUrl = sCanvas.toDataURL('image/png');
+
+      const result = await Privamon.SanitizePipeline.run({
+        screenshot: screenshotDataUrl,
+        domData: domData,
+        onProgress: (stage, status, msg) => console.log(`[Stage ${stage}] ${msg}`)
+      });
+
+      const payload = {
+        detections: (result.detections || []).map(d => ({
+          type: d.type, text: d.text, reason: d.reason, conf: d.confidence, decision: d.decision, bbox: d.bbox
+        })),
+        redactions: (result.redactions || []).map(r => ({
+          type: r.type, text: r.text, reason: r.reason, conf: r.confidence, bbox: r.bbox
+        }))
+      };
+
+      await fetch('http://localhost:8998/results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    });
+  </script>
+</body>
+</html>

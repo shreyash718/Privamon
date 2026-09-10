@@ -92,102 +92,240 @@
       </div>
     </div>
 
-    <!-- Chat History Timeline -->
-    <main class="chat-timeline" id="chatTimeline">
-      <!-- Empty state shown when no history -->
-      <div class="empty-state" id="emptyState">
-        <div class="empty-illustration">
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
-            <line x1="8" y1="21" x2="16" y2="21"></line>
-            <line x1="12" y1="17" x2="12" y2="21"></line>
-          </svg>
-        </div>
-        <h2>Private Vision Agent</h2>
-        <p>Type what you want to do below. Privamon will capture your screen, sanitize all personal data & faces on-device, and ask your local vision agent how to proceed.</p>
-        <div class="privacy-guarantee">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2">
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-          </svg>
-          <span>All PII, faces & sensitive credentials are redacted before transmission</span>
-        </div>
-      </div>
-
-      <!-- Chat Turns dynamically inserted here -->
-    </main>
-
-    <!-- Active Pipeline / Thinking Banner (Docked above bottom input) -->
-    <section class="active-progress-card hidden" id="activeProgressCard">
-      <div class="progress-spinner"></div>
-      <div class="progress-details">
-        <div class="progress-headline" id="progressHeadline">Processing Screen...</div>
-        <div class="progress-sub" id="progressSub">Capturing and applying local PII & face redaction</div>
-      </div>
-      <button type="button" class="btn-stop-loop hidden" id="stopLoopBtn" title="Stop the running loop">
-        <span>⏹ Stop</span>
+    <!-- Mode Navigation Tabs (Agent vs Redaction Testing Tab) -->
+    <nav class="mode-nav-bar" role="tablist" aria-label="Privamon Operating Modes">
+      <button type="button" class="mode-nav-btn active" id="tabModeAgent" role="tab" aria-selected="true">
+        <span class="tab-glyph">⚡</span>
+        <span class="tab-text">Agent</span>
       </button>
-    </section>
+      <button type="button" class="mode-nav-btn" id="tabModeRedaction" role="tab" aria-selected="false">
+        <span class="tab-glyph">🛡️</span>
+        <span class="tab-text">Redaction Tab</span>
+        <span class="tab-pill-test">Test Only</span>
+      </button>
+    </nav>
 
-    <!-- Bottom Query Input Box ("Ask me anything to do") -->
-    <section class="bottom-input-box" id="bottomInputBox">
-      <!-- Input Mode Controls: Auto-Pilot Loop -->
-      <div class="input-controls-row">
-        <div class="loop-toggle-wrap" title="Autonomous Loop: The agent executes actions, inspects outcomes, and keeps trying until the final task is verified complete.">
-          <label class="toggle-switch small" for="loopModeToggle">
-            <input type="checkbox" id="loopModeToggle">
-            <span class="slider"></span>
-          </label>
-          <label class="loop-toggle-label" for="loopModeToggle">
-            <span class="loop-glyph">⚡</span>
-            <span class="loop-title">Auto-Pilot Loop</span>
-          </label>
+    <!-- Agent Mode View Container (Normal working kept here) -->
+    <div class="mode-view active" id="agentViewContainer">
+      <!-- Chat History Timeline -->
+      <main class="chat-timeline" id="chatTimeline">
+        <!-- Empty state shown when no history -->
+        <div class="empty-state" id="emptyState">
+          <div class="empty-illustration">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect>
+              <line x1="8" y1="21" x2="16" y2="21"></line>
+              <line x1="12" y1="17" x2="12" y2="21"></line>
+            </svg>
+          </div>
+          <h2>Private Vision Agent</h2>
+          <p>Type what you want to do below. Privamon will capture your screen, sanitize all personal data & faces on-device, and ask your local vision agent how to proceed.</p>
+          <div class="privacy-guarantee">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span>All PII, faces & sensitive credentials are redacted before transmission</span>
+          </div>
         </div>
-        <span class="loop-hint-pill" id="loopHintPill">Single Step Mode</span>
-      </div>
 
-      <!-- Prompt Suggestions -->
-      <div class="prompt-chips">
-        <button class="chip-btn" data-prompt="What should I do on this page?">
-          <span class="chip-icon">✦</span>
-          <span>What to do here?</span>
-        </button>
-        <button class="chip-btn" data-prompt="Guide me through the main action on this screen">
-          <span class="chip-icon">⚡</span>
-          <span>Guide next step</span>
-        </button>
-        <button class="chip-btn" data-prompt="Analyze the form fields and buttons">
-          <span class="chip-icon">🔍</span>
-          <span>Inspect form</span>
-        </button>
-      </div>
+        <!-- Chat Turns dynamically inserted here -->
+      </main>
 
-      <form id="chatForm" class="input-form">
-        <div class="input-bar-container">
-          <div class="input-bar">
-            <div class="input-ai-glyph" title="Vision Agent Ready">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M12 3v3m0 12v3M3 12h3m12 0h3m-2.93-6.07l-2.12 2.12m-7.78 7.78l-2.12 2.12m0-12.02l2.12 2.12m7.78 7.78l2.12 2.12"/>
-              </svg>
+      <!-- Active Pipeline / Thinking Banner (Docked above bottom input) -->
+      <section class="active-progress-card hidden" id="activeProgressCard">
+        <div class="progress-spinner"></div>
+        <div class="progress-details">
+          <div class="progress-headline" id="progressHeadline">Processing Screen...</div>
+          <div class="progress-sub" id="progressSub">Capturing and applying local PII & face redaction</div>
+        </div>
+        <button type="button" class="btn-stop-loop hidden" id="stopLoopBtn" title="Stop the running loop">
+          <span>⏹ Stop</span>
+        </button>
+      </section>
+
+      <!-- Bottom Query Input Box ("Ask me anything to do") -->
+      <section class="bottom-input-box" id="bottomInputBox">
+        <!-- Input Mode Controls: Auto-Pilot Loop -->
+        <div class="input-controls-row">
+          <div class="loop-toggle-wrap" title="Autonomous Loop: The agent executes actions, inspects outcomes, and keeps trying until the final task is verified complete.">
+            <label class="toggle-switch small" for="loopModeToggle">
+              <input type="checkbox" id="loopModeToggle">
+              <span class="slider"></span>
+            </label>
+            <label class="loop-toggle-label" for="loopModeToggle">
+              <span class="loop-glyph">⚡</span>
+              <span class="loop-title">Auto-Pilot Loop</span>
+            </label>
+          </div>
+          <span class="loop-hint-pill" id="loopHintPill">Single Step Mode</span>
+        </div>
+
+        <!-- Prompt Suggestions -->
+        <div class="prompt-chips">
+          <button class="chip-btn" data-prompt="What should I do on this page?">
+            <span class="chip-icon">✦</span>
+            <span>What to do here?</span>
+          </button>
+          <button class="chip-btn" data-prompt="Guide me through the main action on this screen">
+            <span class="chip-icon">⚡</span>
+            <span>Guide next step</span>
+          </button>
+          <button class="chip-btn" data-prompt="Analyze the form fields and buttons">
+            <span class="chip-icon">🔍</span>
+            <span>Inspect form</span>
+          </button>
+        </div>
+
+        <form id="chatForm" class="input-form">
+          <div class="input-bar-container">
+            <div class="input-bar">
+              <div class="input-ai-glyph" title="Vision Agent Ready">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 3v3m0 12v3M3 12h3m12 0h3m-2.93-6.07l-2.12 2.12m-7.78 7.78l-2.12 2.12m0-12.02l2.12 2.12m7.78 7.78l2.12 2.12"/>
+                </svg>
+              </div>
+              <input
+                type="text"
+                id="taskInput"
+                placeholder="Ask me anything to do..."
+                autocomplete="off"
+                spellcheck="false"
+              >
+              <div class="input-right-cluster">
+                <span class="input-kbd-pill" title="Press Enter to send">↵ Enter</span>
+                <button type="submit" id="sendBtn" class="send-btn" title="Send to Agent" aria-label="Send query">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                  </svg>
+                </button>
+              </div>
             </div>
-            <input
-              type="text"
-              id="taskInput"
-              placeholder="Ask me anything to do..."
-              autocomplete="off"
-              spellcheck="false"
-            >
-            <div class="input-right-cluster">
-              <span class="input-kbd-pill" title="Press Enter to send">↵ Enter</span>
-              <button type="submit" id="sendBtn" class="send-btn" title="Send to Agent" aria-label="Send query">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <line x1="22" y1="2" x2="11" y2="13"></line>
-                  <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <!-- Redaction Testing View (Zero Server Transmission) -->
+    <section class="mode-view hidden" id="redactionViewContainer">
+      <!-- Testing Control Header -->
+      <div class="redaction-test-header">
+        <div class="redaction-badge-row">
+          <span class="badge-zero-server">🔒 100% On-Device • Zero Server Traffic</span>
+        </div>
+        <div class="redaction-action-row">
+          <button type="button" class="btn-run-redact-test" id="runRedactionTestBtn">
+            <span class="btn-icon">⚡</span>
+            <span>Test Redaction on Page</span>
+          </button>
+          <button type="button" class="btn-open-browser-tab" id="openBrowserTabBtn" title="Open in Full Chrome Browser Tab">
+            <span>Open Browser Tab ↗</span>
+          </button>
+        </div>
+        <div class="redaction-target-info" id="redactionTargetInfo">
+          Target: <span id="redactionTargetUrl">Current Active Tab</span>
+        </div>
+      </div>
+
+      <!-- Testing Progress Banner -->
+      <div class="redaction-progress-card hidden" id="redactionProgressCard">
+        <div class="progress-spinner"></div>
+        <div class="progress-details">
+          <div class="progress-headline" id="redactionProgressHeadline">Sanitizing Screen...</div>
+          <div class="progress-sub" id="redactionProgressSub">Running DOM, OCR, and Face Detection locally</div>
+        </div>
+      </div>
+
+      <!-- Redaction Results Panel -->
+      <div class="redaction-results-panel" id="redactionResultsPanel">
+        <!-- Empty State before running test -->
+        <div class="redaction-empty-state" id="redactionEmptyState">
+          <div class="empty-illustration">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+          </div>
+          <h3>Local Redaction Testing</h3>
+          <p>Test Privamon's redaction pipeline directly on this page. See exactly which PII and faces are blacked out without sending any data to the server.</p>
+          <button type="button" class="btn-start-test-hero" id="heroStartTestBtn">
+            <span>🛡️ Start Redaction Test</span>
+          </button>
+        </div>
+
+        <!-- Loaded State after running test -->
+        <div class="redaction-content-loaded hidden" id="redactionContentLoaded">
+          <!-- Summary Metrics -->
+          <div class="redaction-stats-grid">
+            <div class="stat-pill redact">
+              <span class="stat-num" id="statRedactedCount">0</span>
+              <span class="stat-lbl">Redacted</span>
+            </div>
+            <div class="stat-pill review">
+              <span class="stat-num" id="statReviewCount">0</span>
+              <span class="stat-lbl">Review</span>
+            </div>
+            <div class="stat-pill keep">
+              <span class="stat-num" id="statKeptCount">0</span>
+              <span class="stat-lbl">Kept</span>
+            </div>
+            <div class="stat-pill time">
+              <span class="stat-num" id="statLatencyTime">0ms</span>
+              <span class="stat-lbl">Latency</span>
+            </div>
+          </div>
+
+          <!-- View Controls -->
+          <div class="redaction-view-bar">
+            <div class="view-toggle-group">
+              <button type="button" class="view-toggle-btn active" id="viewToggleRedacted" data-view="redacted">Redacted</button>
+              <button type="button" class="view-toggle-btn" id="viewToggleOriginal" data-view="original">Original</button>
+            </div>
+            <div class="view-tools-group">
+              <button type="button" class="tool-btn" id="downloadRedactedBtn" title="Download Redacted PNG">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Save</span>
+              </button>
+              <button type="button" class="tool-btn" id="expandRedactedBtn" title="View Fullscreen Lightbox">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="15 3 21 3 21 9"></polyline>
+                  <polyline points="9 21 3 21 3 15"></polyline>
+                  <line x1="21" y1="3" x2="14" y2="10"></line>
+                  <line x1="3" y1="21" x2="10" y2="14"></line>
                 </svg>
               </button>
             </div>
           </div>
+
+          <!-- Screenshot Frame -->
+          <div class="redaction-image-frame" id="redactionImageFrame">
+            <img id="redactionPreviewImg" src="" alt="Redacted Page Preview">
+            <div class="img-badge-overlay" id="imgBadgeOverlay">Redacted View (#000000)</div>
+          </div>
+
+          <!-- Detections Breakdown List -->
+          <div class="detections-card">
+            <div class="detections-card-header">
+              <h4>Detection Breakdown</h4>
+              <span class="badge-total-items" id="badgeTotalItems">0 items</span>
+            </div>
+            <div class="detections-list" id="detectionsList">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+
+          <!-- Privacy Guarantee Notice -->
+          <div class="redaction-guarantee-note">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            </svg>
+            <span>Processed 100% locally on-device. Zero network requests sent to server.</span>
+          </div>
         </div>
-      </form>
+      </div>
     </section>
 
     <!-- Fullscreen Image Lightbox Modal -->

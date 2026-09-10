@@ -1,0 +1,284 @@
+import http.server
+import socketserver
+import threading
+import time
+import json
+import subprocess
+import os
+
+PORT = 8992
+results_received = None
+
+class ReusableServer(socketserver.TCPServer):
+    allow_reuse_address = True
+
+class TestHandler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-store')
+        super().end_headers()
+
+    def do_POST(self):
+        global results_received
+        length = int(self.headers.get('content-length', 0))
+        data = self.rfile.read(length)
+        results_received = json.loads(data.decode('utf-8'))
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{"status":"ok"}')
+
+    def log_message(self, format, *args):
+        pass
+
+aadhaar_gallery_html = """<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Aadhaar Gallery Viewer Test</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      background: #1e1e1e;
+      color: #fff;
+      font-family: sans-serif;
+    }
+    .media-viewer-topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 20px;
+      background: #2d2d2d;
+    }
+    .toolbar-btn {
+      background: #3e3e3e;
+      border: 1px solid #555;
+      color: #fff;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-left: 8px;
+    }
+    .viewer-container {
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 700px;
+      background: #111;
+    }
+    .nav-arrow {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.2);
+      color: #fff;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .nav-arrow.left { left: 20px; }
+    .nav-arrow.right { right: 20px; }
+    .filmstrip {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      padding: 12px;
+      background: #222;
+    }
+    .thumbnail {
+      width: 80px;
+      height: 50px;
+      background: #444;
+      border: 2px solid transparent;
+      cursor: pointer;
+    }
+    .thumbnail.active {
+      border-color: #3b82f6;
+    }
+  </style>
+  <script src="/lib/tesseract/tesseract.min.js"></script>
+  <script src="/content/dom-range-mapper.js"></script>
+  <script src="/privacy/coordinate-mapper.js"></script>
+  <script src="/privacy/pii-detector.js"></script>
+  <script src="/privacy/pii-classifier.js"></script>
+  <script src="/privacy/ner-engine.js"></script>
+  <script src="/privacy/fusion.js"></script>
+  <script src="/privacy/redactor.js"></script>
+  <script src="/privacy/verifier.js"></script>
+  <script src="/privacy/image-resizer.js"></script>
+  <script src="/vision/vision-model.js"></script>
+  <script src="/vision/face-detector.js"></script>
+  <script src="/vision/ocr-engine.js"></script>
+  <script src="/pipeline/sanitize-pipeline.js"></script>
+</head>
+<body>
+  <!-- Media Viewer UI Controls (must NOT trigger false positive detections) -->
+  <div class="media-viewer-topbar" role="toolbar">
+    <div class="title">Aadhaar_Card_Verified.jpg</div>
+    <div class="actions">
+      <button class="toolbar-btn" aria-label="Star photo">Star</button>
+      <button class="toolbar-btn" aria-label="Rotate photo">Rotate</button>
+      <button class="toolbar-btn" aria-label="Download photo">Download</button>
+      <button class="toolbar-btn" aria-label="Delete photo">Delete</button>
+    </div>
+  </div>
+
+  <div class="viewer-container">
+    <button class="nav-arrow left" aria-label="Previous image">&lt;</button>
+    <canvas id="aadhaar-card-canvas" width="600" height="380" style="background:#fff; border-radius:8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);"></canvas>
+    <button class="nav-arrow right" aria-label="Next image">&gt;</button>
+  </div>
+
+  <div class="filmstrip">
+    <div class="thumbnail active" aria-label="Aadhaar Front"></div>
+    <div class="thumbnail" aria-label="Aadhaar Back"></div>
+    <div class="thumbnail" aria-label="Profile Photo"></div>
+  </div>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', async () => {
+      // Paint Aadhaar Card Front & Back Details on Canvas
+      const cvs = document.getElementById('aadhaar-card-canvas');
+      const ctx = cvs.getContext('2d');
+
+      // White background card
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, 600, 380);
+
+      // Header
+      ctx.fillStyle = '#ea580c';
+      ctx.fillRect(0, 0, 600, 16);
+      ctx.fillStyle = '#1e3a8a';
+      ctx.fillRect(0, 16, 600, 32);
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('भारत सरकार / GOVERNMENT OF INDIA', 30, 38);
+
+      // Card Content
+      ctx.fillStyle = '#000000';
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('सौरभ यादव', 50, 100);
+
+      ctx.font = 'bold 16px sans-serif';
+      ctx.fillText('Saurabh Yadav', 50, 125);
+
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Date of Birth/DOB: 10/08/2006', 50, 155);
+
+      ctx.font = '14px sans-serif';
+      ctx.fillText('Gender: MALE', 50, 180);
+
+      ctx.font = '14px sans-serif';
+      ctx.fillText('VID: 9142 4555 7100 2245', 50, 215);
+
+      // Back Details (Relative & Address)
+      ctx.font = 'bold 14px sans-serif';
+      ctx.fillText('S/O: Dinesh Kumar Yadav', 50, 255);
+
+      ctx.font = '13px sans-serif';
+      ctx.fillText('Address: Kailawar, Jaunpur, Uttar Pradesh - 222105', 50, 285);
+
+      // Bottom bar
+      ctx.fillStyle = '#16a34a';
+      ctx.fillRect(0, 365, 600, 15);
+
+      await new Promise(r => setTimeout(r, 600));
+
+      // Extract DOM
+      const resp = await fetch('/content/dom-extractor.js');
+      const code = await resp.text();
+      const domData = eval(code);
+
+      // Build screenshot
+      const sw = window.innerWidth;
+      const sh = window.innerHeight;
+      const sCanvas = document.createElement('canvas');
+      sCanvas.width = sw;
+      sCanvas.height = sh;
+      const sCtx = sCanvas.getContext('2d');
+      sCtx.fillStyle = '#1e1e1e';
+      sCtx.fillRect(0, 0, sw, sh);
+
+      const rCvs = cvs.getBoundingClientRect();
+      sCtx.drawImage(cvs, rCvs.left, rCvs.top);
+
+      const screenshotDataUrl = sCanvas.toDataURL('image/png');
+
+      const result = await Privamon.SanitizePipeline.run({
+        screenshot: screenshotDataUrl,
+        domData: domData,
+        onProgress: (stage, status, msg) => console.log(`[Stage ${stage}] ${msg}`)
+      });
+
+      const payload = {
+        detections: (result.detections || []).map(d => ({
+          type: d.type, text: d.text, reason: d.reason, conf: d.confidence, decision: d.decision, bbox: d.bbox, sources: d.sources
+        })),
+        redactions: (result.redactions || []).map(r => ({
+          type: r.type, text: r.text, reason: r.reason, conf: r.confidence, bbox: r.bbox, boxes: r.boxes
+        }))
+      };
+
+      await fetch('http://localhost:8992/results', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+    });
+  </script>
+</body>
+</html>
+"""
+
+def main():
+    global results_received
+    os.makedirs('scratch', exist_ok=True)
+    with open('scratch/test_aadhaar_gallery.html', 'w', encoding='utf-8') as f:
+        f.write(aadhaar_gallery_html)
+
+    server = ReusableServer(('', PORT), TestHandler)
+    t = threading.Thread(target=server.serve_forever)
+    t.daemon = True
+    t.start()
+    print(f'Server started on http://localhost:{PORT}')
+
+    chrome_cmd = [
+        'google-chrome',
+        '--headless=new',
+        '--no-sandbox',
+        '--disable-gpu',
+        '--window-size=1280,1000',
+        f'http://localhost:{PORT}/scratch/test_aadhaar_gallery.html'
+    ]
+
+    proc = subprocess.Popen(chrome_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    start_time = time.time()
+    while results_received is None and time.time() - start_time < 35:
+        time.sleep(0.5)
+
+    proc.terminate()
+    server.shutdown()
+
+    if results_received:
+        print("\n=== AADHAAR GALLERY TEST DETECTIONS ===")
+        for d in results_received.get('detections', []):
+            print(f" - [{d['type']}] '{d['text']}' reason={d['reason']} dec={d['decision']} conf={d['conf']} bbox={d['bbox']}")
+
+        print("\n=== AADHAAR GALLERY TEST REDACTIONS ===")
+        for r in results_received.get('redactions', []):
+            print(f" - [{r['type']}] '{r['text']}' reason={r['reason']} conf={r['conf']} bbox={r['bbox']}")
+    else:
+        print("Timed out waiting for results")
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,112 @@
+{
+  "page": "ocr-image-pii.html",
+  "description": "Ground truth manifest for client-side Tesseract.js OCR baked pixel PII detection across English and Hindi",
+  "expectedDetections": [
+    {
+      "type": "name",
+      "value": "Priya Sharma",
+      "targetElement": "canvas#ocr-doc-en",
+      "location": "English Scanned Document -> Full Name",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "email",
+      "value": "priya.sharma@example-synthetic.org",
+      "targetElement": "canvas#ocr-doc-en",
+      "location": "English Scanned Document -> Email Address",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "phone",
+      "value": "+91 98765 43210",
+      "targetElement": "canvas#ocr-doc-en",
+      "location": "English Scanned Document -> Contact Mobile",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "aadhaar",
+      "value": "5678 9012 3458",
+      "targetElement": "canvas#ocr-doc-en",
+      "location": "English Scanned Document -> Aadhaar Number",
+      "language": "eng",
+      "shouldRedact": true,
+      "checksumValid": true
+    },
+    {
+      "type": "pan",
+      "value": "ABCPE5678G",
+      "targetElement": "canvas#ocr-doc-en",
+      "location": "English Scanned Document -> Permanent Account (PAN)",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "none",
+      "value": "Order ID: 9876543210",
+      "targetElement": "canvas#ocr-doc-en",
+      "location": "English Scanned Document -> Footer Verification Code",
+      "reason": "Suppressed by negative prefix in OCR text",
+      "shouldRedact": false
+    },
+    {
+      "type": "name",
+      "value": "राहुल वर्मा",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> नाम / Name",
+      "language": "hin",
+      "shouldRedact": true
+    },
+    {
+      "type": "name",
+      "value": "Rahul Verma",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> नाम / Name (Latin translation)",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "pan",
+      "value": "XYZPC9876L",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> पहचान पत्र / PAN",
+      "language": "eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "phone",
+      "value": "91234 56789",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> मोबाइल / Mobile",
+      "language": "hin+eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "aadhaar",
+      "value": "2345 6789 0124",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> आधार / Aadhaar",
+      "language": "hin+eng",
+      "shouldRedact": true,
+      "checksumValid": true
+    },
+    {
+      "type": "location",
+      "value": "१२३ सिविल लाइन्स, नई दिल्ली (123 Civil Lines, New Delhi)",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> पता / Address",
+      "language": "hin+eng",
+      "shouldRedact": true
+    },
+    {
+      "type": "none",
+      "value": "नागरिक पहचान पत्र / CITIZEN IDENTITY CARD",
+      "targetElement": "img#ocr-img-hi",
+      "location": "Hindi Identity Card -> Header title",
+      "reason": "Benign document title header",
+      "shouldRedact": false
+    }
+  ]
+}

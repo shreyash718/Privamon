@@ -66,6 +66,36 @@ const loopModeToggle  = document.getElementById('loopModeToggle');
 const loopHintPill    = document.getElementById('loopHintPill');
 const stopLoopBtn     = document.getElementById('stopLoopBtn');
 
+// ── Mode Navigation Tabs DOM References ──
+const tabModeAgent          = document.getElementById('tabModeAgent');
+const tabModeRedaction      = document.getElementById('tabModeRedaction');
+const agentViewContainer    = document.getElementById('agentViewContainer');
+const redactionViewContainer= document.getElementById('redactionViewContainer');
+
+// ── Redaction Testing Tab DOM References ──
+const runRedactionTestBtn   = document.getElementById('runRedactionTestBtn');
+const heroStartTestBtn      = document.getElementById('heroStartTestBtn');
+const openBrowserTabBtn     = document.getElementById('openBrowserTabBtn');
+const redactionTargetUrl    = document.getElementById('redactionTargetUrl');
+const redactionProgressCard = document.getElementById('redactionProgressCard');
+const redactionProgressHeadline = document.getElementById('redactionProgressHeadline');
+const redactionProgressSub  = document.getElementById('redactionProgressSub');
+const redactionEmptyState   = document.getElementById('redactionEmptyState');
+const redactionContentLoaded= document.getElementById('redactionContentLoaded');
+const statRedactedCount     = document.getElementById('statRedactedCount');
+const statReviewCount       = document.getElementById('statReviewCount');
+const statKeptCount         = document.getElementById('statKeptCount');
+const statLatencyTime       = document.getElementById('statLatencyTime');
+const viewToggleRedacted    = document.getElementById('viewToggleRedacted');
+const viewToggleOriginal    = document.getElementById('viewToggleOriginal');
+const downloadRedactedBtn   = document.getElementById('downloadRedactedBtn');
+const expandRedactedBtn     = document.getElementById('expandRedactedBtn');
+const redactionImageFrame   = document.getElementById('redactionImageFrame');
+const redactionPreviewImg   = document.getElementById('redactionPreviewImg');
+const imgBadgeOverlay       = document.getElementById('imgBadgeOverlay');
+const badgeTotalItems       = document.getElementById('badgeTotalItems');
+const detectionsList        = document.getElementById('detectionsList');
+
 // ── Local State ──
 let isBusy = false;
 let isAutopilotEnabled = true;
@@ -75,6 +105,9 @@ let activeTurnImageUrl = '';
 let currentTurns = [];
 let activeInspectorTurn = null;
 let activeInspectorTab = 'raw';
+let currentMode = 'agent'; // 'agent' or 'redaction'
+let testRedactionResult = null;
+let currentRedactionView = 'redacted'; // 'redacted' or 'original'
 
 // ── Detect Side Panel vs Popup Mode ──
 function detectViewMode() {
@@ -107,6 +140,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   await checkServerHealth();
   await loadChatHistory();
+  await initModeAndRedactionTab();
   setupEventListeners();
 });
 
@@ -261,6 +295,54 @@ function setupEventListeners() {
   openResultsPageBtn.addEventListener('click', () => {
     chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
   });
+
+  // Mode Navigation Tabs listeners
+  if (tabModeAgent) {
+    tabModeAgent.addEventListener('click', () => switchMode('agent'));
+  }
+  if (tabModeRedaction) {
+    tabModeRedaction.addEventListener('click', () => switchMode('redaction'));
+  }
+
+  // Redaction testing tab listeners
+  if (runRedactionTestBtn) {
+    runRedactionTestBtn.addEventListener('click', runRedactionTest);
+  }
+  if (heroStartTestBtn) {
+    heroStartTestBtn.addEventListener('click', runRedactionTest);
+  }
+  if (openBrowserTabBtn) {
+    openBrowserTabBtn.addEventListener('click', openInBrowserTab);
+  }
+
+  // View toggle: Redacted vs Original
+  if (viewToggleRedacted) {
+    viewToggleRedacted.addEventListener('click', () => {
+      currentRedactionView = 'redacted';
+      viewToggleRedacted.classList.add('active');
+      if (viewToggleOriginal) viewToggleOriginal.classList.remove('active');
+      updateRedactionPreviewImage();
+    });
+  }
+  if (viewToggleOriginal) {
+    viewToggleOriginal.addEventListener('click', () => {
+      currentRedactionView = 'original';
+      viewToggleOriginal.classList.add('active');
+      if (viewToggleRedacted) viewToggleRedacted.classList.remove('active');
+      updateRedactionPreviewImage();
+    });
+  }
+
+  // Tool buttons: Download, Expand, and Lightbox
+  if (downloadRedactedBtn) {
+    downloadRedactedBtn.addEventListener('click', downloadRedactedImage);
+  }
+  if (expandRedactedBtn) {
+    expandRedactedBtn.addEventListener('click', openRedactedInLightbox);
+  }
+  if (redactionImageFrame) {
+    redactionImageFrame.addEventListener('click', openRedactedInLightbox);
+  }
 
   // Helper to synchronize loop toggle state
   function updateLoopModeUI(enabled) {
@@ -735,18 +817,24 @@ async function submitChatQuery(query) {
 }
 
 function updateProgressUI(statusText, stageId) {
-  progressHeadline.textContent = statusText;
+  if (progressHeadline) progressHeadline.textContent = statusText;
+  if (redactionProgressHeadline) redactionProgressHeadline.textContent = statusText;
+
+  let subText = '';
   if (stageId === 'capture') {
-    progressSub.textContent = 'Taking atomic high-res snapshot of active tab';
+    subText = 'Taking atomic high-res snapshot of active tab';
   } else if (stageId === 'dom') {
-    progressSub.textContent = 'Analyzing interactive DOM elements and input fields';
+    subText = 'Analyzing interactive DOM elements and input fields';
   } else if (stageId === 'redaction') {
-    progressSub.textContent = 'Running local OCR, NER, and face detection blur';
+    subText = 'Running local OCR, NER, and face detection blur';
   } else if (stageId === 'server') {
-    progressSub.textContent = 'Querying local vision agent model via Ollama/vLLM';
+    subText = 'Querying local vision agent model via Ollama/vLLM';
   } else if (stageId === 'autopilot') {
-    progressSub.textContent = 'Auto-pilot: executing actions and re-analyzing...';
+    subText = 'Auto-pilot: executing actions and re-analyzing...';
   }
+
+  if (progressSub) progressSub.textContent = subText;
+  if (redactionProgressSub) redactionProgressSub.textContent = subText;
 }
 
 // ── Turn Card Builder (Matches Hand-Drawn Wireframe) ──
@@ -1333,4 +1421,224 @@ function formatSyntaxHighlight(raw) {
     }
     return `<span class="${cls}">${match}</span>`;
   });
+}
+
+// ──────────────────────────────────────────────────────────────
+// Redaction Testing Tab Controller (100% Local • Zero Server)
+// ──────────────────────────────────────────────────────────────
+
+async function initModeAndRedactionTab() {
+  try {
+    const stored = await chrome.storage.local.get(['privamon_active_mode']);
+    if (stored && stored.privamon_active_mode === 'redaction') {
+      switchMode('redaction');
+    }
+  } catch (e) {}
+
+  updateRedactionTargetUrl();
+
+  // Check if session storage already has a previous redaction result to display
+  try {
+    const sessionData = await chrome.storage.session.get(['privamon_result']);
+    if (sessionData && sessionData.privamon_result && sessionData.privamon_result.sanitizedScreenshot) {
+      const res = sessionData.privamon_result;
+      testRedactionResult = {
+        sanitizedScreenshot: res.sanitizedScreenshot,
+        originalScreenshot: res.originalScreenshot || res.sanitizedScreenshot,
+        detections: res.detections || [],
+        redactions: res.redactions || [],
+        reviews: res.reviews || [],
+        kept: res.kept || [],
+        detectionSummary: res.detectionSummary || { total: 0, byType: {}, bySource: {} },
+        timings: res.timings || {},
+        pageTitle: res.pageTitle || 'Active Page'
+      };
+      renderRedactionTestResults(testRedactionResult);
+    }
+  } catch (e) {}
+}
+
+function switchMode(mode) {
+  currentMode = mode;
+  if (mode === 'agent') {
+    if (tabModeAgent) {
+      tabModeAgent.classList.add('active');
+      tabModeAgent.setAttribute('aria-selected', 'true');
+    }
+    if (tabModeRedaction) {
+      tabModeRedaction.classList.remove('active');
+      tabModeRedaction.setAttribute('aria-selected', 'false');
+    }
+    if (agentViewContainer) {
+      agentViewContainer.classList.remove('hidden');
+      agentViewContainer.classList.add('active');
+    }
+    if (redactionViewContainer) {
+      redactionViewContainer.classList.add('hidden');
+      redactionViewContainer.classList.remove('active');
+    }
+  } else {
+    if (tabModeRedaction) {
+      tabModeRedaction.classList.add('active');
+      tabModeRedaction.setAttribute('aria-selected', 'true');
+    }
+    if (tabModeAgent) {
+      tabModeAgent.classList.remove('active');
+      tabModeAgent.setAttribute('aria-selected', 'false');
+    }
+    if (redactionViewContainer) {
+      redactionViewContainer.classList.remove('hidden');
+      redactionViewContainer.classList.add('active');
+    }
+    if (agentViewContainer) {
+      agentViewContainer.classList.add('hidden');
+      agentViewContainer.classList.remove('active');
+    }
+    updateRedactionTargetUrl();
+  }
+
+  try {
+    chrome.storage.local.set({ privamon_active_mode: mode }).catch(() => {});
+  } catch (e) {}
+}
+
+async function updateRedactionTargetUrl() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (tabs && tabs[0]) {
+      const title = tabs[0].title || 'Active Web Page';
+      const url = tabs[0].url || '';
+      if (redactionTargetUrl) {
+        const displayUrl = url.length > 45 ? url.slice(0, 45) + '...' : url;
+        redactionTargetUrl.textContent = `${title} (${displayUrl})`;
+      }
+    }
+  } catch (e) {
+    if (redactionTargetUrl) redactionTargetUrl.textContent = 'Active Browser Tab';
+  }
+}
+
+async function runRedactionTest() {
+  if (isBusy) return;
+  isBusy = true;
+
+  if (runRedactionTestBtn) runRedactionTestBtn.disabled = true;
+  if (heroStartTestBtn) heroStartTestBtn.disabled = true;
+  if (redactionProgressCard) redactionProgressCard.classList.remove('hidden');
+  if (redactionEmptyState) redactionEmptyState.classList.add('hidden');
+  if (redactionProgressHeadline) redactionProgressHeadline.textContent = 'Starting On-Device Test...';
+  if (redactionProgressSub) redactionProgressSub.textContent = 'Zero server traffic • 100% In-Browser WebAssembly';
+
+  try {
+    const resp = await chrome.runtime.sendMessage({ action: 'testRedactionOnly' });
+    if (!resp || !resp.success) {
+      throw new Error(resp?.error || 'Redaction test returned no data');
+    }
+
+    testRedactionResult = resp;
+    renderRedactionTestResults(resp);
+  } catch (err) {
+    console.error('[Popup] Redaction test error:', err);
+    if (redactionProgressHeadline) redactionProgressHeadline.textContent = 'Redaction Test Failed';
+    if (redactionProgressSub) redactionProgressSub.textContent = err.message || 'Error executing test pipeline';
+  } finally {
+    isBusy = false;
+    if (runRedactionTestBtn) runRedactionTestBtn.disabled = false;
+    if (heroStartTestBtn) heroStartTestBtn.disabled = false;
+    setTimeout(() => {
+      if (redactionProgressCard) redactionProgressCard.classList.add('hidden');
+    }, 1200);
+  }
+}
+
+function renderRedactionTestResults(resp) {
+  if (!resp || !resp.sanitizedScreenshot) return;
+
+  if (redactionEmptyState) redactionEmptyState.classList.add('hidden');
+  if (redactionContentLoaded) redactionContentLoaded.classList.remove('hidden');
+
+  const redactions = resp.redactions || [];
+  const reviews = resp.reviews || [];
+  const kept = resp.kept || [];
+  const timings = resp.timings || {};
+
+  if (statRedactedCount) statRedactedCount.textContent = redactions.length;
+  if (statReviewCount) statReviewCount.textContent = reviews.length;
+  if (statKeptCount) statKeptCount.textContent = kept.length;
+  if (statLatencyTime) statLatencyTime.textContent = timings.total ? `${timings.total}ms` : '<300ms';
+
+  currentRedactionView = 'redacted';
+  if (viewToggleRedacted) viewToggleRedacted.classList.add('active');
+  if (viewToggleOriginal) viewToggleOriginal.classList.remove('active');
+  updateRedactionPreviewImage();
+
+  if (detectionsList) {
+    detectionsList.innerHTML = '';
+    const allDets = [...redactions, ...reviews, ...kept];
+    if (badgeTotalItems) badgeTotalItems.textContent = `${allDets.length} items`;
+
+    if (allDets.length === 0) {
+      detectionsList.innerHTML = '<div style="padding: 14px; color: var(--text-dim); text-align: center;">No PII or sensitive patterns detected on this page</div>';
+    } else {
+      allDets.forEach(d => {
+        const row = document.createElement('div');
+        row.className = 'detection-row';
+
+        const dec = (d.decision || (redactions.includes(d) ? 'REDACT' : (reviews.includes(d) ? 'REVIEW' : 'KEEP'))).toLowerCase();
+        const type = d.type || 'other';
+        const txt = d.text || d.originalValue || d.reason || `[${type}]`;
+        const src = (d.source || (d.sources && d.sources[0]) || 'dom').toLowerCase();
+        const conf = typeof d.confidence === 'number' ? Math.round(d.confidence * 100) + '%' : '';
+
+        row.innerHTML = `
+          <div class="detection-left">
+            <span class="det-type-tag ${dec}">${escapeHtml(type)}</span>
+            <span class="det-text-label" title="${escapeHtml(txt)}">${escapeHtml(txt)}</span>
+          </div>
+          <div class="detection-right">
+            <span class="det-source-badge">${escapeHtml(src)}</span>
+            <span class="det-conf-val">${conf}</span>
+          </div>
+        `;
+        detectionsList.appendChild(row);
+      });
+    }
+  }
+}
+
+function updateRedactionPreviewImage() {
+  if (!testRedactionResult || !redactionPreviewImg) return;
+  if (currentRedactionView === 'redacted') {
+    redactionPreviewImg.src = testRedactionResult.sanitizedScreenshot;
+    if (imgBadgeOverlay) imgBadgeOverlay.textContent = 'Redacted View (#000000)';
+  } else {
+    redactionPreviewImg.src = testRedactionResult.originalScreenshot || testRedactionResult.sanitizedScreenshot;
+    if (imgBadgeOverlay) imgBadgeOverlay.textContent = 'Original View (Unredacted)';
+  }
+}
+
+function downloadRedactedImage() {
+  if (!testRedactionResult || !testRedactionResult.sanitizedScreenshot) return;
+  const a = document.createElement('a');
+  a.href = testRedactionResult.sanitizedScreenshot;
+  a.download = `privamon-redaction-test-${Date.now()}.png`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+function openRedactedInLightbox() {
+  if (!testRedactionResult || !testRedactionResult.sanitizedScreenshot) return;
+  const url = (currentRedactionView === 'original' && testRedactionResult.originalScreenshot)
+    ? testRedactionResult.originalScreenshot
+    : testRedactionResult.sanitizedScreenshot;
+  openLightbox(url, currentRedactionView === 'original' ? 'Original Page Snapshot' : 'Redacted Page (Testing Tab)');
+}
+
+function openInBrowserTab() {
+  if (chrome.tabs && typeof chrome.tabs.create === 'function') {
+    chrome.tabs.create({ url: chrome.runtime.getURL('results.html') });
+  } else {
+    window.open('results.html', '_blank');
+  }
 }

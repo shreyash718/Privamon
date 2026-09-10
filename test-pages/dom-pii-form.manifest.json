@@ -1,0 +1,136 @@
+{
+  "page": "dom-pii-form.html",
+  "description": "Ground truth manifest for DOM semantic attribute and keyword validation",
+  "expectedDetections": [
+    {
+      "type": "password",
+      "value": "Synthetic#Pass2026!",
+      "elementId": "user-password",
+      "location": "Section 1: Input Type Semantic Attributes -> Account Password",
+      "matchCriteria": "input[type=password]",
+      "shouldRedact": true
+    },
+    {
+      "type": "email",
+      "value": "fake.developer@synthetic-lab.internal",
+      "elementId": "account-email",
+      "location": "Section 1: Input Type Semantic Attributes -> Primary Email",
+      "matchCriteria": "input[type=email]",
+      "shouldRedact": true
+    },
+    {
+      "type": "phone",
+      "value": "+91 98765 43210",
+      "elementId": "phone-contact",
+      "location": "Section 1: Input Type Semantic Attributes -> Phone Contact",
+      "matchCriteria": "input[type=tel]",
+      "shouldRedact": true
+    },
+    {
+      "type": "creditCard",
+      "value": "4111 1111 1111 1111",
+      "elementId": "cc-number-field",
+      "location": "Section 2: Autocomplete Sensitive Tokens -> Payment Card Number",
+      "matchCriteria": "autocomplete=\"cc-number\"",
+      "shouldRedact": true,
+      "checksumValid": true
+    },
+    {
+      "type": "phone",
+      "value": "+91 91234 56789",
+      "elementId": "tel-national-field",
+      "location": "Section 2: Autocomplete Sensitive Tokens -> Emergency Mobile Number",
+      "matchCriteria": "autocomplete=\"tel\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "dob",
+      "value": "1992-08-14",
+      "elementId": "dob-field",
+      "location": "Section 2: Autocomplete Sensitive Tokens -> Birth Date",
+      "matchCriteria": "autocomplete=\"bday\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "ssn",
+      "value": "987-65-4321",
+      "elementId": "ssn-field",
+      "location": "Section 3: Identity & Financial Keyword Fields -> Social Security Number",
+      "matchCriteria": "name=\"ssn\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "aadhaar",
+      "value": "2345 6789 0124",
+      "elementId": "aadhaar-field",
+      "location": "Section 3: Identity & Financial Keyword Fields -> Indian Aadhaar (UID)",
+      "matchCriteria": "name=\"aadhaar\"",
+      "shouldRedact": true,
+      "checksumValid": true
+    },
+    {
+      "type": "pan",
+      "value": "ABCPE1234F",
+      "elementId": "pan-field",
+      "location": "Section 3: Identity & Financial Keyword Fields -> Permanent Account Number (PAN)",
+      "matchCriteria": "name=\"pan\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "creditCard",
+      "value": "842",
+      "elementId": "cvv-field",
+      "location": "Section 3: Identity & Financial Keyword Fields -> Card Security Code (CVV)",
+      "matchCriteria": "name=\"cvv\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "sensitive_field",
+      "value": "85,000 USD",
+      "elementId": "salary-field",
+      "location": "Section 3: Identity & Financial Keyword Fields -> Annual Base Salary",
+      "matchCriteria": "name=\"salary\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "financial",
+      "value": "SBIN0001234",
+      "elementId": "ifsc-field",
+      "location": "Section 3: Identity & Financial Keyword Fields -> Bank Branch IFSC Code",
+      "matchCriteria": "name=\"ifsc\"",
+      "shouldRedact": true
+    },
+    {
+      "type": "none",
+      "value": "Electric Indigo",
+      "elementId": "fav-color-field",
+      "location": "Section 4: Non-Sensitive Fields -> Favorite Accent Color",
+      "matchCriteria": "benign input",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "value": "M",
+      "elementId": "tshirt-size-field",
+      "location": "Section 4: Non-Sensitive Fields -> Conference T-Shirt Size",
+      "matchCriteria": "benign select",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "value": "TypeScript & Python",
+      "elementId": "pref-lang-field",
+      "location": "Section 4: Non-Sensitive Fields -> Preferred Programming Language",
+      "matchCriteria": "benign input",
+      "shouldRedact": false
+    },
+    {
+      "type": "none",
+      "value": "Privamon is extremely responsive and private!",
+      "elementId": "feedback-field",
+      "location": "Section 4: Non-Sensitive Fields -> General Feedback",
+      "matchCriteria": "benign input",
+      "shouldRedact": false
+    }
+  ]
+}

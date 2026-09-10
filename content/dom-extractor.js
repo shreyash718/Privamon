@@ -59,7 +59,8 @@
     'dob', 'birth', 'age', 'gender', 'sex', 'phone', 'mobile', 'email',
     'address', 'zip', 'postal', 'name', 'fname', 'lname', 'first_name',
     'last_name', 'full_name', 'username', 'user_name', 'user_id', 'userid',
-    'roll_no', 'rollno', 'enrollment', 'student_id', 'login'
+    'roll_no', 'rollno', 'enrollment', 'student_id', 'login',
+    'ifsc', 'swift'
   ];
 
   // Container tags that act as structural layout wrappers
@@ -292,6 +293,19 @@
     const colHeader = findTableColumnHeader(el);
     if (colHeader) return colHeader;
 
+    // Check preceding DOM siblings (including text nodes) for immediate label/prefix context (e.g. Order ID: <span>)
+    let sibling = el.previousSibling;
+    let precedingText = '';
+    while (sibling && precedingText.length < 120) {
+      if (sibling.nodeType === Node.TEXT_NODE || sibling.nodeType === Node.ELEMENT_NODE) {
+        precedingText = (sibling.textContent || '') + precedingText;
+      }
+      sibling = sibling.previousSibling;
+    }
+    if (precedingText.trim()) {
+      return precedingText.trim().slice(-100);
+    }
+
     // Preceding label/dt/th
     const prev = el.previousElementSibling;
     if (prev && (prev.tagName === 'LABEL' || prev.tagName === 'DT' || prev.tagName === 'TH')) {
@@ -325,6 +339,12 @@
    * Walk the DOM tree and collect visible, relevant elements.
    */
   function extractElements() {
+    const rangeMapper = (typeof Privamon !== 'undefined' && Privamon.DOMRangeMapper)
+                     || (typeof window !== 'undefined' && window.Privamon && window.Privamon.DOMRangeMapper)
+                     || (typeof globalThis !== 'undefined' && globalThis.Privamon && globalThis.Privamon.DOMRangeMapper);
+    if (rangeMapper && typeof rangeMapper.resetCounter === 'function') {
+      rangeMapper.resetCounter();
+    }
     const walker = document.createTreeWalker(
       document.body,
       NodeFilter.SHOW_ELEMENT,

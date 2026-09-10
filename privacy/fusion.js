@@ -163,10 +163,14 @@ Privamon.PIIFusion = (() => {
         if (used.has(j)) continue;
         const other = valid[j];
 
-        // Faces must only merge with faces
+        // Faces must only merge with faces; identity document full shields must not merge with token candidates
         const isFaceCurrent = (current.type === 'face');
         const isFaceOther = (other.type === 'face');
         if (isFaceCurrent !== isFaceOther) continue;
+
+        const isDocCurrent = (current.type === 'identity_document');
+        const isDocOther = (other.type === 'identity_document');
+        if (isDocCurrent !== isDocOther) continue;
 
         const overlapIoU = iou(current.bbox, other.bbox);
         const areaCurrent = current.bbox.width * current.bbox.height;
@@ -222,9 +226,10 @@ Privamon.PIIFusion = (() => {
       }
 
       // Assign decision based on named confidence thresholds & checksums
-      // Faces detected by the vision model are high-risk biometric identifiers and must be REDACTED
+      // Faces and Identity Document Shields are high-risk identifiers and must be REDACTED
+      const isDocShield = current.type === 'identity_document' || (current.reason && current.reason.startsWith('document_shield:'));
       let decision = 'KEEP';
-      if (current.checksumValidated || current.type === 'face' || current.confidence >= CONFIDENCE_REDACT_THRESHOLD) {
+      if (current.checksumValidated || current.type === 'face' || isDocShield || current.confidence >= CONFIDENCE_REDACT_THRESHOLD) {
         decision = 'REDACT';
       } else if (current.confidence >= CONFIDENCE_REVIEW_THRESHOLD) {
         decision = 'REVIEW';
@@ -238,9 +243,10 @@ Privamon.PIIFusion = (() => {
       // designed to cover handwritten PII on paper invoices/receipts. These MUST bypass this check.
       const candArea = (current.bbox ? current.bbox.width * current.bbox.height : 0);
       const isFormFieldAnchor = current.reason && (current.reason.startsWith('form_field_anchor:') || current.reason.startsWith('ocr_regex:'));
-      const isGiantContainer = current.type !== 'face' && !isFormFieldAnchor && (
+      const isSingleLineToken = (current.type === 'apiToken') || (current.bbox && current.bbox.height <= 55);
+      const isGiantContainer = current.type !== 'face' && !isDocShield && !isFormFieldAnchor && !isSingleLineToken && (
         (current.bbox && (current.bbox.width > 550 && current.bbox.height > 120)) ||
-        candArea > 45000
+        (candArea > 50000 && current.bbox && current.bbox.height > 80)
       );
 
       if (isGiantContainer) {

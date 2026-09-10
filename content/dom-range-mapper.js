@@ -101,8 +101,8 @@ Privamon.DOMRangeMapper = (() => {
       let match;
       wordRegex.lastIndex = 0;
 
-      // If fullText has characters and doesn't end in space, add separator
-      if (fullText.length > 0 && !/\s$/.test(fullText)) {
+      // If fullText has characters and neither ends in space nor nodeText starts with space, add separator
+      if (fullText.length > 0 && !/\s$/.test(fullText) && !/^\s/.test(nodeText)) {
         fullText += ' ';
       }
       const nodeGlobalBase = fullText.length;

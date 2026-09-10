@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Privamon — Sanitized Screenshot</title>
+  <title>Privamon — Redaction Inspector</title>
   <link rel="stylesheet" href="results.css">
 </head>
 <body>
@@ -18,35 +18,31 @@
             <defs><linearGradient id="g" x1="0" y1="0" x2="28" y2="28"><stop stop-color="#6366f1"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs>
           </svg>
         </div>
-        <h1>Privamon <span class="subtle">Sanitized Result</span></h1>
+        <h1>Privamon <span class="subtle">Redaction Inspector</span></h1>
+        <span class="zero-server-badge">
+          🔒 ZERO SERVER TRANSMISSION (LOCAL TEST)
+        </span>
+        <span class="webgpu-badge" id="webgpuBadge">
+          ⚡ WebGPU Accelerated
+        </span>
       </div>
       <div class="topbar-right">
-        <label class="toggle-label" title="Show/hide candidates flagged for redaction">
-          <input type="checkbox" id="toggleRedact" checked>
-          <span style="color: #ef4444;">● REDACT</span>
-        </label>
-        <label class="toggle-label" title="Show/hide ambiguous candidates requiring review">
-          <input type="checkbox" id="toggleReview" checked>
-          <span style="color: #f59e0b;">● REVIEW</span>
-        </label>
-        <label class="toggle-label" title="Show/hide non-PII/discarded candidates">
-          <input type="checkbox" id="toggleKept">
-          <span style="color: #3b82f6;">● KEEP</span>
-        </label>
-        <label class="toggle-label" title="Show/hide all raw OCR word bounding boxes">
-          <input type="checkbox" id="toggleOcrWords">
-          <span style="color: #10b981;">● OCR Words</span>
-        </label>
-        <label class="toggle-label">
-          <input type="checkbox" id="toggleDom">
-          <span>Show DOM</span>
-        </label>
+        <div class="stats-pill" id="statsPill">
+          <span class="stats-pill-dot"></span>
+          <span id="topbarRedactedCount">0 Components Redacted</span>
+        </div>
+        <button id="toggleOverlaysBtn" type="button" class="btn-secondary" title="Highlight detected bounding boxes on the redacted screenshot">
+          🔍 Highlight Bounding Boxes
+        </button>
+        <button id="retestActiveTabBtn" type="button" class="btn-primary">
+          ⚡ Re-Test Active Page
+        </button>
       </div>
     </header>
 
     <!-- Main Content -->
     <main class="content">
-      <!-- Screenshot Panel -->
+      <!-- Screenshot Panel (Left) -->
       <section class="screenshot-panel" id="screenshotPanel">
         <div class="screenshot-container" id="screenshotContainer">
           <div class="canvas-wrapper">
@@ -66,45 +62,148 @@
         </div>
       </section>
 
-      <!-- Side Panel -->
-      <aside class="side-panel" id="sidePanel">
-        <!-- Detection Summary -->
-        <div class="panel-section">
-          <h2 class="panel-title">Detection Summary</h2>
-          <div class="summary-grid" id="summaryGrid">
+      <!-- Inspector Panel (Right) -->
+      <aside class="inspector-panel" id="inspectorPanel">
+        <!-- Inspector Tab Navigation -->
+        <nav class="inspector-tabs" role="tablist">
+          <button type="button" class="inspector-tab active" id="tabBtnRedactions" data-tab="tab-redactions">
+            <span class="tab-icon">🛡️</span>
+            <span>Redacted Components</span>
+            <span class="tab-badge" id="tabBadgeRedactions">0</span>
+          </button>
+          <button type="button" class="inspector-tab" id="tabBtnDom" data-tab="tab-dom">
+            <span class="tab-icon">🌐</span>
+            <span>Sanitized DOM</span>
+          </button>
+          <button type="button" class="inspector-tab" id="tabBtnOcr" data-tab="tab-ocr">
+            <span class="tab-icon">📄</span>
+            <span>OCR Text</span>
+          </button>
+          <button type="button" class="inspector-tab" id="tabBtnPipeline" data-tab="tab-pipeline">
+            <span class="tab-icon">⚡</span>
+            <span>Pipeline &amp; Stats</span>
+          </button>
+        </nav>
+
+        <!-- Tab 1: Redacted Components (Lists redacted components and WHY they are redacted) -->
+        <div class="tab-pane active" id="tab-redactions">
+          <div class="pane-header">
+            <div>
+              <h2 class="pane-title">Redacted Components</h2>
+              <p class="pane-desc">All sensitive items detected and obscured on this page, with verified reasons.</p>
+            </div>
+            <div class="filter-search-box">
+              <input type="text" id="redactionSearchInput" placeholder="Filter components (e.g. name, aadhaar, phone)..." class="search-input">
+            </div>
+          </div>
+
+          <div class="redactions-list" id="redactionsList">
             <!-- Populated by JS -->
           </div>
         </div>
 
-        <!-- Pipeline Timings -->
-        <div class="panel-section">
-          <h2 class="panel-title">Pipeline Timings</h2>
-          <div class="timings-table" id="timingsTable">
-            <!-- Populated by JS -->
+        <!-- Tab 2: Sanitized DOM Sent to Server -->
+        <div class="tab-pane" id="tab-dom">
+          <div class="pane-header">
+            <div>
+              <h2 class="pane-title">Sanitized DOM Sent to Server</h2>
+              <p class="pane-desc">Sanitized DOM context prepared for autonomous browser agent action planning.</p>
+            </div>
+            <div class="pane-actions">
+              <div class="segmented-control">
+                <button type="button" class="segment-btn active" id="domViewModePrompt">VLM Prompt View</button>
+                <button type="button" class="segment-btn" id="domViewModeJson">Raw JSON</button>
+              </div>
+              <button type="button" class="copy-btn" id="copyDomBtn" title="Copy Sanitized DOM">📋 Copy</button>
+            </div>
+          </div>
+          <div class="code-container">
+            <pre class="code-viewer" id="domCodeViewer"></pre>
           </div>
         </div>
 
-        <!-- Metadata -->
-        <div class="panel-section">
-          <h2 class="panel-title">Metadata</h2>
-          <div class="metadata-list" id="metadataList">
-            <!-- Populated by JS -->
+        <!-- Tab 3: Extracted & Sanitized OCR Text -->
+        <div class="tab-pane" id="tab-ocr">
+          <div class="pane-header">
+            <div>
+              <h2 class="pane-title">OCR Text Analysis</h2>
+              <p class="pane-desc">Text extracted from image pixels alongside sanitized OCR text.</p>
+            </div>
+            <div class="pane-actions">
+              <div class="segmented-control">
+                <button type="button" class="segment-btn active" id="ocrViewModeSplit">Split Comparison</button>
+                <button type="button" class="segment-btn" id="ocrViewModeSanitized">Sanitized Only</button>
+                <button type="button" class="segment-btn" id="ocrViewModeRaw">Raw Extracted</button>
+              </div>
+              <button type="button" class="copy-btn" id="copyOcrBtn" title="Copy OCR Text">📋 Copy</button>
+            </div>
+          </div>
+
+          <div class="ocr-split-container" id="ocrSplitContainer">
+            <div class="ocr-column" id="ocrRawCol">
+              <div class="ocr-col-header">
+                <span class="ocr-col-title">Extracted OCR Text (Raw)</span>
+                <span class="badge badge-raw">Tesseract WASM</span>
+              </div>
+              <pre class="ocr-code-viewer" id="ocrRawViewer"></pre>
+            </div>
+            <div class="ocr-column" id="ocrSanitizedCol">
+              <div class="ocr-col-header">
+                <span class="ocr-col-title">Sanitized OCR Text</span>
+                <span class="badge badge-sanitized">PII Masked</span>
+              </div>
+              <pre class="ocr-code-viewer" id="ocrSanitizedViewer"></pre>
+            </div>
           </div>
         </div>
 
-        <!-- OCR Text Viewer -->
-        <div class="panel-section ocr-section" id="ocrTextSection">
-          <h2 class="panel-title">OCR Text (Raw)</h2>
-          <pre class="dom-viewer" id="ocrRawViewer"></pre>
-          
-          <h2 class="panel-title" style="margin-top: 1rem;">OCR Text (Sanitized)</h2>
-          <pre class="dom-viewer" id="ocrSanitizedViewer"></pre>
-        </div>
-
-        <!-- Sanitized DOM Viewer -->
-        <div class="panel-section dom-section hidden" id="domSection">
-          <h2 class="panel-title">Sanitized DOM</h2>
-          <pre class="dom-viewer" id="domViewer"></pre>
+        <!-- Tab 4: Pipeline Timings & System Stats -->
+        <div class="tab-pane" id="tab-pipeline">
+          <div class="pane-header">
+            <div>
+              <h2 class="pane-title">Pipeline Execution &amp; Stats</h2>
+              <p class="pane-desc">Stage-by-stage timings, viewport metrics, and verification status.</p>
+            </div>
+          </div>
+          <div class="pipeline-section">
+            <h3 class="section-label">⚡ Hardware Acceleration &amp; Execution Engine</h3>
+            <div class="hardware-card" id="hardwareCard">
+              <div class="hardware-row">
+                <span class="hw-key">WebGPU Hardware Provider:</span>
+                <span class="hw-val" id="hwWebGpuStatus">Checking...</span>
+              </div>
+              <div class="hardware-row">
+                <span class="hw-key">Active GPU Device / Adapter:</span>
+                <span class="hw-val" id="hwGpuAdapter">Querying hardware...</span>
+              </div>
+              <div class="hardware-row">
+                <span class="hw-key">ONNX Runtime Execution:</span>
+                <span class="hw-val">WebGPU JSEP Compute Shaders (Primary) + WASM SIMD (Fallback)</span>
+              </div>
+              <div class="hardware-row">
+                <span class="hw-key">Local Models Running:</span>
+                <span class="hw-val">UltraFace RFB-320 ONNX + Xenova/bert-base-NER + Tesseract WASM</span>
+              </div>
+            </div>
+          </div>
+          <div class="pipeline-section">
+            <h3 class="section-label">Detection Breakdown</h3>
+            <div class="summary-chips" id="summaryChips">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+          <div class="pipeline-section">
+            <h3 class="section-label">Pipeline Stage Timings</h3>
+            <div class="timings-table" id="timingsTable">
+              <!-- Populated by JS -->
+            </div>
+          </div>
+          <div class="pipeline-section">
+            <h3 class="section-label">Environment &amp; Viewport Metadata</h3>
+            <div class="metadata-list" id="metadataList">
+              <!-- Populated by JS -->
+            </div>
+          </div>
         </div>
       </aside>
     </main>
