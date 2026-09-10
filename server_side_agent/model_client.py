@@ -181,7 +181,13 @@ def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: i
         href_content = el.get("href") or attrs.get("href")
         href = f" href=\"{str(href_content)[:60]}\"" if href_content else ""
         
-        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}{href}>{text}</{tag}>")
+        options = el.get("options")
+        opt_str = ""
+        if options and isinstance(options, list):
+            opt_labels = [f"{o.get('text', '')}" if isinstance(o, dict) else str(o) for o in options[:8]]
+            opt_str = f" options=[{', '.join(opt_labels)}]"
+
+        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}{href}{opt_str}>{text}</{tag}>")
 
     return "\n".join(lines)
 
@@ -285,6 +291,13 @@ YOUTUBE-SPECIFIC GUIDANCE (CRITICAL FOR DEMO):
 - A video or playlist is "playing" ONLY when the page URL contains "/watch?v=" or a playlist player is loaded. If the URL still contains "/results" you are on the search results page, NOT watching/playing the media.
 - When clicking a video or playlist title on YouTube, use action type "click" with the exact elementId of the title link. The browser extension will handle SPA navigation.
 - If multiple video-title or playlist elements exist, prefer the FIRST one that is NOT labeled [MEMBERS ONLY].
+
+SPECIAL GUIDANCE FOR DROPDOWN / SELECT ELEMENTS:
+- When asked to select or choose an option from a dropdown (e.g. "select fourth semester from dropdown", "select semester 4", "choose option"):
+  1. Look for elements with tag="select", type="select", or label/id matching the field (e.g. label="Semester").
+  2. ALWAYS use action type "select" targeting that elementId.
+  3. In the "value" field, provide the option value or text (e.g. "4th Semester", "fourth semester", or "4").
+  4. DO NOT use action type "click" or "type" when interacting with a native <select> dropdown. Use action type "select".
 
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
@@ -1476,6 +1489,69 @@ def _normalize_contact_chat_action(
 
     return resp
 
+def _normalize_select_dropdown_action(
+    resp: InterpretResponse,
+    task: str,
+    sanitized_dom: Union[list, str, None],
+    prior_actions: list = None
+):
+    """
+    Normalizes select / dropdown actions:
+    - If task mentions selecting an option from a dropdown or choosing a semester/value,
+      finds the select element in sanitized_dom and sets action.type = 'select'.
+    - If action targets a <select> element, forces action.type = 'select'.
+    - Ensures action.value reflects the requested option.
+    """
+    if not resp or not resp.action:
+        return
+
+    clean_task = clean_task_text(task)
+    is_dropdown_task = bool(
+        re.search(r'\b(select|choose|pick)\b.*?\b(dropdown|semester|option|item|sem)\b', clean_task, re.I)
+        or re.search(r'\b(first|second|third|fourth|forth|fifth|sixth|seventh|eighth|\d+(?:st|nd|rd|th)?)\s+sem(?:ester)?\b', clean_task, re.I)
+    )
+
+    # Check if target is already a select element
+    target_is_select = False
+    target_select_el = None
+    if isinstance(sanitized_dom, list) and resp.action.targetElementId:
+        for el in sanitized_dom:
+            el_id = el.get("elementId") or el.get("id")
+            if el_id == resp.action.targetElementId:
+                if (el.get("tag") or "").lower() == "select" or el.get("inputType") == "select":
+                    target_is_select = True
+                    target_select_el = el
+                break
+
+    # If it's a dropdown task and target is not a select, find the matching select element in DOM
+    if is_dropdown_task and not target_is_select and isinstance(sanitized_dom, list):
+        for el in sanitized_dom:
+            tag = (el.get("tag") or "").lower()
+            inp_type = (el.get("inputType") or "").lower()
+            lbl = (el.get("label") or "").lower()
+            eid = str(el.get("elementId") or el.get("id") or "").lower()
+            if tag == "select" or inp_type == "select":
+                if "semester" in clean_task.lower() or "sem" in clean_task.lower():
+                    if "semester" in lbl or "sem" in lbl or "semester" in eid or "sem" in eid:
+                        target_select_el = el
+                        target_is_select = True
+                        resp.action.targetElementId = el.get("elementId") or el.get("id")
+                        break
+                if not target_select_el:
+                    target_select_el = el
+                    target_is_select = True
+                    resp.action.targetElementId = el.get("elementId") or el.get("id")
+
+    if target_is_select:
+        resp.action.type = "select"
+        if not resp.action.value and is_dropdown_task:
+            m = re.search(r'\b(first|second|third|fourth|forth|fifth|sixth|seventh|eighth|\d+(?:st|nd|rd|th)?)(?:\s+sem(?:ester)?)?\b', clean_task, re.I)
+            if m:
+                resp.action.value = m.group(0).strip()
+            else:
+                resp.action.value = clean_task
+        print(f"[*] Auto-normalizing dropdown action: target={resp.action.targetElementId}, value='{resp.action.value}', type='select'")
+
 def _normalize_action(
     resp: InterpretResponse,
     task: str,
@@ -1494,10 +1570,23 @@ def _normalize_action(
     # 2. Normalize search tasks (YouTube, Flipkart, Amazon)
     _normalize_search_action(resp, task, sanitized_dom, prior_actions=prior_actions)
 
-    # 3. If action has type='click' but non-empty value, model intended to type
+    # 3. Normalize select dropdown tasks
+    _normalize_select_dropdown_action(resp, task, sanitized_dom, prior_actions=prior_actions)
+
+    # 4. If action has type='click' but non-empty value, model intended to type (unless target is a select)
     if resp.action.type == "click" and resp.action.value:
-        print(f"[*] Auto-normalizing action: converted 'click' with value '{resp.action.value}' to 'type'")
-        resp.action.type = "type"
+        target_is_select = False
+        if isinstance(sanitized_dom, list) and resp.action.targetElementId:
+            for el in sanitized_dom:
+                if (el.get("elementId") or el.get("id")) == resp.action.targetElementId:
+                    if (el.get("tag") or "").lower() == "select" or el.get("inputType") == "select":
+                        target_is_select = True
+                    break
+        if target_is_select:
+            resp.action.type = "select"
+        else:
+            print(f"[*] Auto-normalizing action: converted 'click' with value '{resp.action.value}' to 'type'")
+            resp.action.type = "type"
 
     # 4. Standard chat/messaging fallback if not already handled
     contact_name, _ = parse_contact_task(clean_task_text(task))

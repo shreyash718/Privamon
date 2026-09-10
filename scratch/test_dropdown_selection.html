@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Test University Dropdown Selection</title>
+</head>
+<body style="font-family: sans-serif; padding: 20px;">
+  <h2>Student Result Portal Simulation</h2>
+  <table>
+    <tr>
+      <td>Roll No</td>
+      <td>
+        <input type="text" id="ctl00_ContentPlaceHolder1_txtRollNo" name="ctl00$ContentPlaceHolder1$txtRollNo" value="24001003121">
+      </td>
+      <td>Semester</td>
+      <td>
+        <select id="ctl00_ContentPlaceHolder1_ddlSemester" name="ctl00$ContentPlaceHolder1$ddlSemester">
+          <option value="0">&lt;--Select--&gt;</option>
+          <option value="1">1st Semester</option>
+          <option value="2">2nd Semester</option>
+          <option value="3">3rd Semester</option>
+          <option value="4">4th Semester</option>
+          <option value="5">5th Semester</option>
+        </select>
+      </td>
+      <td>
+        <button id="ctl00_ContentPlaceHolder1_btnViewResult" type="button">View Result</button>
+      </td>
+    </tr>
+  </table>
+
+  <div id="status" style="margin-top: 20px; font-weight: bold;"></div>
+
+  <script>
+    window.addEventListener('DOMContentLoaded', async () => {
+      const results = [];
+      try {
+        const ddl = document.getElementById('ctl00_ContentPlaceHolder1_ddlSemester');
+
+        // Test 1: DOM Extractor extracts Semester label and options
+        const domRes = await fetch('/content/dom-extractor.js');
+        const domCode = await domRes.text();
+        const dom = window.eval(domCode);
+        const selectEntry = dom.elements.find(e => (e.tag || '').toLowerCase() === 'select');
+        results.push({
+          test: 'DOM Extractor finds select with Semester label and 6 options',
+          pass: Boolean(selectEntry && selectEntry.label === 'Semester' && selectEntry.options?.length === 6),
+          label: selectEntry?.label,
+          optionsCount: selectEntry?.options?.length
+        });
+
+        // Helper to dynamically run action-executor
+        async function runAction(action) {
+          window.__privamon_action = action;
+          const res = await fetch('/content/action-executor.js');
+          const code = await res.text();
+          return window.eval(code);
+        }
+
+        // Test 2: Select 'fourth semster' by exact elementId
+        ddl.selectedIndex = 0;
+        let res2 = await runAction({
+          type: 'select',
+          targetElementId: 'ctl00_ContentPlaceHolder1_ddlSemester',
+          value: 'fourth semster'
+        });
+        results.push({
+          test: 'Select "fourth semster" (misspelled) by exact ID',
+          pass: res2.success && ddl.value === '4' && ddl.selectedIndex === 4,
+          selectedVal: ddl.value,
+          message: res2.message
+        });
+
+        // Test 3: Select by label "Semester" with "4th Semester"
+        ddl.selectedIndex = 0;
+        let res3 = await runAction({
+          type: 'select',
+          targetElementId: 'Semester',
+          value: '4th Semester'
+        });
+        results.push({
+          test: 'Select by label "Semester" with "4th Semester"',
+          pass: res3.success && ddl.value === '4' && ddl.selectedIndex === 4,
+          selectedVal: ddl.value,
+          message: res3.message
+        });
+
+        // Test 4: Select by partial ASP.NET ID "ddlSemester" with "4"
+        ddl.selectedIndex = 0;
+        let res4 = await runAction({
+          type: 'select',
+          targetElementId: 'ddlSemester',
+          value: '4'
+        });
+        results.push({
+          test: 'Select by partial ID "ddlSemester" with "4"',
+          pass: res4.success && ddl.value === '4' && ddl.selectedIndex === 4,
+          selectedVal: ddl.value,
+          message: res4.message
+        });
+
+        // Test 5: type='type' redirected on select
+        ddl.selectedIndex = 0;
+        let res5 = await runAction({
+          type: 'type',
+          targetElementId: 'ctl00_ContentPlaceHolder1_ddlSemester',
+          value: 'fourth semester'
+        });
+        results.push({
+          test: 'type="type" redirected on select',
+          pass: res5.success && ddl.value === '4' && ddl.selectedIndex === 4,
+          selectedVal: ddl.value,
+          message: res5.message
+        });
+
+        // Test 6: type='click' with value on select
+        ddl.selectedIndex = 0;
+        let res6 = await runAction({
+          type: 'click',
+          targetElementId: 'ctl00_ContentPlaceHolder1_ddlSemester',
+          value: 'fourth semester'
+        });
+        results.push({
+          test: 'type="click" with value on select',
+          pass: res6.success && ddl.value === '4' && ddl.selectedIndex === 4,
+          selectedVal: ddl.value,
+          message: res6.message
+        });
+      } catch (err) {
+        results.push({
+          test: 'Unhandled execution error',
+          pass: false,
+          message: err.message || String(err)
+        });
+      }
+
+      // Post back to server
+      try {
+        await fetch('/results', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(results)
+        });
+      } catch (e) {
+        console.error('Fetch post error:', e);
+      }
+    });
+  </script>
+</body>
+</html>

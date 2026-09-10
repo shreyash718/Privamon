@@ -140,6 +140,29 @@
     el = document.querySelector(`[placeholder="${elementId}"]`);
     if (el) return el;
 
+    // Strategy 7: Substring match on ID or name for inputs / selects (handles ASP.NET WebForms prefixes like ctl00_..._ddlSemester)
+    try {
+      const escaped = CSS.escape(elementId);
+      el = document.querySelector(`select[id*="${escaped}" i], select[name*="${escaped}" i], input[id*="${escaped}" i], input[name*="${escaped}" i]`);
+      if (el) return el;
+    } catch (e) {}
+
+    // Strategy 8: Associated label text or nearby table cell matching elementId
+    const labels = document.querySelectorAll('label, th, td, span');
+    for (const lbl of labels) {
+      const lblText = (lbl.textContent || '').trim().toLowerCase();
+      if (lblText && (lblText === elementId.toLowerCase() || lblText.includes(elementId.toLowerCase()))) {
+        if (lbl.htmlFor) {
+          const associated = document.getElementById(lbl.htmlFor);
+          if (associated) return associated;
+        }
+        const nested = lbl.querySelector('select, input, textarea');
+        if (nested) return nested;
+        const adjacent = lbl.closest('tr, td, div, form')?.querySelector('select, input, textarea');
+        if (adjacent) return adjacent;
+      }
+    }
+
     return null;
   }
 
@@ -234,6 +257,204 @@
     });
   }
 
+  /**
+   * Intelligently selects an option in a <select> element supporting:
+   * - Exact value / text match
+   * - Ordinal words (first, second, third, fourth, fifth, sixth, seventh, eighth)
+   * - Number / digit extraction (e.g. "fourth semester" -> 4 -> matches "4th Semester", "4", "IV")
+   * - Roman numerals (I, II, III, IV, V, VI, VII, VIII)
+   * - Substring / fuzzy match
+   * - Index-based fallback
+   * - ASP.NET WebForms / jQuery / HTML5 event dispatching (__doPostBack)
+   */
+  function selectOptionInElement(el, val, targetElementId) {
+    if (!el) {
+      return {
+        success: false,
+        actionType: 'select',
+        targetElementId: targetElementId,
+        message: `Select element not found: "${targetElementId}"`
+      };
+    }
+
+    if (el.tagName !== 'SELECT') {
+      const innerSelect = el.querySelector?.('select');
+      if (innerSelect) {
+        el = innerSelect;
+      } else {
+        // Try clicking it instead (for custom ARIA dropdowns)
+        el.click();
+        return {
+          success: true,
+          actionType: 'select',
+          targetElementId: targetElementId,
+          message: `Clicked non-native select element "${targetElementId}" (custom dropdown)`
+        };
+      }
+    }
+
+    if (!val) {
+      return {
+        success: true,
+        actionType: 'select',
+        targetElementId: targetElementId,
+        message: `No value specified to select on "${targetElementId}"`
+      };
+    }
+
+    const valStr = String(val).trim();
+    const valLower = valStr.toLowerCase();
+
+    // Mapping for ordinals & Roman numerals
+    const ORDINAL_MAP = {
+      'first': 1, '1st': 1, 'i': 1, 'one': 1,
+      'second': 2, '2nd': 2, 'ii': 2, 'two': 2,
+      'third': 3, '3rd': 3, 'iii': 3, 'three': 3,
+      'fourth': 4, 'forth': 4, '4th': 4, 'iv': 4, 'four': 4,
+      'fifth': 5, '5th': 5, 'v': 5, 'five': 5,
+      'sixth': 6, '6th': 6, 'vi': 6, 'six': 6,
+      'seventh': 7, '7th': 7, 'vii': 7, 'seven': 7,
+      'eighth': 8, '8th': 8, 'viii': 8, 'eight': 8,
+      'ninth': 9, '9th': 9, 'ix': 9, 'nine': 9,
+      'tenth': 10, '10th': 10, 'x': 10, 'ten': 10
+    };
+
+    // Extract numeric intent if present (e.g. "fourth semester" -> 4, "sem 4" -> 4, "4" -> 4)
+    let targetNum = null;
+    const numMatch = valLower.match(/\b(\d+)(?:st|nd|rd|th)?\b/);
+    if (numMatch) {
+      targetNum = parseInt(numMatch[1], 10);
+    } else {
+      for (const [word, num] of Object.entries(ORDINAL_MAP)) {
+        const regex = new RegExp(`\\b${word}\\b`, 'i');
+        if (regex.test(valLower)) {
+          targetNum = num;
+          break;
+        }
+      }
+    }
+
+    let matchedOpt = null;
+    let matchedIndex = -1;
+
+    // Strategy 1: Exact match on value or textContent
+    for (let i = 0; i < el.options.length; i++) {
+      const opt = el.options[i];
+      const optVal = (opt.value || '').trim();
+      const optText = (opt.textContent || '').trim();
+      if (optVal.toLowerCase() === valLower || optText.toLowerCase() === valLower) {
+        matchedOpt = opt;
+        matchedIndex = i;
+        break;
+      }
+    }
+
+    // Strategy 2: Numeric / Ordinal match
+    if (!matchedOpt && targetNum !== null) {
+      const romanNumerals = ['', 'i', 'ii', 'iii', 'iv', 'v', 'vi', 'vii', 'viii', 'ix', 'x'];
+      const targetRoman = romanNumerals[targetNum] || '';
+      for (let i = 0; i < el.options.length; i++) {
+        const opt = el.options[i];
+        const optVal = (opt.value || '').trim().toLowerCase();
+        const optText = (opt.textContent || '').trim().toLowerCase();
+
+        // Check if value is the exact number (e.g. value="4")
+        if (optVal === String(targetNum)) {
+          matchedOpt = opt;
+          matchedIndex = i;
+          break;
+        }
+
+        // Check if option text explicitly refers to target number (e.g. "4th Semester", "Semester - 4", "Sem 4")
+        const optNumMatch = optText.match(/\b(\d+)(?:st|nd|rd|th)?\b/);
+        if (optNumMatch && parseInt(optNumMatch[1], 10) === targetNum) {
+          matchedOpt = opt;
+          matchedIndex = i;
+          break;
+        }
+
+        // Check Roman numeral match (e.g. "IV" or "Semester IV")
+        if (targetRoman) {
+          const romanRegex = new RegExp(`\\b${targetRoman}\\b`, 'i');
+          if (romanRegex.test(optText) || romanRegex.test(optVal)) {
+            matchedOpt = opt;
+            matchedIndex = i;
+            break;
+          }
+        }
+      }
+    }
+
+    // Strategy 3: Substring / token containment (excluding placeholders like --Select--)
+    if (!matchedOpt) {
+      for (let i = 0; i < el.options.length; i++) {
+        const opt = el.options[i];
+        const optText = (opt.textContent || '').trim().toLowerCase();
+        if (/select|choose|--/i.test(optText) && i === 0) continue;
+
+        if (optText.includes(valLower) || valLower.includes(optText)) {
+          matchedOpt = opt;
+          matchedIndex = i;
+          break;
+        }
+      }
+    }
+
+    // Strategy 4: Index-based match for 1-based ordinals if reasonable
+    if (!matchedOpt && targetNum !== null) {
+      if (targetNum < el.options.length) {
+        const firstOptText = (el.options[0].textContent || '').toLowerCase();
+        const firstIsPlaceholder = /select|choose|--/i.test(firstOptText) || el.options[0].value === '0' || el.options[0].value === '';
+        const candidateIndex = firstIsPlaceholder ? targetNum : targetNum - 1;
+        if (candidateIndex >= 0 && candidateIndex < el.options.length) {
+          matchedOpt = el.options[candidateIndex];
+          matchedIndex = candidateIndex;
+        }
+      }
+    }
+
+    if (!matchedOpt) {
+      const availableOpts = Array.from(el.options).map(o => o.textContent.trim()).slice(0, 10).join(', ');
+      return {
+        success: false,
+        actionType: 'select',
+        targetElementId: targetElementId,
+        message: `No option matching "${valStr}" found in select. Available options: [${availableOpts}]`
+      };
+    }
+
+    // Apply selection
+    el.selectedIndex = matchedIndex;
+    el.value = matchedOpt.value;
+    matchedOpt.selected = true;
+
+    // Dispatch comprehensive event chain for ASP.NET WebForms & modern frameworks
+    el.focus();
+    el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+
+    // ASP.NET WebForms inline onchange / __doPostBack trigger
+    if (typeof el.onchange === 'function') {
+      try { el.onchange.call(el, new Event('change')); } catch (e) {}
+    } else if (el.getAttribute('onchange')) {
+      try {
+        const oc = el.getAttribute('onchange');
+        if (oc && (oc.includes('__doPostBack') || oc.includes('submit'))) {
+          window.eval?.(oc);
+        }
+      } catch (e) {}
+    }
+
+    el.blur();
+
+    return {
+      success: true,
+      actionType: 'select',
+      targetElementId: targetElementId,
+      message: `Selected "${matchedOpt.textContent.trim()}" (value: "${matchedOpt.value}") in "${targetElementId || el.id || 'select'}"`
+    };
+  }
+
   // ── Execute the action ──
 
   if (actionType === 'click') {
@@ -245,6 +466,12 @@
         targetElementId: targetId,
         message: `Element not found: "${targetId}". It may have changed since the last screenshot.`
       };
+    }
+
+    // If clicked element is a <select> and a value is provided, route directly to option selection
+    if ((el.tagName === 'SELECT' || el.querySelector?.('select')) && value) {
+      const selectEl = el.tagName === 'SELECT' ? el : el.querySelector('select');
+      return selectOptionInElement(selectEl, value, targetId);
     }
 
     // We can't await in a synchronous IIFE return, so we use a synchronous click
@@ -347,6 +574,12 @@
         targetElementId: targetId,
         message: 'No value provided to type'
       };
+    }
+
+    // If target is a SELECT element, redirect to selectOptionInElement
+    if (el.tagName === 'SELECT' || el.querySelector?.('select')) {
+      const selectEl = el.tagName === 'SELECT' ? el : el.querySelector('select');
+      return selectOptionInElement(selectEl, cleanValue, targetId);
     }
 
     // If target is a wrapper/container or accidentally targeted button, locate the real editable input
@@ -617,57 +850,26 @@
   }
 
   if (actionType === 'select') {
-    const el = findElement(targetId);
+    let el = findElement(targetId);
     if (!el) {
-      return {
-        success: false,
-        actionType: 'select',
-        targetElementId: targetId,
-        message: `Select element not found: "${targetId}"`
-      };
-    }
-
-    if (el.tagName !== 'SELECT') {
-      // Try clicking it instead (for custom dropdowns)
-      el.click();
-      return {
-        success: true,
-        actionType: 'select',
-        targetElementId: targetId,
-        message: `Clicked non-native select element "${targetId}" (custom dropdown)`
-      };
-    }
-
-    if (value) {
-      // Try matching by value first, then by visible text
-      let matched = false;
-      for (const opt of el.options) {
-        if (opt.value === value || opt.textContent.trim().toLowerCase() === value.toLowerCase()) {
-          el.value = opt.value;
-          matched = true;
-          break;
+      // Fallback: search for any select on the page if targetId mentions select/semester or if only 1 select
+      const allSelects = document.querySelectorAll('select');
+      if (allSelects.length === 1) {
+        el = allSelects[0];
+      } else if (targetId) {
+        for (const s of allSelects) {
+          const sId = (s.id || '').toLowerCase();
+          const sName = (s.name || '').toLowerCase();
+          const tId = targetId.toLowerCase();
+          if (sId.includes(tId) || sName.includes(tId) || tId.includes(sId) || tId.includes('semester')) {
+            el = s;
+            break;
+          }
         }
       }
-
-      if (!matched) {
-        return {
-          success: false,
-          actionType: 'select',
-          targetElementId: targetId,
-          message: `No option matching "${value}" found in select`
-        };
-      }
     }
 
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-
-    return {
-      success: true,
-      actionType: 'select',
-      targetElementId: targetId,
-      message: `Selected "${value}" in "${targetId}"`
-    };
+    return selectOptionInElement(el, value, targetId);
   }
 
   if (actionType === 'wait') {

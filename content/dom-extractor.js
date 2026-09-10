@@ -226,6 +226,15 @@
       return prev.textContent.trim().slice(0, 200);
     }
 
+    // Table layout: check previous cell (td/th) in the same row
+    const cell = el.closest('td');
+    if (cell && cell.previousElementSibling) {
+      const prevCellText = cell.previousElementSibling.textContent.trim();
+      if (prevCellText && prevCellText.length <= 80) {
+        return prevCellText.slice(0, 200);
+      }
+    }
+
     return '';
   }
 
@@ -526,6 +535,14 @@
         inputType = 'textarea';
       } else if (tag === 'SELECT') {
         inputType = 'select';
+        const rawOptions = Array.from(el.options || []).map((o, idx) => ({
+          index: idx,
+          value: o.value,
+          text: (o.textContent || '').trim()
+        })).filter(o => o.text.length > 0 || o.value.length > 0);
+        if (rawOptions.length > 0) {
+          entry.options = rawOptions.slice(0, 30);
+        }
       } else if (isContentEditable) {
         inputType = 'contenteditable';
       } else if (isRoleInput) {
