@@ -330,18 +330,30 @@
 
     <!-- Fullscreen Image Lightbox Modal -->
     <div class="lightbox-modal hidden" id="imageLightbox">
-      <div class="lightbox-backdrop" id="lightboxBackdrop"></div>
+      <div class="lightbox-backdrop" id="lightboxBackdrop" title="Click to go back"></div>
       <div class="lightbox-content">
         <div class="lightbox-header">
-          <span class="lightbox-title" id="lightboxTitle">Redacted Image Sent to Server</span>
+          <div class="lightbox-left-cluster">
+            <button type="button" class="lightbox-back-btn" id="lightboxBackBtn" title="Back to Agent Timeline (Esc)">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"></line>
+                <polyline points="12 19 5 12 12 5"></polyline>
+              </svg>
+              <span>Back</span>
+            </button>
+            <span class="lightbox-title" id="lightboxTitle" title="Redacted Image Sent to Server">Redacted Image Sent to Server</span>
+          </div>
           <div class="lightbox-actions">
-            <button class="icon-btn" id="openResultsPageBtn" title="Inspect Full Pipeline Detections">
+            <button type="button" class="btn-stop-loop-lightbox hidden" id="lightboxStopLoopBtn" title="Stop the running autonomous agent loop">
+              <span>⏹ Stop Loop</span>
+            </button>
+            <button class="icon-btn" id="openResultsPageBtn" title="Inspect Full Pipeline Detections in Tab">
               <span>View Full Details ↗</span>
             </button>
-            <button class="icon-btn close-btn" id="closeLightboxBtn" title="Close Lightbox">✕</button>
+            <button class="icon-btn close-btn" id="closeLightboxBtn" title="Close and return (Esc)" aria-label="Close">✕</button>
           </div>
         </div>
-        <div class="lightbox-image-wrapper">
+        <div class="lightbox-image-wrapper" id="lightboxImageWrapper">
           <img id="lightboxImg" src="" alt="Redacted Screenshot Preview">
         </div>
       </div>

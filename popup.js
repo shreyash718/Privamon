@@ -39,6 +39,9 @@ const emptyState        = document.getElementById('emptyState');
 const imageLightbox     = document.getElementById('imageLightbox');
 const lightboxBackdrop  = document.getElementById('lightboxBackdrop');
 const closeLightboxBtn  = document.getElementById('closeLightboxBtn');
+const lightboxBackBtn   = document.getElementById('lightboxBackBtn');
+const lightboxImageWrapper = document.getElementById('lightboxImageWrapper');
+const lightboxStopLoopBtn = document.getElementById('lightboxStopLoopBtn');
 const lightboxImg       = document.getElementById('lightboxImg');
 const openResultsPageBtn= document.getElementById('openResultsPageBtn');
 
@@ -223,9 +226,34 @@ function setupEventListeners() {
     }
   });
 
-  // Lightbox close
-  closeLightboxBtn.addEventListener('click', closeLightbox);
-  lightboxBackdrop.addEventListener('click', closeLightbox);
+  // Lightbox navigation & close handlers
+  if (closeLightboxBtn) closeLightboxBtn.addEventListener('click', closeLightbox);
+  if (lightboxBackBtn) lightboxBackBtn.addEventListener('click', closeLightbox);
+  if (lightboxBackdrop) lightboxBackdrop.addEventListener('click', closeLightbox);
+  if (lightboxImageWrapper) {
+    lightboxImageWrapper.addEventListener('click', (e) => {
+      // Clicking the empty space/margins around the image closes the lightbox
+      if (e.target === lightboxImageWrapper) {
+        closeLightbox();
+      }
+    });
+  }
+
+  // Stop loop action from within lightbox
+  if (lightboxStopLoopBtn) {
+    lightboxStopLoopBtn.addEventListener('click', handleStopLoop);
+  }
+
+  // Global Escape key listener to close active modal / lightbox
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (imageLightbox && !imageLightbox.classList.contains('hidden')) {
+        closeLightbox();
+      } else if (vlmInspectorModal && !vlmInspectorModal.classList.contains('hidden')) {
+        closeVlmInspector();
+      }
+    }
+  });
 
   // Raw VLM Inspector Header Action
   if (openInspectorHeaderBtn) {
@@ -371,18 +399,7 @@ function setupEventListeners() {
 
   // Stop loop button in progress bar
   if (stopLoopBtn) {
-    stopLoopBtn.addEventListener('click', async () => {
-      stopLoopBtn.disabled = true;
-      stopLoopBtn.textContent = 'Stopping...';
-      if (isExtensionContext) {
-        await chrome.runtime.sendMessage({ action: 'stopActionLoop' });
-      }
-      setTimeout(() => {
-        stopLoopBtn.disabled = false;
-        stopLoopBtn.innerHTML = '<span>⏹ Stop</span>';
-        stopLoopBtn.classList.add('hidden');
-      }, 500);
-    });
+    stopLoopBtn.addEventListener('click', handleStopLoop);
   }
 
   // Listen for pipeline progress from background service worker
@@ -413,12 +430,11 @@ function setupEventListeners() {
     // Auto-pilot progress
     if (message.type === 'autopilotProgress') {
       activeProgressCard.classList.remove('hidden');
-      if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
       updateProgressUI(message.message || 'Auto-pilot running...', 'autopilot');
       if (message.status === 'done' || message.status === 'paused' || message.status === 'error') {
         isAutopilotRunning = false;
         isBusy = false;
-        if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+        syncStopLoopButtons(false);
         if (message.status === 'done') {
           setTimeout(() => { activeProgressCard.classList.add('hidden'); }, 2500);
         } else {
@@ -430,6 +446,7 @@ function setupEventListeners() {
       } else {
         isAutopilotRunning = true;
         isBusy = true;
+        syncStopLoopButtons(true);
         taskInput.disabled = true;
         sendBtn.disabled = true;
       }
@@ -437,7 +454,7 @@ function setupEventListeners() {
     if (message.type === 'autopilotComplete') {
       isAutopilotRunning = false;
       isBusy = false;
-      if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+      syncStopLoopButtons(false);
       activeProgressCard.classList.add('hidden');
       taskInput.disabled = false;
       sendBtn.disabled = false;
@@ -642,7 +659,7 @@ async function submitChatQuery(query) {
 
   if (isExtensionContext && isAutopilotEnabled) {
     isAutopilotRunning = true;
-    if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
+    syncStopLoopButtons(true);
     chrome.runtime.sendMessage({
       action: 'executeActionLoop',
       task: query,
@@ -655,7 +672,7 @@ async function submitChatQuery(query) {
       isBusy = false;
       taskInput.disabled = false;
       sendBtn.disabled = false;
-      if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+      syncStopLoopButtons(false);
     });
     return;
   }
@@ -741,7 +758,8 @@ async function submitChatQuery(query) {
         if (conf >= 0.45) {
           // Launch auto-pilot loop via background
           activeProgressCard.classList.remove('hidden');
-          if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
+          isAutopilotRunning = true;
+          syncStopLoopButtons(true);
           progressHeadline.textContent = 'Auto-Pilot Loop Active';
           progressSub.textContent = `Executing ${turn.action.type} and verifying task completion...`;
           isBusy = true;
@@ -756,8 +774,9 @@ async function submitChatQuery(query) {
           }).catch(err => {
             console.warn('[Popup] Auto-pilot loop error:', err);
             isBusy = false;
+            isAutopilotRunning = false;
             activeProgressCard.classList.add('hidden');
-            if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+            syncStopLoopButtons(false);
             taskInput.disabled = false;
             sendBtn.disabled = false;
           });
@@ -1115,9 +1134,10 @@ function createTurnCard(turn, isError = false) {
       btn.innerHTML = '<span class="loop-icon">⟳</span><span class="loop-label">Running...</span>';
 
       activeProgressCard.classList.remove('hidden');
-      if (stopLoopBtn) stopLoopBtn.classList.remove('hidden');
+      isAutopilotRunning = true;
+      syncStopLoopButtons(true);
       progressHeadline.textContent = 'Auto-Pilot Loop Started';
-      progressSub.textContent = `Running autonomous verification loop for "${turn.task || 'task'}"...`;
+      progressSub.textContent = `Running autonomous verification loop for "${cleanTaskForDisplay(turn.task) || 'task'}"...`;
       isBusy = true;
       taskInput.disabled = true;
       sendBtn.disabled = true;
@@ -1132,8 +1152,9 @@ function createTurnCard(turn, isError = false) {
       } catch (err) {
         console.warn('[Popup] Run loop error:', err);
         isBusy = false;
+        isAutopilotRunning = false;
         activeProgressCard.classList.add('hidden');
-        if (stopLoopBtn) stopLoopBtn.classList.add('hidden');
+        syncStopLoopButtons(false);
         taskInput.disabled = false;
         sendBtn.disabled = false;
       }
@@ -1188,10 +1209,60 @@ function createTurnCard(turn, isError = false) {
 }
 
 // ── Lightbox Helpers ──
+function cleanTaskForDisplay(rawTask) {
+  if (!rawTask) return '';
+  let t = rawTask.replace(/\[(?:STEP GUIDANCE|VERIFY TASK COMPLETION|outcome|pos|REDACTED)[^\]]*\]/gis, '');
+  t = t.replace(/\[.*?\]/gs, '').trim();
+  t = t.replace(/\s+/g, ' ');
+  return t || rawTask.slice(0, 50);
+}
+
+function syncStopLoopButtons(running) {
+  if (stopLoopBtn) stopLoopBtn.classList.toggle('hidden', !running);
+  if (lightboxStopLoopBtn) lightboxStopLoopBtn.classList.toggle('hidden', !running);
+}
+
+async function handleStopLoop() {
+  if (stopLoopBtn) {
+    stopLoopBtn.disabled = true;
+    stopLoopBtn.textContent = 'Stopping...';
+  }
+  if (lightboxStopLoopBtn) {
+    lightboxStopLoopBtn.disabled = true;
+    lightboxStopLoopBtn.textContent = 'Stopping...';
+  }
+  if (isExtensionContext) {
+    try {
+      await chrome.runtime.sendMessage({ action: 'stopActionLoop' });
+    } catch (e) {
+      console.warn('Error sending stopActionLoop message:', e);
+    }
+  }
+  setTimeout(() => {
+    isAutopilotRunning = false;
+    syncStopLoopButtons(false);
+    if (stopLoopBtn) {
+      stopLoopBtn.disabled = false;
+      stopLoopBtn.innerHTML = '<span>⏹ Stop</span>';
+    }
+    if (lightboxStopLoopBtn) {
+      lightboxStopLoopBtn.disabled = false;
+      lightboxStopLoopBtn.innerHTML = '<span>⏹ Stop Loop</span>';
+    }
+  }, 500);
+}
+
 function openLightbox(imageUrl, title) {
   activeTurnImageUrl = imageUrl;
   lightboxImg.src = imageUrl;
-  document.getElementById('lightboxTitle').textContent = title ? `Redacted: ${title}` : 'Redacted Image Sent to Server';
+  const cleanTitle = cleanTaskForDisplay(title);
+  const displayTitle = cleanTitle ? `Redacted: ${cleanTitle}` : 'Redacted Image Sent to Server';
+  const titleEl = document.getElementById('lightboxTitle');
+  if (titleEl) {
+    titleEl.textContent = displayTitle;
+    titleEl.title = displayTitle;
+  }
+  syncStopLoopButtons(isAutopilotRunning);
   imageLightbox.classList.remove('hidden');
 }
 

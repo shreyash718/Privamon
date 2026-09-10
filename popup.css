@@ -1216,33 +1216,99 @@ html.is-sidepanel #openSidePanelBtn {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 14px;
-  background: rgba(14, 14, 18, 0.96);
+  padding: 8px 12px;
+  background: rgba(14, 14, 18, 0.98);
   border-bottom: 1px solid var(--border-subtle);
+  gap: 10px;
+  min-height: 46px;
+  box-sizing: border-box;
+}
+
+.lightbox-left-cluster {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.lightbox-back-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  background: var(--surface-secondary, #1f1f26);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  border-radius: var(--radius-sm, 6px);
+  color: var(--text-primary, #ffffff);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.lightbox-back-btn:hover {
+  background: var(--surface-hover, #2a2a34);
+  border-color: var(--accent-primary, #6366f1);
+  color: #fff;
+  transform: translateX(-1px);
 }
 
 .lightbox-title {
   font-size: 12px;
   font-weight: 600;
   color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
 }
 
 .lightbox-actions {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-stop-loop-lightbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  border-radius: var(--radius-sm, 6px);
+  color: #fca5a5;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.btn-stop-loop-lightbox:hover {
+  background: rgba(239, 68, 68, 0.4);
+  border-color: rgba(239, 68, 68, 0.8);
+  color: #fff;
 }
 
 .lightbox-actions .icon-btn {
   width: auto;
   padding: 0 8px;
   font-size: 10.5px;
+  height: 28px;
+  flex-shrink: 0;
 }
 
 .lightbox-actions .close-btn {
   width: 28px;
+  height: 28px;
   padding: 0;
-  font-size: 13px;
+  font-size: 14px;
+  flex-shrink: 0;
 }
 
 .lightbox-image-wrapper {
