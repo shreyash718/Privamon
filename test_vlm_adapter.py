@@ -31,7 +31,7 @@ def test_ollama_payload():
     assert payload["model"] == "qwen3-vl:2b"
     assert "images" in payload and payload["images"] == ["fakeb64data"]
     assert "format" in payload and isinstance(payload["format"], dict)
-    assert payload["format"]["required"] == ["reasoning", "confidence", "action", "assumptions", "needsClarification"]
+    assert set(payload["format"]["required"]) == {"reasoning", "confidence", "action", "assumptions", "needsClarification"}
     print("[TEST OLLAMA PAYLOAD] Passed!")
 
 def test_openrouter_payload():
