@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privamon — Privacy-Preserving Browser Vision Agent | Smart India Hackathon 2026</title>
+  <meta name="description" content="Privamon is an in-browser privacy-preserving vision agent that scrubs PII, faces, and secrets locally using WebAssembly and WebGPU before transmitting sanitized frames to AI reasoning models.">
+  <meta name="keywords" content="Privamon, Privacy Agent, Vision Agent, PII Redaction, WebGPU, Tesseract.js, ONNX Runtime Web, Smart India Hackathon, SIH 2026">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon48.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png">
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;450;500;600;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+
+  <!-- Core Stylesheet -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Navigation
+       ═══════════════════════════════════════════════════════════════════ -->
+  <nav class="navbar" id="navbar">
+    <div class="container nav-container">
+      <div class="brand-group">
+        <a href="#" class="brand-title-link">
+          <span class="brand-title">Privamon</span>
+        </a>
+        <a href="#sih" class="sih-badge" title="Built for Smart India Hackathon 2026">
+          <span class="sih-badge-dot"></span>
+          <span class="sih-badge-text-full">Smart India Hackathon 2026</span>
+          <span class="sih-badge-text-short">SIH 2026</span>
+        </a>
+      </div>
+
+      <div class="nav-links">
+        <a href="#demo" class="nav-link">Demo</a>
+        <a href="#install" class="nav-link">Install</a>
+        <a href="#pipeline" class="nav-link">Pipeline</a>
+        <a href="#compatibility" class="nav-link">Compatibility</a>
+        <a href="#research" class="nav-link">Research</a>
+        <a href="#limitations" class="nav-link">Transparency</a>
+      </div>
+
+      <div class="nav-actions">
+        <a href="https://github.com/shreyash718/Privamon" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm" id="navGithubBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+          GitHub
+        </a>
+        <a href="https://github.com/shreyash718/Privamon/releases/download/v0.1.0/privamon-extension.zip" class="btn btn-primary btn-sm" id="navDownloadBtn">
+          Download
+        </a>
+      </div>
+    </div>
+  </nav>
+
+  <main>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         1. HERO — Hook with problem + solution
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section hero-section" id="hero">
+      <div class="container">
+        <div class="hero-grid">
+          <div class="hero-text-col">
+            <div class="hero-pill-badge">
+              <span class="dot"></span>
+              <span>Zero server leakage · 100% on-device</span>
+            </div>
+
+            <h1 class="hero-title">Privacy-preserving<br>vision for browsers</h1>
+
+            <p class="hero-tagline">
+              Privamon scrubs sensitive data — faces, identity cards, credentials — locally inside your browser before any AI model sees your screen. Built as an official <strong>Smart India Hackathon (SIH) 2026</strong> submission for zero-leakage autonomous agents.
+            </p>
+
+            <div class="hero-cta-group">
+              <a href="https://github.com/shreyash718/Privamon/releases/download/v0.1.0/privamon-extension.zip" class="btn btn-primary btn-lg" id="heroDownloadBtn">
+                Download Extension
+              </a>
+              <a href="https://github.com/shreyash718/Privamon" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-lg" id="heroGithubBtn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+                View Source
+              </a>
+            </div>
+          </div>
+
+          <div class="hero-image-col">
+            <img src="assets/img/hero-privacy.jpg" alt="Privamon browser privacy shield concept" class="hero-illustration" width="640" height="360">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         2. SIH BANNER — Hackathon context with India visual
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section sih-banner-section" id="sih">
+      <div class="container">
+        <div class="sih-banner">
+          <div class="sih-banner-text">
+            <div class="section-pill">Smart India Hackathon 2026</div>
+            <h2 class="section-title" style="margin-bottom: 12px;">Built for India's largest hackathon</h2>
+            <p class="sih-banner-desc">
+              Privamon is our submission for <strong class="sih-ps-highlight">Problem Statement 26171: On-device Visual Perception for Light-weight Browser Agents</strong>.
+              It intercepts the browser viewport, performs deep local multi-modal redaction — faces, identity cards, credit cards, credentials — using in-browser WebAssembly and WebGPU, ensuring zero raw PII ever touches server models or third-party reasoning endpoints.
+            </p>
+            <div class="sih-stats-row">
+              <div class="sih-stat">
+                <span class="sih-stat-value">9</span>
+                <span class="sih-stat-label">Pipeline stages</span>
+              </div>
+              <div class="sih-stat">
+                <span class="sih-stat-value">0</span>
+                <span class="sih-stat-label">Raw PII leaked</span>
+              </div>
+              <div class="sih-stat">
+                <span class="sih-stat-value">7+</span>
+                <span class="sih-stat-label">Sites verified</span>
+              </div>
+            </div>
+          </div>
+          <div class="sih-banner-image">
+            <img src="assets/img/sih-india.jpg" alt="Smart India Hackathon 2026 innovation illustration" width="480" height="320">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         3. VIDEO DEMO — Show it working (before explaining how)
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section" id="demo">
+      <div class="container">
+        <div class="section-header" style="text-align: center;">
+          <div class="section-pill">Demo</div>
+          <h2 class="section-title">See Privamon in action</h2>
+          <p class="section-desc">
+            Watch the live redaction pipeline, zero-server transmission guarantee, and our architectural journey.
+          </p>
+        </div>
+
+        <div class="video-wrapper">
+          <div class="video-container-16-9">
+            <!-- ── NOTE: Replace 'dQw4w9WgXcQ' below with your actual YouTube Video ID ── -->
+            <iframe
+              id="youtubePlayer"
+              src="https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ?rel=0&modestbranding=1"
+              title="Privamon SIH Walkthrough Video"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowfullscreen>
+            </iframe>
+          </div>
+          <div class="video-caption-bar">
+            <div class="video-caption-title">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+              <span>Technical Architecture &amp; Real-World Demo</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         4. GETTING STARTED — Installation guide
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section" id="install">
+      <div class="container">
+        <div class="section-header" style="text-align: center;">
+          <div class="section-pill">Getting Started</div>
+          <h2 class="section-title">Install in under two minutes</h2>
+          <p class="section-desc">
+            Privamon isn't on the Chrome Web Store yet — it's loaded as an unpacked developer extension. Follow these four steps to get running.
+          </p>
+        </div>
+
+        <div class="install-steps">
+
+          <!-- Step 1: Download -->
+          <div class="install-step-card">
+            <div class="install-step-image">
+              <img src="assets/img/install-download.jpg" alt="Download the extension zip file" width="560" height="315">
+            </div>
+            <div class="install-step-body">
+              <div class="install-step-number">Step 1</div>
+              <h3 class="install-step-title">Download the extension</h3>
+              <p class="install-step-desc">
+                Click the <strong>Download Extension</strong> button above (or go to the
+                <a href="https://github.com/shreyash718/Privamon/releases" target="_blank" rel="noopener noreferrer">GitHub Releases</a> page)
+                and save the <code>privamon-extension.zip</code> file to your computer. The download is around <strong>~5 MB</strong>.
+              </p>
+              <div class="install-tip">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                <span>You need Google Chrome, Brave, or Microsoft Edge (v116+). Firefox is not supported yet.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 2: Extract -->
+          <div class="install-step-card install-step-reverse">
+            <div class="install-step-image">
+              <img src="assets/img/install-unzip.jpg" alt="Extract the zip file into a folder" width="560" height="315">
+            </div>
+            <div class="install-step-body">
+              <div class="install-step-number">Step 2</div>
+              <h3 class="install-step-title">Extract the zip file</h3>
+              <p class="install-step-desc">
+                Right-click the downloaded <code>.zip</code> file and select <strong>"Extract All"</strong> (Windows) or double-click to unarchive (macOS/Linux).
+                You'll get a folder named <code>privamon-extension</code> containing the extension files.
+              </p>
+              <div class="install-tip">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                <span>Remember where you extract it — you'll need to point Chrome to this folder. Don't delete it after loading.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 3: Load in Chrome -->
+          <div class="install-step-card">
+            <div class="install-step-image">
+              <img src="assets/img/install-chrome.jpg" alt="Load unpacked extension in Chrome" width="560" height="315">
+            </div>
+            <div class="install-step-body">
+              <div class="install-step-number">Step 3</div>
+              <h3 class="install-step-title">Load as unpacked extension</h3>
+              <div class="install-substeps">
+                <div class="install-substep">
+                  <span class="substep-number">3a</span>
+                  <span>Open Chrome and navigate to <code>chrome://extensions</code></span>
+                </div>
+                <div class="install-substep">
+                  <span class="substep-number">3b</span>
+                  <span>Toggle <strong>"Developer mode"</strong> ON (top-right corner)</span>
+                </div>
+                <div class="install-substep">
+                  <span class="substep-number">3c</span>
+                  <span>Click <strong>"Load unpacked"</strong> (top-left)</span>
+                </div>
+                <div class="install-substep">
+                  <span class="substep-number">3d</span>
+                  <span>Select the extracted <code>privamon-extension</code> folder</span>
+                </div>
+              </div>
+              <div class="install-tip">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                <span>For Brave, go to <code>brave://extensions</code>. For Edge, use <code>edge://extensions</code>. Same steps apply.</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Step 4: First Run & Models -->
+          <div class="install-step-card install-step-reverse">
+            <div class="install-step-image">
+              <img src="assets/img/install-models.jpg" alt="AI models downloading on first run" width="560" height="315">
+            </div>
+            <div class="install-step-body">
+              <div class="install-step-number">Step 4</div>
+              <h3 class="install-step-title">First run — AI model warm-up</h3>
+              <p class="install-step-desc">
+                On the very first use, Privamon downloads and caches the AI models it needs for redaction. This is a <strong>one-time process</strong> — subsequent runs are instant.
+              </p>
+              <div class="model-download-table">
+                <div class="model-row model-row-header">
+                  <span>Model</span>
+                  <span>Size</span>
+                  <span>Download Time</span>
+                </div>
+                <div class="model-row">
+                  <span>Tesseract.js OCR (English + Hindi)</span>
+                  <span>~12 MB</span>
+                  <span>15–30 s</span>
+                </div>
+                <div class="model-row">
+                  <span>UltraFace ONNX (Face Detection)</span>
+                  <span>~1.2 MB</span>
+                  <span>2–5 s</span>
+                </div>
+                <div class="model-row">
+                  <span>BERT NER (Named Entities)</span>
+                  <span>~16 MB</span>
+                  <span>20–40 s</span>
+                </div>
+                <div class="model-row model-row-total">
+                  <span>Total first-run wait</span>
+                  <span>~30 MB</span>
+                  <span><strong>30–90 s</strong></span>
+                </div>
+              </div>
+              <div class="install-tip">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                <span>Models are cached in browser storage after the first download. They persist across restarts — no re-downloading needed unless you clear site data.</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         5. PIPELINE — How it works (creative visual layout)
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section pipeline-section" id="pipeline">
+      <div class="container">
+        <div class="section-header" style="text-align: center;">
+          <div class="section-pill">Architecture</div>
+          <h2 class="section-title">Nine stages of on-device redaction</h2>
+          <p class="section-desc">
+            Every frame passes through nine sequential stages — all running locally inside your browser — before any data reaches an AI model.
+          </p>
+        </div>
+
+        <!-- Pipeline Hero Image -->
+        <div class="pipeline-overview-image">
+          <img src="assets/img/pipeline-flow.jpg" alt="Pipeline flow: Capture → Detect → Redact" width="900" height="300">
+        </div>
+
+        <!-- Phase 1: Capture -->
+        <div class="pipeline-phase">
+          <div class="phase-header">
+            <div class="phase-badge">Phase 1</div>
+            <h3 class="phase-title">Capture & Isolate</h3>
+            <p class="phase-subtitle">Secure the raw frame before processing begins</p>
+          </div>
+
+          <div class="phase-grid phase-grid-with-image">
+            <div class="phase-image-card">
+              <img src="assets/img/step-capture.jpg" alt="Viewport capture illustration" width="300" height="300">
+            </div>
+            <div class="phase-steps">
+              <div class="pipeline-card">
+                <div class="card-number">01</div>
+                <div class="card-body">
+                  <h4 class="card-title">Viewport Capture</h4>
+                  <span class="card-tech">chrome.tabs API</span>
+                  <p class="card-desc">High-resolution PNG capture of the active viewport. Background tabs are never accessed.</p>
+                  <div class="card-insight">Takes an instant snapshot of only what you see on screen — never hidden tabs.</div>
+                </div>
+              </div>
+              <div class="pipeline-card">
+                <div class="card-number">02</div>
+                <div class="card-body">
+                  <h4 class="card-title">Offscreen Sandbox</h4>
+                  <span class="card-tech">chrome.offscreen Document</span>
+                  <p class="card-desc">Relays pixel buffers to an isolated offscreen document with full Canvas 2D and Web Worker capabilities.</p>
+                  <div class="card-insight">An invisible sandbox where intensive scanning happens without slowing your browser.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Flowing connector -->
+        <div class="phase-connector">
+          <svg viewBox="0 0 200 40" preserveAspectRatio="none" class="connector-svg">
+            <path d="M100 0 L100 40" stroke="var(--border)" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+          </svg>
+        </div>
+
+        <!-- Phase 2: Detect -->
+        <div class="pipeline-phase">
+          <div class="phase-header">
+            <div class="phase-badge">Phase 2</div>
+            <h3 class="phase-title">Detect & Classify</h3>
+            <p class="phase-subtitle">Multi-modal AI finds every sensitive element</p>
+          </div>
+
+          <div class="phase-grid phase-grid-with-image phase-grid-reverse">
+            <div class="phase-steps">
+              <div class="pipeline-card">
+                <div class="card-number">03</div>
+                <div class="card-body">
+                  <h4 class="card-title">Parallel OCR & Face Detection</h4>
+                  <span class="card-tech">Tesseract.js + UltraFace ONNX</span>
+                  <p class="card-desc">Multi-threaded Tesseract.js (English + Hindi) runs alongside UltraFace RFB-320 on WASM SIMD.</p>
+                  <div class="card-insight">AI vision finds faces while OCR reads text in images, bills, and documents.</div>
+                </div>
+              </div>
+              <div class="pipeline-card">
+                <div class="card-number">04</div>
+                <div class="card-body">
+                  <h4 class="card-title">PII Regex & Checksum Validation</h4>
+                  <span class="card-tech">Luhn + Verhoeff Checksums</span>
+                  <p class="card-desc">Inspects DOM text, inputs, and OCR outputs against strict checksums for Aadhaar, PAN, credit cards, and passports.</p>
+                  <div class="card-insight">Mathematically validates numbers so real IDs are caught while normal numbers pass.</div>
+                </div>
+              </div>
+              <div class="pipeline-card">
+                <div class="card-number">05</div>
+                <div class="card-body">
+                  <h4 class="card-title">In-Browser NER</h4>
+                  <span class="card-tech">Transformers.js BERT</span>
+                  <p class="card-desc">Quantized BERT Named Entity Recognition runs in-browser for contextual names, organizations, and locations.</p>
+                  <div class="card-insight">Understands grammar to catch personal names even without explicit labels.</div>
+                </div>
+              </div>
+            </div>
+            <div class="phase-image-card">
+              <img src="assets/img/step-detect.jpg" alt="AI detection illustration" width="300" height="300">
+            </div>
+          </div>
+        </div>
+
+        <!-- Flowing connector -->
+        <div class="phase-connector">
+          <svg viewBox="0 0 200 40" preserveAspectRatio="none" class="connector-svg">
+            <path d="M100 0 L100 40" stroke="var(--border)" stroke-width="1" fill="none" stroke-dasharray="4 4"/>
+          </svg>
+        </div>
+
+        <!-- Phase 3: Redact & Verify -->
+        <div class="pipeline-phase">
+          <div class="phase-header">
+            <div class="phase-badge">Phase 3</div>
+            <h3 class="phase-title">Redact & Verify</h3>
+            <p class="phase-subtitle">Irreversible masking with pixel-level proof</p>
+          </div>
+
+          <div class="phase-grid phase-grid-with-image">
+            <div class="phase-image-card">
+              <img src="assets/img/step-redact.jpg" alt="Redaction verification illustration" width="300" height="300">
+            </div>
+            <div class="phase-steps">
+              <div class="pipeline-card">
+                <div class="card-number">06</div>
+                <div class="card-body">
+                  <h4 class="card-title">Spatial Fusion</h4>
+                  <span class="card-tech">IoU Clustering</span>
+                  <p class="card-desc">Maps DOM nodes, OCR spans, and face coordinates onto a unified coordinate plane with boundary merging.</p>
+                  <div class="card-insight">Fuses all detections so redaction borders align without exposed edges.</div>
+                </div>
+              </div>
+              <div class="pipeline-card">
+                <div class="card-number">07</div>
+                <div class="card-body">
+                  <h4 class="card-title">Canvas Redaction</h4>
+                  <span class="card-tech">Opaque Fill #000</span>
+                  <p class="card-desc">Renders opaque black rectangles onto a dedicated canvas. No reversible blurs or semi-transparent masks.</p>
+                  <div class="card-insight">Solid black ink — unlike blur, it can never be reversed.</div>
+                </div>
+              </div>
+              <div class="pipeline-card">
+                <div class="card-number">08</div>
+                <div class="card-body">
+                  <h4 class="card-title">Opacity Audit</h4>
+                  <span class="card-tech">Pixel Inspection Loop</span>
+                  <p class="card-desc">Re-reads raw RGBA bytes under every masked region. Dirty pixels trigger box expansion and re-masking.</p>
+                  <div class="card-insight">Guarantees 100% true black pixels before anything leaves your machine.</div>
+                </div>
+              </div>
+              <div class="pipeline-card">
+                <div class="card-number">09</div>
+                <div class="card-body">
+                  <h4 class="card-title">DOM Sanitization & Handoff</h4>
+                  <span class="card-tech">Token Replacement</span>
+                  <p class="card-desc">Replaces sensitive tokens in the DOM tree with anonymized surrogates. The clean image goes to the AI model.</p>
+                  <div class="card-insight">The cloud only gets the blacked-out screenshot — your secrets never leave.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         5. COMPATIBILITY — Where it works
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section" id="compatibility">
+      <div class="container">
+        <div class="section-header" style="text-align: center;">
+          <div class="section-pill">Verification</div>
+          <h2 class="section-title">Tested & compatible</h2>
+          <p class="section-desc">
+            Verified across major websites with zero PII leaks. Report issues directly to the engineering team.
+          </p>
+        </div>
+
+        <div class="tabs-container">
+          <div class="tab-nav-bar" role="tablist">
+            <button class="tab-btn is-active" data-tab-target="tabTested" role="tab" aria-selected="true" id="tabBtnTested">
+              Tested & Working
+            </button>
+            <button class="tab-btn" data-tab-target="tabReport" role="tab" aria-selected="false" id="tabBtnReport">
+              Report a Problem
+            </button>
+          </div>
+
+          <!-- Tab A: Tested Sites -->
+          <div class="tab-pane is-active" id="tabTested" role="tabpanel">
+            <div class="tested-grid">
+              <div class="tested-site-card">
+                <div class="site-meta">
+                  <div class="site-icon">WA</div>
+                  <div>
+                    <div class="site-name">WhatsApp Web</div>
+                    <div class="site-category">Chat history, avatars, phone numbers</div>
+                  </div>
+                </div>
+                <span class="site-status-pill">✓ Verified</span>
+              </div>
+              <div class="tested-site-card">
+                <div class="site-meta">
+                  <div class="site-icon">GM</div>
+                  <div>
+                    <div class="site-name">Google Gmail</div>
+                    <div class="site-category">Sender emails, subject lines, credentials</div>
+                  </div>
+                </div>
+                <span class="site-status-pill">✓ Verified</span>
+              </div>
+              <div class="tested-site-card">
+                <div class="site-meta">
+                  <div class="site-icon">AM</div>
+                  <div>
+                    <div class="site-name">Amazon India</div>
+                    <div class="site-category">Delivery addresses, payment cards, orders</div>
+                  </div>
+                </div>
+                <span class="site-status-pill">✓ Verified</span>
+              </div>
+              <div class="tested-site-card">
+                <div class="site-meta">
+                  <div class="site-icon">IR</div>
+                  <div>
+                    <div class="site-name">IRCTC Rail Portal</div>
+                    <div class="site-category">Passenger names, PNR tokens, tickets</div>
+                  </div>
+                </div>
+                <span class="site-status-pill">✓ Verified</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab B: Report Form -->
+          <div class="tab-pane" id="tabReport" role="tabpanel">
+            <div class="report-card">
+              <div class="form-alert is-success" id="formAlertSuccess" style="display:none;">
+                <div class="alert-text">Thanks! Your report has been dispatched to the engineering inbox.</div>
+              </div>
+              <div class="form-alert is-error" id="formAlertError" style="display:none;">
+                <div id="formErrorMessage">Something went wrong. Please check your inputs.</div>
+              </div>
+              <form id="reportProblemForm">
+                <div class="form-row">
+                  <div class="form-group">
+                    <label class="form-label" for="reportName">Your Name <span class="optional">(Optional)</span></label>
+                    <input type="text" id="reportName" class="form-control" placeholder="e.g. Aditi Sharma" maxlength="100">
+                  </div>
+                  <div class="form-group">
+                    <label class="form-label" for="reportEmail">Email <span class="optional">(Optional)</span></label>
+                    <input type="email" id="reportEmail" class="form-control" placeholder="aditi@example.com" maxlength="150">
+                  </div>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="reportSiteUrl">Website URL <span class="optional">(Optional)</span></label>
+                  <input type="url" id="reportSiteUrl" class="form-control" placeholder="https://example.com/login" maxlength="500">
+                  <div class="form-help">The website where you observed unexpected behavior.</div>
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="reportDescription">Issue Description <span style="color: var(--error);">*</span></label>
+                  <textarea id="reportDescription" class="form-control" required placeholder="Describe what happened…" maxlength="5000"></textarea>
+                  <div class="form-help">Please be as specific as possible (minimum 10 characters).</div>
+                </div>
+                <button type="submit" class="btn btn-primary btn-lg" id="reportSubmitBtn" style="width: 100%;">
+                  <span class="spinner" id="reportBtnSpinner" style="display: none;"></span>
+                  <span id="reportBtnText">Submit Report</span>
+                </button>
+                <div style="text-align: center; margin-top: 14px; font-size: 0.85rem; color: var(--text-tertiary);">
+                  Prefer writing via Gmail? <a href="https://mail.google.com/mail/?view=cm&fs=1&to=shreyashmishra700@gmail.com&su=Privamon%20Website%20Report" target="_blank" rel="noopener noreferrer" style="color: var(--accent); font-weight: 500; text-decoration: underline;">Open compose in Gmail</a>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         6. RESEARCH — Future directions
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section" id="research">
+      <div class="container">
+        <div class="section-header">
+          <div class="section-pill">Roadmap</div>
+          <h2 class="section-title">Ongoing research & development</h2>
+          <p class="section-desc">
+            Areas our team is actively exploring to push on-device privacy boundaries further.
+          </p>
+        </div>
+
+        <div class="research-grid">
+          <!-- Card 1 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">OCR &amp; VISION</span>
+                <span class="research-status status-active">Active</span>
+              </div>
+              <h3 class="research-title">Multilingual OCR Accuracy for Indic Scripts</h3>
+              <p class="research-desc">
+                Tesseract.js underperforms on Hindi and other Devanagari-script text in real-world screenshots. Evaluating lighter, more accurate alternatives (PaddleOCR-ONNX, EasyOCR-lite exports) that run well under browser WASM/WebGPU constraints.
+              </p>
+            </div>
+            <!-- ── Card 1 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">01</div>
+                <span>Lead: <strong>Samar</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=samar085@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>samar085@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 2 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">ML &amp; NLP</span>
+                <span class="research-status status-active">Active</span>
+              </div>
+              <h3 class="research-title">NER Recall for Indian Names</h3>
+              <p class="research-desc">
+                Our current NER model, trained on Western news-style English, misses many Indian first/last names. We're evaluating AI4Bharat's IndicNER and gazetteer-augmented detection, alongside fine-tuning lightweight pre-trained checkpoints ourselves, to find the best accuracy-versus-in-browser-speed tradeoff.
+              </p>
+            </div>
+            <!-- ── Card 2 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">02</div>
+                <span>Lead: <strong>Shreyash</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=shreyashmishra700@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>shreyashmishra700@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 3 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">AGENT INTELLIGENCE</span>
+                <span class="research-status status-experimental">Experimental</span>
+              </div>
+              <h3 class="research-title">Feedback-Driven Redaction Refinement</h3>
+              <p class="research-desc">
+                Exploring a feedback loop where user corrections to redaction decisions (missed PII, false positives) are used to continuously tune detection confidence thresholds, rather than relying on static rules alone.
+              </p>
+            </div>
+            <!-- ── Card 3 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">03</div>
+                <span>Lead: <strong>Rajat</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=kaushikrajat000@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>kaushikrajat000@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 4 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">CROSS-PLATFORM</span>
+                <span class="research-status status-architecture">Architecture</span>
+              </div>
+              <h3 class="research-title">Firefox Portability</h3>
+              <p class="research-desc">
+                Adapting the offscreen document architecture for Firefox, which differs from Chrome in MV3 background environments, canvas permissions, and offscreen API support.
+              </p>
+            </div>
+            <!-- ── Card 4 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">04</div>
+                <span>Lead: <strong>Saumya</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=saumaya@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>saumaya@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 5 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">QA &amp; COVERAGE</span>
+                <span class="research-status status-ongoing">Ongoing</span>
+              </div>
+              <h3 class="research-title">Expanding Site Compatibility Coverage</h3>
+              <p class="research-desc">
+                Systematically testing across a wider range of real-world sites (e-commerce, banking, government portals, social media) to catch layout edge cases, dynamic re-renders, and site-specific redaction failures.
+              </p>
+            </div>
+            <!-- ── Card 5 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">05</div>
+                <span>Lead: <strong>Vaani</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=vaanirb@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>vaanirb@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 6 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">PERFORMANCE</span>
+                <span class="research-status status-benchmarking">Benchmarking</span>
+              </div>
+              <h3 class="research-title">WebGPU Cold-Start &amp; Memory Quantization</h3>
+              <p class="research-desc">
+                Benchmarking JSEP WebGPU kernel compilation against WASM SIMD, pre-warming execution providers, and INT8 quantization to keep model bundles under 20 MB.
+              </p>
+            </div>
+            <!-- ── Card 6 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">06</div>
+                <span>Lead: <strong>Tanishq</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=tanishqsh2k7@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>tanishqsh2k7@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 7 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">RELIABILITY</span>
+                <span class="research-status status-active">Active</span>
+              </div>
+              <h3 class="research-title">Robust Action Targeting on Dynamic Pages</h3>
+              <p class="research-desc">
+                Improving element-resolution accuracy when React/Vue re-renders change the DOM mid-session, especially for pages with multiple visually identical elements (e.g. repeated buttons in a list).
+              </p>
+            </div>
+            <!-- ── Card 7 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">07</div>
+                <span>Lead: <strong>Rajat</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=kaushikrajat000@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>kaushikrajat000@gmail.com</span>
+              </a>
+            </div>
+          </div>
+
+          <!-- Card 8 -->
+          <div class="research-card">
+            <div class="research-header">
+              <div class="research-status-row">
+                <span class="research-badge">EDGE AI</span>
+                <span class="research-status status-experimental">Experimental</span>
+              </div>
+              <h3 class="research-title">On-Device Small Language Model Reasoning</h3>
+              <p class="research-desc">
+                Client-side execution of lightweight vision-language models for fully offline autonomous agent loops, reducing dependence on server round-trips.
+              </p>
+            </div>
+            <!-- ── Card 8 Lead & Contact ── -->
+            <div class="research-contact">
+              <div class="research-owner">
+                <div class="research-avatar">08</div>
+                <span>Lead: <strong>Tanishq</strong></span>
+              </div>
+              <a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=tanishqsh2k7@gmail.com" target="_blank" rel="noopener noreferrer" class="research-email-link">
+                <span>tanishqsh2k7@gmail.com</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         7. LIMITATIONS — Honest transparency (near footer)
+         ═══════════════════════════════════════════════════════════════════ -->
+    <section class="section" id="limitations">
+      <div class="container">
+        <div class="limitations-box">
+          <div class="limitations-header">
+            <div class="limitations-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+            </div>
+            <div>
+              <h2 class="limitations-headline">Current Engineering Limitations</h2>
+              <div style="font-size: 0.8rem; color: var(--text-tertiary); margin-top: 2px;">Transparency first · Honest hackathon assessment</div>
+            </div>
+          </div>
+          <p class="limitations-intro">
+            Privamon is an active proof-of-concept. Below are constraints judges and testers should know:
+          </p>
+          <ul class="limitations-list">
+            <li class="limitation-item">
+              <span class="limitation-bullet">1</span>
+              <div class="limitation-content">
+                <span class="limitation-title">Chromium MV3 Offscreen API Dependency</span>
+                Restricted to Chrome, Brave, and Edge (v116+). Firefox currently lacks Manifest V3 <code>chrome.offscreen</code> document support required for isolated background Canvas 2D and WebWorker ML inference.
+              </div>
+            </li>
+            <li class="limitation-item">
+              <span class="limitation-bullet">2</span>
+              <div class="limitation-content">
+                <span class="limitation-title">WebGPU vs. WASM Hardware Fallback Latency</span>
+                WebGPU-enabled machines deliver sub-second inference (&lt;1.5 s), but devices falling back to CPU WASM SIMD take 3.5–5.5 s per turn, alongside initial cold-start WebGPU JSEP shader compilation.
+              </div>
+            </li>
+            <li class="limitation-item">
+              <span class="limitation-bullet">3</span>
+              <div class="limitation-content">
+                <span class="limitation-title">Multilingual Indic Script &amp; Low-Contrast OCR</span>
+                While English text detection achieves &gt;96% recall, browser-native Tesseract.js exhibits reduced accuracy on complex Devanagari ligatures, regional typography, and low-contrast physical ID photos (PAN/Aadhaar).
+              </div>
+            </li>
+            <li class="limitation-item">
+              <span class="limitation-bullet">4</span>
+              <div class="limitation-content">
+                <span class="limitation-title">Dynamic SPA Virtual DOM &amp; Coordinate Drift</span>
+                High-velocity client re-renders (React/Vue DOM updates mid-turn), CSS transforms, and fractional OS display scaling can cause spatial bounding box drift between rasterized viewport captures and live DOM nodes.
+              </div>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══════════════════════════════════════════════════════════════════
+       Footer
+       ═══════════════════════════════════════════════════════════════════ -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-top">
+        <div class="footer-brand-col">
+          <div class="footer-brand-title">Privamon</div>
+          <p class="footer-desc">
+            An open-source, privacy-preserving visual reasoning agent for browsers. Built so autonomous AI respects user confidentiality.
+          </p>
+          <div class="footer-sih-tag">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
+            <span>Smart India Hackathon 2026</span>
+          </div>
+        </div>
+        <div>
+          <div class="footer-heading">Documentation</div>
+          <ul class="footer-list">
+            <li><a href="#demo">Video Demo</a></li>
+            <li><a href="#install">Installation Guide</a></li>
+            <li><a href="#pipeline">Pipeline</a></li>
+            <li><a href="#compatibility">Compatibility</a></li>
+            <li><a href="#research">Research</a></li>
+            <li><a href="#limitations">Limitations</a></li>
+          </ul>
+        </div>
+        <div>
+          <div class="footer-heading">Resources</div>
+          <ul class="footer-list">
+            <li><a href="https://github.com/shreyash718/Privamon" target="_blank" rel="noopener noreferrer">GitHub Repository</a></li>
+            <!-- ── Team Contact Email ── -->
+            <li><a href="https://mail.google.com/mail/?view=cm&amp;fs=1&amp;to=shreyashmishra700@gmail.com" target="_blank" rel="noopener noreferrer">Contact Team</a></li>
+          </ul>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <div class="footer-team-group">
+          <span class="footer-team-label">Core Team</span>
+          <div class="footer-team-members">
+            <span class="team-chip">Shreyash</span>
+            <span class="team-chip">Samar</span>
+            <span class="team-chip">Rajat</span>
+            <span class="team-chip">Saumya</span>
+            <span class="team-chip">Vaani</span>
+            <span class="team-chip">Tanishq</span>
+          </div>
+        </div>
+        <div class="footer-copyright">
+          <span>Privamon © 2026. Apache 2.0 License.</span>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

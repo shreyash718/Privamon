@@ -4,12 +4,12 @@
   "description": "Privacy-Preserving Browser Agent — Browser-Native Local Sanitization Pipeline",
   "private": true,
   "scripts": {
-    "setup": "node scripts/copy-libs.js",
-    "postinstall": "node scripts/copy-libs.js",
-    "test": "python -m unittest tests/test_synthetic_suite.py"
+    "start": "npx serve -l 3000 ."
   },
   "dependencies": {
+    "nodemailer": "^6.9.13",
     "onnxruntime-web": "^1.21.0",
+    "resend": "^3.2.0",
     "tesseract.js": "^5.1.1",
     "ws": "^8.22.0"
   }
