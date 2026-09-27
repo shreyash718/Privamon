@@ -121,15 +121,37 @@ async function ensureOffscreenDocument() {
   throw new Error('Offscreen document failed to initialize modules within 12 seconds');
 }
 
-// ── Helper: Forward message to popup UI ──
+let currentLoopState = {
+  isRunning: false,
+  step: 0,
+  maxSteps: 5,
+  status: 'idle',
+  message: '',
+  task: ''
+};
+
+function updateLoopState(stateUpdate) {
+  currentLoopState = { ...currentLoopState, ...stateUpdate };
+  chrome.storage.local.set({ privamon_loop_state: currentLoopState }).catch(() => {});
+}
 
 /**
  * Forward a message to the popup (and any open results pages).
- * Non-critical — if popup is closed, the message is silently dropped.
+ * Non-critical — if popup is closed, the message is stored and silently delivered when popup opens.
  */
 function forwardToPopup(message) {
+  if (message.type === 'autopilotProgress') {
+    const isRunning = !(message.status === 'done' || message.status === 'paused' || message.status === 'error');
+    updateLoopState({
+      isRunning,
+      step: message.step || 0,
+      maxSteps: message.maxSteps || 5,
+      status: message.status || 'idle',
+      message: message.message || ''
+    });
+  }
   chrome.runtime.sendMessage(message).catch(() => {
-    // Popup might be closed — that's fine
+    // Popup might be closed — stored in chrome.storage.local for popup reopen
   });
 }
 
@@ -226,6 +248,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'stopActionLoop') {
     stopActionLoop();
     sendResponse({ success: true, message: 'Loop stop requested' });
+    return true;
+  }
+
+  // Get active loop state (for popup UI sync on reopen)
+  if (message.action === 'getLoopState') {
+    chrome.storage.local.get(['privamon_loop_state'], (res) => {
+      sendResponse({
+        loopState: res.privamon_loop_state || currentLoopState,
+        isActionLoopRunning
+      });
+    });
     return true;
   }
 
@@ -604,7 +637,7 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
       type: 'pipelineProgress',
       stageId: 'server',
       status: 'active',
-      statusText: 'Consulting vision agent on server (Ollama)...',
+      statusText: 'Consulting Privamon AI Agent...',
     });
 
     let agentResp = { actions: [], message: '', thinking: '', raw_model_output: '' };
@@ -1304,6 +1337,11 @@ function stopActionLoop() {
   console.log('[Background] Stopping action loop on user request.');
   isLoopCancelled = true;
   isActionLoopRunning = false;
+  updateLoopState({
+    isRunning: false,
+    status: 'paused',
+    message: 'Loop stopped by user.'
+  });
   forwardToPopup({
     type: 'autopilotProgress',
     status: 'paused',
@@ -1327,6 +1365,14 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
 
   isActionLoopRunning = true;
   isLoopCancelled = false;
+  updateLoopState({
+    isRunning: true,
+    step: 1,
+    maxSteps,
+    status: 'analyzing',
+    message: 'Step 1: Inspecting screen & verifying state...',
+    task
+  });
 
   // Keep MV3 service worker alive during the loop
   const keepAliveInterval = setInterval(() => {

@@ -143,6 +143,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadSettings();
   await checkServerHealth();
   await loadChatHistory();
+  await syncActiveLoopState();
   await initModeAndRedactionTab();
   setupEventListeners();
 });
@@ -551,6 +552,60 @@ async function checkServerHealth() {
     serverStatusDot.className = 'status-dot offline';
     serverStatusLabel.textContent = 'Offline';
   }
+// ── Background Active Loop Synchronization ──
+let loopPollingInterval = null;
+
+async function syncActiveLoopState() {
+  if (!isExtensionContext) return;
+  try {
+    const res = await chrome.runtime.sendMessage({ action: 'getLoopState' });
+    if (res && res.loopState && res.loopState.isRunning) {
+      const st = res.loopState;
+      isAutopilotRunning = true;
+      isBusy = true;
+      if (activeProgressCard) activeProgressCard.classList.remove('hidden');
+      updateProgressUI(st.message || 'Auto-pilot running...', 'autopilot');
+      syncStopLoopButtons(true);
+      if (taskInput) taskInput.disabled = true;
+      if (sendBtn) sendBtn.disabled = true;
+
+      startActiveLoopPolling();
+    }
+  } catch (e) {
+    console.warn('[Popup] Failed to sync active loop state:', e);
+  }
+}
+
+function startActiveLoopPolling() {
+  if (loopPollingInterval) clearInterval(loopPollingInterval);
+  loopPollingInterval = setInterval(async () => {
+    try {
+      const res = await chrome.runtime.sendMessage({ action: 'getLoopState' });
+      if (res && res.loopState) {
+        const st = res.loopState;
+        if (st.isRunning) {
+          updateProgressUI(st.message || 'Auto-pilot running...', 'autopilot');
+          await loadChatHistory();
+        } else {
+          clearInterval(loopPollingInterval);
+          loopPollingInterval = null;
+          isAutopilotRunning = false;
+          isBusy = false;
+          syncStopLoopButtons(false);
+          if (activeProgressCard) activeProgressCard.classList.add('hidden');
+          if (taskInput) {
+            taskInput.disabled = false;
+            taskInput.focus();
+          }
+          if (sendBtn) sendBtn.disabled = false;
+          await loadChatHistory();
+        }
+      }
+    } catch (e) {
+      clearInterval(loopPollingInterval);
+      loopPollingInterval = null;
+    }
+  }, 1500);
 }
 
 // ── Chat History ──
@@ -847,7 +902,7 @@ function updateProgressUI(statusText, stageId) {
   } else if (stageId === 'redaction') {
     subText = 'Running local OCR, NER, and face detection blur';
   } else if (stageId === 'server') {
-    subText = 'Querying local vision agent model via Ollama/vLLM';
+    subText = 'Consulting Privamon AI Reasoning Server';
   } else if (stageId === 'autopilot') {
     subText = 'Auto-pilot: executing actions and re-analyzing...';
   }
@@ -884,10 +939,10 @@ function createTurnCard(turn, isError = false) {
     imgCard.innerHTML = `
       <div class="screenshot-preview-header">
         <div class="preview-title-wrap">
-          <span class="preview-title">Sent to Server</span>
-          <span class="privacy-badge">🔒 Sanitized</span>
+          <span class="preview-title">Privamon Shield</span>
+          <span class="privacy-badge">🔒 Data Protected</span>
         </div>
-        <span class="pii-badge">${redactionCount} PII Redacted</span>
+        <span class="pii-badge">${redactionCount} Sensitive Items Shielded</span>
       </div>
       <div class="screenshot-thumb-container" title="Click to view full redacted image">
         <img src="${turn.screenshotUrl}" alt="Redacted screenshot sent to agent" loading="lazy">
@@ -1039,12 +1094,12 @@ function createTurnCard(turn, isError = false) {
     ${actionsHtml}
     ${assumptionsHtml}
     <div class="turn-footer-actions">
-      <button class="btn-turn-action raw-vlm-btn" title="Inspect complete raw VLM model output">
+      <button class="btn-turn-action raw-vlm-btn" title="Inspect complete model response JSON">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <polyline points="16 18 22 12 16 6"></polyline>
           <polyline points="8 6 2 12 8 18"></polyline>
         </svg>
-        <span>Raw VLM Output</span>
+        <span>View Raw Response</span>
       </button>
       <button class="btn-turn-action copy-btn" title="Copy response text">
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1339,7 +1394,7 @@ function openVlmInspector(turn = null) {
     } else {
       turn = {
         task: 'Waiting for queries...',
-        provider: 'OpenRouter / Ollama',
+        provider: 'Privamon AI',
         model: 'Ready for inference',
         latencyMs: null,
         rawModelOutput: JSON.stringify({
