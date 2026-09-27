@@ -552,6 +552,8 @@ async function checkServerHealth() {
     serverStatusDot.className = 'status-dot offline';
     serverStatusLabel.textContent = 'Offline';
   }
+}
+
 // ── Background Active Loop Synchronization ──
 let loopPollingInterval = null;
 
