@@ -764,15 +764,16 @@ def is_creative_generation_task(task: str) -> bool:
         return False
     return bool(re.search(
         r"\b("
-        r"poem|poetry|rhyme|story|essay|haiku|compliment|joke|apology|speech|"
+        r"poem|poetry|rhyme|story|essay|haiku|compliment|joke|apology|apologize|speech|"
         r"song|lyrics|letter|compose\w*|generate\w*|"
         r"greeting\w*|wish\w*|blessing\w*|congratulat\w*|"
         r"marriage|wedding|anniversary|birthday|promotion|festival|"
         r"lines?\s+of|lines?\s+on|\d+\s+line|"
-        r"message\s+(?:about|for|wishing|congratulating)|"
+        r"message\s+(?:about|for|wishing|congratulating|that|saying)|"
+        r"tell\s+(?:\w+\s+)?(?:that|saying)|"
         r"write\s+(?:a\s+)?(?:message|note|greeting|wish)|"
         r"draft\w*\s+(?:a\s+)?(?:\w+\s+)?(?:poem|song|story|greeting|wish|speech|lyrics|essay|message|note)|"
-        r"be\s+polite|politely|formal\w*|courteous\w*"
+        r"be\s+polite|politely|formal\w*|courteous\w*|sorry|emotion\w*|excuse|reason|unable\s+to\s+attend|cannot\s+attend|will\s+not\s+be\s+able"
         r")\b",
         task,
         re.I
@@ -1482,7 +1483,7 @@ def _normalize_contact_chat_action(
 
         if resp.action.targetElementId == msg_id:
             resp.action.type = "type"
-            if is_creative:
+            if is_creative or is_prompt_echo(resp.action.value, clean_task):
                 if is_prompt_echo(resp.action.value, clean_task):
                     print(f"[*] Auto-normalizing contact action: detected prompt echo or empty value '{resp.action.value}'; composing full creative text")
                     resp.action.value = compose_creative_fallback(clean_task)
@@ -1641,7 +1642,7 @@ def _normalize_action(
                         break
             if is_textbox:
                 is_creative = is_creative_generation_task(task)
-                if is_creative:
+                if is_creative or is_prompt_echo(resp.action.value, task):
                     if is_prompt_echo(resp.action.value, task):
                         print(f"[*] Auto-normalizing chat action: detected prompt echo or empty value '{resp.action.value}'; composing full creative text")
                         resp.action.value = compose_creative_fallback(task)
