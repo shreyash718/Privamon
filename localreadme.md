@@ -241,7 +241,7 @@ The master pipeline (`pipeline/sanitize-pipeline.js`) executes in a sequential, 
     - **PAN Numbers**: Indian permanent account numbers verified against the 10-character alphanumeric structure (`[A-Z]{5}[0-9]{4}[A-Z]`).
     - **Indian Mobile Numbers**: Standard 10-digit formats with `+91` / `0` prefixes.
     - **IFSC Codes**: Bank branch identifiers.
-- **Adaptive Engine Fallback**: If a local Python backend is active at `127.0.0.1:8765`, it leverages batch Presidio + GLiNER NLP models; otherwise, it executes entirely in-browser using deterministic JavaScript regex and checksum logic with zero degradation in uptime.
+- **100% Browser-Native Execution**: Executes entirely in-browser using deterministic JavaScript regex, Aadhaar Verhoeff checksums, Luhn credit card validation, and ONNX Runtime Web vision processing with zero backend server dependencies and zero uptime degradation.
 
 #### Stage 2: Pixel Region Selection (`vision/ocr-engine.js`)
 - Inspects all visual elements (`<img>`, `<canvas>`, SVG graphics) extracted by the DOM scanner.

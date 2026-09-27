@@ -772,12 +772,11 @@ async function handleTestRedactionOnly() {
     await ensureOffscreenDocument();
     const pipelineResult = await runPipelineAsync(screenshot, domData, 'Redaction Test (Local Only)');
 
-    // Store in session storage so results.html / full tab can inspect immediately
+    // Store in session storage so results.html / full tab can inspect sanitized results
     try {
       await chrome.storage.session.set({
         privamon_result: {
           sanitizedScreenshot: pipelineResult.sanitizedScreenshot,
-          originalScreenshot: screenshot,
           detections: pipelineResult.detections,
           allCandidates: pipelineResult.allCandidates || pipelineResult.detections,
           redactions: pipelineResult.redactions || [],

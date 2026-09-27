@@ -1,16 +1,16 @@
 {
   "name": "privamon",
   "version": "0.1.0",
-  "description": "Privacy-Preserving Browser Agent — Local Sanitization Pipeline",
+  "description": "Privacy-Preserving Browser Agent — Browser-Native Local Sanitization Pipeline",
   "private": true,
   "scripts": {
     "setup": "node scripts/copy-libs.js",
     "postinstall": "node scripts/copy-libs.js",
-    "engine:start": "python -m engine.server",
-    "engine:test": "python -m pytest tests/ -v -p no:anyio"
+    "test": "python -m unittest tests/test_synthetic_suite.py"
   },
   "dependencies": {
+    "onnxruntime-web": "^1.21.0",
     "tesseract.js": "^5.1.1",
-    "onnxruntime-web": "^1.21.0"
+    "ws": "^8.22.0"
   }
 }

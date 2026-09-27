@@ -126,9 +126,9 @@ Privamon.NEREngine = (() => {
   /**
    * Lazily initializes the Xenova token-classification pipeline inside the browser.
    */
-  async function initialize() {
-    if (nerPipeline) return nerPipeline;
-    if (initFailed) return null;
+  function initialize() {
+    if (nerPipeline) return Promise.resolve(nerPipeline);
+    if (initFailed) return Promise.resolve(null);
     if (initPromise) return initPromise;
 
     initPromise = (async () => {
@@ -164,45 +164,40 @@ Privamon.NEREngine = (() => {
           env.useBrowserCache = true;
         }
 
-        // 4. Load quantized model with timeout (reuse promise if already downloading in background)
+        // 4. Feature-detect WebGPU support for Transformers.js device option
+        let targetDevice = 'wasm';
+        if (typeof navigator !== 'undefined' && navigator.gpu) {
+          try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (adapter) {
+              targetDevice = 'webgpu';
+              console.info('[NEREngine] WebGPU hardware adapter detected. Initializing pipeline with device: webgpu');
+            }
+          } catch (gpuErr) {
+            console.warn('[NEREngine] WebGPU adapter check failed, defaulting device to wasm:', gpuErr.message);
+          }
+        } else {
+          console.info('[NEREngine] Initializing Transformers.js pipeline with device: wasm');
+        }
+
+        // 5. Load model (reuse promise if already downloading/compiling)
         if (!modelLoadPromise) {
           modelLoadPromise = pipeline('token-classification', 'Xenova/bert-base-NER', {
+            device: targetDevice,
             quantized: true,
           });
-
-          // Let download continue in background to populate browser CacheStorage
-          modelLoadPromise.then(p => {
-            nerPipeline = p;
-            isAvailable = true;
-            console.log('[NEREngine] Background download complete! Xenova/bert-base-NER is cached and active.');
-          }).catch(err => {
-            // If offline or blocked, keep heuristic fallback active
-            console.debug('[NEREngine] Background download status:', err.message);
-            modelLoadPromise = null;
-          });
         }
 
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('NER model load timeout')), INIT_TIMEOUT_MS)
-        );
-
-        try {
-          nerPipeline = await Promise.race([modelLoadPromise, timeoutPromise]);
-          isAvailable = true;
-          console.log(`[NEREngine] Initialized Xenova/bert-base-NER in ${Math.round(performance.now() - tStart)}ms`);
-          return nerPipeline;
-        } catch (raceErr) {
-          console.warn(`[NEREngine] Client-side ML NER unavailable, heuristic fallback active: ${raceErr.message}`);
-          return null;
-        }
+        nerPipeline = await modelLoadPromise;
+        isAvailable = true;
+        console.log(`[NEREngine] Initialized Xenova/bert-base-NER in ${Math.round(performance.now() - tStart)}ms`);
+        return nerPipeline;
       } catch (err) {
         console.warn('[NEREngine] Client-side ML NER unavailable, heuristic fallback active:', err.message);
         initFailed = true;
         isAvailable = false;
         nerPipeline = null;
         return null;
-      } finally {
-        initPromise = null;
       }
     })();
 
@@ -329,10 +324,13 @@ Privamon.NEREngine = (() => {
           continue;
         }
 
+        const t0Inference = performance.now();
         const entities = await pipeline(text, {
           ignore_labels: ['O'],
           aggregation_strategy: 'simple'
         });
+        const tInfMs = (performance.now() - t0Inference).toFixed(2);
+        console.info(`[NEREngine] ML Inference executed on device '${pipeline.device || 'webgpu'}' in ${tInfMs}ms for text chunk (${text.length} chars)`);
 
         if (!entities || !entities.length) continue;
 

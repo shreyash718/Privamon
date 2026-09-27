@@ -9,6 +9,16 @@
 
   console.log('[Offscreen] Document loaded, modules initialized');
 
+  // Trigger background pre-warming of WebGPU / WASM ML pipelines on startup
+  if (typeof Privamon !== 'undefined') {
+    if (Privamon.NEREngine && typeof Privamon.NEREngine.initialize === 'function') {
+      Privamon.NEREngine.initialize().catch(e => console.debug('[Offscreen] Background NER pre-warm status:', e.message));
+    }
+    if (Privamon.FaceDetector && typeof Privamon.FaceDetector.initialize === 'function') {
+      Privamon.FaceDetector.initialize().catch(e => console.debug('[Offscreen] Background FaceDetector pre-warm status:', e.message));
+    }
+  }
+
   // Listen for messages from the background service worker
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Health / Ready check from background service worker

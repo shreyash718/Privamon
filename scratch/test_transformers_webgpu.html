@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Transformers.js WebGPU Test</title>
+</head>
+<body>
+  <h1>Transformers.js WebGPU Test</h1>
+  <pre id="log" style="background:#111; color:#0f0; padding:15px; font-family:monospace; font-size:14px; white-space:pre-wrap;"></pre>
+
+  <script type="module">
+    import { pipeline, env } from '../lib/transformers/transformers.min.js';
+
+    function log(msg, type = 'info') {
+      const el = document.getElementById('log');
+      const text = `[${type.toUpperCase()}] ${msg}\n`;
+      el.textContent += text;
+      if (type === 'error') console.error(msg);
+      else console.log(msg);
+    }
+
+    async function runNERTest() {
+      log('Starting Transformers.js WebGPU vs WASM Benchmark...');
+      const sampleText = "My name is Rahul Sharma and I live in New Delhi";
+      log(`Sample Input Text: "${sampleText}"`);
+
+      env.allowLocalModels = false;
+      env.allowRemoteModels = true;
+      env.useBrowserCache = true;
+      env.backends.onnx.wasm.wasmPaths = '../lib/onnx/';
+
+      // 1. TEST WEBGPU DEVICE
+      log('\n----------------------------------------');
+      log('1. Testing pipeline with { device: "webgpu" }...');
+      let pipeWebGPU = null;
+      try {
+        const t0Load = performance.now();
+        pipeWebGPU = await pipeline('token-classification', 'Xenova/bert-base-NER', {
+          device: 'webgpu',
+          quantized: true
+        });
+        const tLoad = performance.now() - t0Load;
+        log(`SUCCESS: Loaded Xenova/bert-base-NER with WebGPU device in ${tLoad.toFixed(2)} ms!`);
+
+        // Warmup
+        await pipeWebGPU(sampleText);
+
+        // 10 Runs Benchmark
+        const times = [];
+        let lastResult = null;
+        for (let i = 0; i < 10; i++) {
+          const t0 = performance.now();
+          lastResult = await pipeWebGPU(sampleText);
+          times.push(performance.now() - t0);
+        }
+        const avg = times.reduce((a, b) => a + b, 0) / times.length;
+        const min = Math.min(...times);
+        const max = Math.max(...times);
+        log(`WEBGPU INFERENCE LATENCY (10 runs): Avg=${avg.toFixed(2)} ms (Min=${min.toFixed(2)} ms, Max=${max.toFixed(2)} ms)`);
+        log(`WebGPU Detections: ${JSON.stringify(lastResult)}`);
+
+      } catch (err) {
+        log(`WEBGPU NER FAILED: ${err.message}`, 'error');
+        log(`Stack: ${err.stack}`, 'error');
+      }
+
+      // 2. TEST WASM DEVICE
+      log('\n----------------------------------------');
+      log('2. Testing pipeline with { device: "wasm" }...');
+      try {
+        const t0LoadW = performance.now();
+        const pipeWasm = await pipeline('token-classification', 'Xenova/bert-base-NER', {
+          device: 'wasm',
+          quantized: true
+        });
+        const tLoadW = performance.now() - t0LoadW;
+        log(`SUCCESS: Loaded Xenova/bert-base-NER with WASM device in ${tLoadW.toFixed(2)} ms`);
+
+        // Warmup
+        await pipeWasm(sampleText);
+
+        // 10 Runs Benchmark
+        const timesW = [];
+        let lastResultW = null;
+        for (let i = 0; i < 10; i++) {
+          const t0 = performance.now();
+          lastResultW = await pipeWasm(sampleText);
+          timesW.push(performance.now() - t0);
+        }
+        const avgW = timesW.reduce((a, b) => a + b, 0) / timesW.length;
+        const minW = Math.min(...timesW);
+        const maxW = Math.max(...timesW);
+        log(`WASM INFERENCE LATENCY (10 runs): Avg=${avgW.toFixed(2)} ms (Min=${minW.toFixed(2)} ms, Max=${maxW.toFixed(2)} ms)`);
+        log(`WASM Detections: ${JSON.stringify(lastResultW)}`);
+
+      } catch (errW) {
+        log(`WASM NER FAILED: ${errW.message}`, 'error');
+      }
+
+      log('\n========================================');
+      log('BENCHMARK COMPLETE.');
+    }
+
+    window.addEventListener('DOMContentLoaded', runNERTest);
+  </script>
+</body>
+</html>

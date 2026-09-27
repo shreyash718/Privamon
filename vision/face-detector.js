@@ -26,8 +26,11 @@ Privamon.FaceDetector = (() => {
   let session = null;
   let isInitializing = false;
   let initPromise = null;
+  let fallbackWasmPromise = null;
   let isAvailable = false;
   let ortInstance = null;
+  let cachedModelBuffer = null;
+  let webgpuFailed = false;
 
   // UltraFace RFB 320 tensor dimensions
   const INPUT_WIDTH = 320;
@@ -78,8 +81,8 @@ Privamon.FaceDetector = (() => {
   /**
    * Lazily initializes the ONNX inference session.
    */
-  async function initialize() {
-    if (session) return session;
+  function initialize() {
+    if (session) return Promise.resolve(session);
     if (initPromise) return initPromise;
 
     initPromise = (async () => {
@@ -113,40 +116,54 @@ Privamon.FaceDetector = (() => {
           'lib/onnx/blazeface.onnx'
         ];
 
-        let modelBuffer = null;
-        for (const url of modelPaths) {
-          try {
-            const resp = await fetch(url);
-            if (resp.ok) {
-              modelBuffer = await resp.arrayBuffer();
-              console.log('[FaceDetector] Successfully loaded face model from:', url);
-              break;
+        if (!cachedModelBuffer) {
+          for (const url of modelPaths) {
+            try {
+              const resp = await fetch(url);
+              if (resp.ok) {
+                cachedModelBuffer = await resp.arrayBuffer();
+                console.log('[FaceDetector] Successfully loaded face model from:', url);
+                break;
+              }
+            } catch (e) {
+              // Try next candidate
             }
-          } catch (e) {
-            // Try next candidate
           }
         }
 
-        if (!modelBuffer) {
+        if (!cachedModelBuffer) {
           throw new Error('No ONNX face model file could be loaded');
         }
 
-        let createdSession = null;
-        let activeModelBuffer = modelBuffer;
+        // Feature-detect navigator.gpu for WebGPU hardware acceleration (unless WebGPU previously failed)
+        let hasWebGPU = false;
+        if (!webgpuFailed && typeof navigator !== 'undefined' && navigator.gpu) {
+          try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (adapter) {
+              hasWebGPU = true;
+              console.info('[FaceDetector] WebGPU hardware adapter detected successfully.');
+            }
+          } catch (gpuErr) {
+            console.warn('[FaceDetector] navigator.gpu available but adapter request failed:', gpuErr.message);
+          }
+        }
 
-        // UltraFace RFB-320 contains broadcasting Mul nodes with output shape [1, 4420, 2]
-        // which ONNX Runtime Web's WebGPU JSEP compiler does not support.
-        // Pure WASM (with WebAssembly SIMD) runs stably at ~30ms latency with zero kernel errors.
+        const primaryEPs = (hasWebGPU && !webgpuFailed) ? ['webgpu', 'wasm'] : ['wasm'];
+        console.info(`[FaceDetector] Attempting InferenceSession creation with executionProviders: [${primaryEPs.join(', ')}]`);
+
+        let createdSession = null;
         try {
-          createdSession = await ortInstance.InferenceSession.create(activeModelBuffer, {
-            executionProviders: ['wasm'],
+          createdSession = await ortInstance.InferenceSession.create(cachedModelBuffer, {
+            executionProviders: primaryEPs,
             graphOptimizationLevel: 'all',
           });
-          console.log('[FaceDetector] Session initialized via high-performance WASM SIMD provider.');
-        } catch (wasmErr) {
-          console.warn('[FaceDetector] Pure WASM EP failed, attempting WebGPU fallback:', wasmErr.message);
-          createdSession = await ortInstance.InferenceSession.create(activeModelBuffer, {
-            executionProviders: ['webgpu', 'wasm'],
+          console.info(`[FaceDetector] Session initialized successfully with provider: ${primaryEPs.includes('webgpu') ? 'WebGPU' : 'WASM SIMD'}`);
+        } catch (epErr) {
+          console.warn('[FaceDetector] Primary execution provider failed, falling back to WASM SIMD:', epErr.message);
+          webgpuFailed = true;
+          createdSession = await ortInstance.InferenceSession.create(cachedModelBuffer, {
+            executionProviders: ['wasm'],
             graphOptimizationLevel: 'all',
           });
         }
@@ -154,6 +171,27 @@ Privamon.FaceDetector = (() => {
         session = createdSession;
         isAvailable = true;
         console.log('[FaceDetector] Face detection session initialized. Inputs:', session.inputNames);
+
+        // Run eager background warm-up inference if WebGPU provider was chosen,
+        // ensuring any JSEP kernel bugs are caught and resolved in background before user interaction
+        if (primaryEPs.includes('webgpu') && !webgpuFailed) {
+          try {
+            const dummyDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+            const dummyTensor = await prepareTensor(dummyDataUrl);
+            const feeds = {};
+            feeds[session.inputNames[0] || 'input'] = dummyTensor;
+            await session.run(feeds);
+          } catch (warmupErr) {
+            console.warn('[FaceDetector] Background WebGPU warm-up inference failed, switching to WASM SIMD:', warmupErr.message);
+            webgpuFailed = true;
+            session = await ortInstance.InferenceSession.create(cachedModelBuffer, {
+              executionProviders: ['wasm'],
+              graphOptimizationLevel: 'all',
+            });
+            console.info('[FaceDetector] Pre-warmed WASM SIMD session ready for immediate user interaction.');
+          }
+        }
+
         return session;
       } catch (err) {
         console.warn('[FaceDetector] Failed to initialize in-browser face detector:', err.message);
@@ -297,16 +335,21 @@ Privamon.FaceDetector = (() => {
     }
 
     // Convert to unified DetectionCandidate objects
-    return nmsResults.map(cand => Privamon.PIIDetector.toCandidate({
-      type: 'face',
-      source: 'vision',
-      text: null,
-      bbox: cand.bbox,
-      boxes: [cand.bbox],
-      confidence: cand.confidence,
-      reason: `face_model:${Math.round(cand.confidence * 100)}%`,
-      coordinateSpace: 'screenshot'
-    }));
+    return nmsResults.map(cand => {
+      const candidateObj = {
+        type: 'face',
+        source: 'vision',
+        text: null,
+        bbox: cand.bbox,
+        boxes: [cand.bbox],
+        confidence: cand.confidence,
+        reason: `face_model:${Math.round(cand.confidence * 100)}%`,
+        coordinateSpace: 'screenshot'
+      };
+      return (Privamon.PIIDetector && typeof Privamon.PIIDetector.toCandidate === 'function')
+        ? Privamon.PIIDetector.toCandidate(candidateObj)
+        : candidateObj;
+    });
   }
 
   /**
@@ -330,35 +373,43 @@ Privamon.FaceDetector = (() => {
       const results = await sess.run(feeds);
       return decodeDetections(results, regionBbox);
     } catch (err) {
-      console.warn('[FaceDetector] Inference error, falling back to pure WASM:', err.message);
-      try {
-        if (ortInstance) {
-          const modelPaths = [
-            resolveUrl('lib/onnx/version-RFB-320-clean.onnx'),
-            '../lib/onnx/version-RFB-320-clean.onnx',
-            'lib/onnx/version-RFB-320-clean.onnx',
-            resolveUrl('lib/onnx/blazeface.onnx')
-          ];
-          for (const url of modelPaths) {
-            try {
-              const resp = await fetch(url);
-              if (resp.ok) {
-                const buf = await resp.arrayBuffer();
-                session = await ortInstance.InferenceSession.create(buf, {
-                  executionProviders: ['wasm'],
-                  graphOptimizationLevel: 'all',
-                });
-                const inputTensor = await prepareTensor(regionDataUrl);
-                const feeds = {};
-                feeds[session.inputNames[0] || 'input'] = inputTensor;
-                const results = await session.run(feeds);
-                return decodeDetections(results, regionBbox);
-              }
-            } catch (e) {}
+      console.warn('[FaceDetector] WebGPU runtime inference error, switching session to WASM SIMD:', err.message);
+      webgpuFailed = true;
+
+      // Deduplicate fallback WASM session creation across concurrent callers
+      if (!fallbackWasmPromise) {
+        fallbackWasmPromise = (async () => {
+          try {
+            if (!cachedModelBuffer) throw new Error('No cached model buffer available for fallback');
+            console.info('[FaceDetector] Instantiating dedicated WASM SIMD fallback session...');
+            const wasmSess = await ortInstance.InferenceSession.create(cachedModelBuffer, {
+              executionProviders: ['wasm'],
+              graphOptimizationLevel: 'all',
+            });
+            session = wasmSess;
+            initPromise = Promise.resolve(session);
+            console.info('[FaceDetector] WASM SIMD fallback session created and cached permanently.');
+            return session;
+          } catch (e) {
+            console.error('[FaceDetector] WASM fallback session creation failed:', e.message);
+            return null;
+          } finally {
+            fallbackWasmPromise = null;
           }
+        })();
+      }
+
+      const fallbackSess = await fallbackWasmPromise;
+      if (fallbackSess) {
+        try {
+          const inputTensor = await prepareTensor(regionDataUrl);
+          const feeds = {};
+          feeds[fallbackSess.inputNames[0] || 'input'] = inputTensor;
+          const results = await fallbackSess.run(feeds);
+          return decodeDetections(results, regionBbox);
+        } catch (fbErr) {
+          console.warn('[FaceDetector] Fallback WASM inference failed:', fbErr.message);
         }
-      } catch (fbErr) {
-        console.warn('[FaceDetector] WASM fallback inference failed:', fbErr.message);
       }
       return [];
     }
