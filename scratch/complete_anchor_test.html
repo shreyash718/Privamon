@@ -3,11 +3,12 @@
 <head>
   <meta charset="utf-8">
   <script src="/lib/tesseract/tesseract.min.js"></script>
+  <script src="/privacy/pii-detector.js"></script>
 </head>
 <body>
-  <h1>Anchor Test</h1>
+  <h1>Complete Invoice Anchor Test</h1>
   <script>
-    function detectFormFieldAnchors(ocrWords, regionBbox) {
+    function detectFormFieldAnchors(ocrWords, ocrLines, regionBbox) {
       if (!ocrWords || !ocrWords.length) return [];
       const anchors = [];
       const regX = regionBbox.x;
@@ -36,7 +37,7 @@
 
       // Check if this document is an invoice/bill/form
       const fullDocText = ocrWords.map(w => w.text).join(' ').toLowerCase();
-      const isInvoiceOrForm = /invoice|bill|tax|gst|particulars|cash|receipt|challan|order|model/i.test(fullDocText);
+      const isInvoiceOrForm = /invoice|bill|tax|gst|particulars|cash\s*memo|receipt|challan|order/i.test(fullDocText);
 
       let foundName = false;
       let foundMob = false;
@@ -45,15 +46,17 @@
 
       for (const line of lines) {
         line.sort((a, b) => a.bbox.x - b.bbox.x);
-        const lineClean = line.map(w => w.text).join(' ').toLowerCase();
+        const lineText = line.map(w => w.text).join(' ');
+        const lineClean = lineText.toLowerCase();
 
         for (let wi = 0; wi < line.length; wi++) {
           const w = line[wi];
           const clean = w.text.toLowerCase().replace(/[^a-z0-9!]/g, '');
 
+          // Helper to get subsequent words on this line
           const getSubsequent = (fromX) => line.filter(other => other.bbox.x > fromX);
 
-          // ── Anchor 1: Customer Name ──
+          // ── Anchor 1: Customer / Person Name ──
           if (!foundName && (/^(?:name|customer|patient|buyer|client)$/i.test(clean) ||
               (clean === 'nam' && line[wi + 1] && /^(?:e|is)$/i.test(line[wi + 1].text.toLowerCase().replace(/[^a-z]/g, ''))))) {
             let refWord = w;
@@ -89,6 +92,7 @@
 
           // ── Anchor 2: Mobile / Phone ──
           if (!foundMob && /^(?:mob|mod|mobile|phone|contact|tel|cell|ono)$/i.test(clean)) {
+            // Avoid matching 'Smart Phone' or product descriptions
             const prevWord = line[wi - 1];
             if (prevWord && /smart|feature|cell|mobile/i.test(prevWord.text)) continue;
 
@@ -161,6 +165,7 @@
 
           // ── Anchor 4: Signature ──
           if (!foundSignature && (/signature|signatory|bugnacure|bgnarure/i.test(clean) || (clean === 'sign' && line.length <= 4))) {
+            // If it's near the bottom right (authorized signature)
             if (w.bbox.x > regX + regW * 0.5 && w.bbox.y > regY + regH * 0.70) {
               const sigX = Math.max(regX + regW * 0.65, w.bbox.x - 30);
               const sigY = Math.max(regY + regH * 0.78, w.bbox.y - 50);
@@ -174,17 +179,32 @@
                 bbox: { x: sigX, y: sigY, width: Math.max(90, sigW), height: 55 }
               });
               foundSignature = true;
+            } else if (/customer/i.test(lineClean)) {
+              // Customer signature line
+              const sigX = Math.max(regX + 10, w.bbox.x - 20);
+              const sigY = Math.max(regY + 10, w.bbox.y - 40);
+              anchors.push({
+                type: 'signature',
+                text: 'Customer Signature Ink',
+                confidence: 0.95,
+                decision: 'REDACT',
+                reason: 'form_field_anchor:customer_signature',
+                bbox: { x: sigX, y: sigY, width: 100, height: 45 }
+              });
             }
           }
         }
       }
 
-      // ── Form Structure Fallback (when labels are faint on printed receipt) ──
+      // ── Form Structure Fallback ──
+      // If invoice/bill is confirmed, but faint labels were dropped by OCR:
+      // Fill the expected standard form slots
       if (isInvoiceOrForm) {
+        // Name slot: approx y = 26% to 32% of bill, left ~18% to 65%
         if (!foundName) {
           const nameX = regX + Math.round(regW * 0.18);
           const nameY = regY + Math.round(regH * 0.26);
-          const nameW = Math.round(regW * 0.54);
+          const nameW = Math.round(regW * 0.50);
           anchors.push({
             type: 'name',
             text: 'Customer Name Field (Form Region)',
@@ -195,10 +215,11 @@
           });
         }
 
+        // Mobile slot: approx y = 31% to 37% of bill, left ~20% to 75%
         if (!foundMob) {
           const mobX = regX + Math.round(regW * 0.20);
           const mobY = regY + Math.round(regH * 0.31);
-          const mobW = Math.round(regW * 0.56);
+          const mobW = Math.round(regW * 0.55);
           anchors.push({
             type: 'phone',
             text: 'Mobile Number Field (Form Region)',
@@ -209,10 +230,11 @@
           });
         }
 
+        // IMEI slot: approx y = 45% to 51% of bill, left ~28% to 70%
         if (!foundImei) {
           const imeiX = regX + Math.round(regW * 0.28);
           const imeiY = regY + Math.round(regH * 0.45);
-          const imeiW = Math.round(regW * 0.46);
+          const imeiW = Math.round(regW * 0.45);
           anchors.push({
             type: 'device_id',
             text: 'IMEI / Serial Field (Form Region)',
@@ -223,6 +245,7 @@
           });
         }
 
+        // Signature slot: bottom right
         if (!foundSignature) {
           const sigX = regX + Math.round(regW * 0.68);
           const sigY = regY + Math.round(regH * 0.82);
@@ -289,7 +312,7 @@
           }
         })).filter(w => w.text);
 
-        const anchors = detectFormFieldAnchors(ocrWords, billBbox);
+        const anchors = detectFormFieldAnchors(ocrWords, res.data.lines, billBbox);
 
         // Header phone numbers & GSTIN
         const additional = [];
@@ -327,18 +350,17 @@
           outCtx.fillRect(d.bbox.x, d.bbox.y, d.bbox.width, d.bbox.height);
         }
 
-        await fetch('http://localhost:8976/results', {
+        await fetch('http://localhost:8988/results', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             detections: allDetections,
-            wordsCount: ocrWords.length,
             redactedDataUrl: outCanvas.toDataURL('image/png')
           })
         });
 
       } catch (err) {
-        await fetch('http://localhost:8976/results', {
+        await fetch('http://localhost:8988/results', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ error: err.stack || err.message })

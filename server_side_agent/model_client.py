@@ -248,7 +248,7 @@ HOW TO REASON UNDER REDACTION:
 8. State every assumption explicitly in the assumptions list.
 9. Don't hallucinate content behind a redaction.
 
-SPECIAL GUIDANCE FOR CHAT & MESSAGING (e.g. WhatsApp, Slack, Messenger):
+SPECIAL GUIDANCE FOR CHAT & MESSAGING: (e.g. WhatsApp, Slack, Messenger)
 - Multi-Step Contact Search & Message Flow (e.g. "message Tanishq I will not be available", "search for contact Tanishq and message him...", "send 'Tanishq' a 10 line poem"):
   * Step 1 (Search for contact): Type the contact name into the left contact search bar (look for placeholder "Search or start new chat", "Search", id="search", or role="textbox" on top-left at x < 400, y < 150). DO NOT type into the bottom message textbox on the right!
   * Step 2 (Select contact from search list): In the search results under "Chats" on the left (x < 450, 65 <= y <= 400), click the FIRST/TOP contact result card that matches the contact name. DO NOT click the message textbox on the right yet.
@@ -261,7 +261,7 @@ SPECIAL GUIDANCE FOR CHAT & MESSAGING (e.g. WhatsApp, Slack, Messenger):
 
 - CRITICAL: NEVER target a microphone or voice recording button (labeled "Voice message", "Microphone", "PTT", or "(Microphone / Voice Record Button - NOT A TEXTBOX)") for text tasks or "type" actions. Always target the actual TEXTBOX (labeled "Type a message", role="textbox", contenteditable).
 
-SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS (e.g. Flipkart, YouTube, Amazon, Google):
+SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS: (e.g. Flipkart, YouTube, Amazon, Google)
 - When the user asks to search for something, find a product/video/song/topic, or look up information (e.g. "search stylish watches for me", "search watches on flipkart", "search Indias got latent and play most viewed video", "search 'Khat' and play first video"):
   1. ALWAYS use action type "type" targeting the search input box (look for elements with placeholder/label "Search", id="search", name="search_query", or tag="input" / role="combobox" / type="text" at the top of the page).
   2. CRITICAL: NEVER emit action type "click" on a search button (Search Icon, magnifying glass button, submit button) when starting a search or when the search input is empty! The search button does NOTHING if the query is not in the search box.
@@ -281,7 +281,8 @@ VERIFYING TASK COMPLETION IN MULTI-STEP LOOPS (CRITICAL):
   2. For messaging: If the requested message is visible in the chat history/bubbles, OR the chat input is cleared/empty after sending, THE TASK IS COMPLETE! Return action type "done":
      Example: {{"type": "done", "targetElementId": null, "value": null, "scrollDirection": null}}
   3. If the message text is sitting in the textbox and NOT yet sent (with a Send button visible), return action type "click" targeting the Send button. DO NOT return "done" if the message text is still sitting unsubmitted inside the input field.
-  4. For search tasks: NEVER return action type "done" on the homepage or when the search input is still empty! Homepage banners, carousels, or suggested items are NOT search results. You may only return "done" once the search results page (/search, /results, /s) is actually loaded with results for the user's specific query.
+  4. For search tasks: NEVER ret
+  urn action type "done" on the homepage or when the search input is still empty! Homepage banners, carousels, or suggested items are NOT search results. You may only return "done" once the search results page (/search, /results, /s) is actually loaded with results for the user's specific query.
   5. For video playback tasks: DO NOT return "done" on search results pages when the user asked to play a video! On search results, emit action type "click" targeting the requested/first video title link. Only return action type "done" once the video watch page (/watch) is open and playing.
   6. NEVER re-type or re-send the same message if prior actions show it was already executed and delivered. Return "done".
 
@@ -394,6 +395,22 @@ def build_request_payload(
         }
         payload.update(build_format_param("openrouter", schema))
         return payload
+
+def extract_json_block(text: str) -> str:
+    """
+    Strips markdown formatting and extracts JSON object substring from text.
+    """
+    if not text:
+        return ""
+    clean = text.strip()
+    if "```" in clean:
+        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.MULTILINE)
+        clean = re.sub(r"\s*```$", "", clean, flags=re.MULTILINE)
+
+    match = re.search(r"\{.*\}", clean, re.DOTALL)
+    if match:
+        clean = match.group(0)
+    return clean
 
 def call_ollama(prompt: str, image_b64: str, schema: dict = None) -> tuple[str, str]:
     """
@@ -547,16 +564,7 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
     if not raw_text:
         return None, "Empty response received from model"
 
-    clean = raw_text.strip()
-    # Strip markdown block if present
-    if "```" in clean:
-        clean = re.sub(r"^```(?:json)?\s*", "", clean, flags=re.MULTILINE)
-        clean = re.sub(r"\s*```$", "", clean, flags=re.MULTILINE)
-
-    # Extract JSON bracket match
-    match = re.search(r"\{.*\}", clean, re.DOTALL)
-    if match:
-        clean = match.group(0)
+    clean = extract_json_block(raw_text)
 
     try:
         data = json.loads(clean)

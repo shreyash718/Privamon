@@ -1,8 +1,11 @@
 import sys, os, base64, io
 from PIL import Image
 
-sys.path.append(os.path.abspath("server_side_agent"))
-import model_client
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "server_side_agent"))
+try:
+    import model_client  # type: ignore
+except ImportError:
+    from server_side_agent import model_client  # type: ignore
 
 def test_png_optimization():
     # Create test image with red square
