@@ -180,15 +180,24 @@ Privamon.NEREngine = (() => {
           console.info('[NEREngine] Initializing Transformers.js pipeline with device: wasm');
         }
 
-        // 5. Load model (reuse promise if already downloading/compiling)
-        if (!modelLoadPromise) {
-          modelLoadPromise = pipeline('token-classification', 'Xenova/bert-base-NER', {
+        // 5. Load model with device fallback
+        try {
+          nerPipeline = await pipeline('token-classification', 'Xenova/bert-base-NER', {
             device: targetDevice,
             quantized: true,
           });
+        } catch (devErr) {
+          if (targetDevice !== 'wasm') {
+            console.warn('[NEREngine] Device webgpu failed, retrying with wasm:', devErr.message);
+            nerPipeline = await pipeline('token-classification', 'Xenova/bert-base-NER', {
+              device: 'wasm',
+              quantized: true,
+            });
+          } else {
+            throw devErr;
+          }
         }
 
-        nerPipeline = await modelLoadPromise;
         isAvailable = true;
         console.log(`[NEREngine] Initialized Xenova/bert-base-NER in ${Math.round(performance.now() - tStart)}ms`);
         return nerPipeline;
@@ -316,8 +325,11 @@ Privamon.NEREngine = (() => {
     }
 
     const candidates = [];
+    const itemsToProcess = validItems.slice(0, 6);
 
-    for (const item of validItems) {
+    for (const item of itemsToProcess) {
+      // Yield to event loop so extension popup and UI threads stay responsive
+      await new Promise(r => setTimeout(r, 80));
       try {
         const text = item.text.trim();
         if (text.length > MAX_CHUNK_LENGTH) {

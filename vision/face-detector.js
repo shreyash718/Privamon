@@ -149,48 +149,18 @@ Privamon.FaceDetector = (() => {
           }
         }
 
-        const primaryEPs = (hasWebGPU && !webgpuFailed) ? ['webgpu', 'wasm'] : ['wasm'];
-        console.info(`[FaceDetector] Attempting InferenceSession creation with executionProviders: [${primaryEPs.join(', ')}]`);
+        const primaryEPs = ['wasm'];
+        console.info(`[FaceDetector] Creating InferenceSession with executionProviders: [${primaryEPs.join(', ')}]`);
 
-        let createdSession = null;
-        try {
-          createdSession = await ortInstance.InferenceSession.create(cachedModelBuffer, {
-            executionProviders: primaryEPs,
-            graphOptimizationLevel: 'all',
-          });
-          console.info(`[FaceDetector] Session initialized successfully with provider: ${primaryEPs.includes('webgpu') ? 'WebGPU' : 'WASM SIMD'}`);
-        } catch (epErr) {
-          console.warn('[FaceDetector] Primary execution provider failed, falling back to WASM SIMD:', epErr.message);
-          webgpuFailed = true;
-          createdSession = await ortInstance.InferenceSession.create(cachedModelBuffer, {
-            executionProviders: ['wasm'],
-            graphOptimizationLevel: 'all',
-          });
-        }
+        const createdSession = await ortInstance.InferenceSession.create(cachedModelBuffer, {
+          executionProviders: primaryEPs,
+          graphOptimizationLevel: 'all',
+        });
+        console.info('[FaceDetector] Session initialized successfully with WASM SIMD provider');
 
         session = createdSession;
         isAvailable = true;
         console.log('[FaceDetector] Face detection session initialized. Inputs:', session.inputNames);
-
-        // Run eager background warm-up inference if WebGPU provider was chosen,
-        // ensuring any JSEP kernel bugs are caught and resolved in background before user interaction
-        if (primaryEPs.includes('webgpu') && !webgpuFailed) {
-          try {
-            const dummyDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-            const dummyTensor = await prepareTensor(dummyDataUrl);
-            const feeds = {};
-            feeds[session.inputNames[0] || 'input'] = dummyTensor;
-            await session.run(feeds);
-          } catch (warmupErr) {
-            console.warn('[FaceDetector] Background WebGPU warm-up inference failed, switching to WASM SIMD:', warmupErr.message);
-            webgpuFailed = true;
-            session = await ortInstance.InferenceSession.create(cachedModelBuffer, {
-              executionProviders: ['wasm'],
-              graphOptimizationLevel: 'all',
-            });
-            console.info('[FaceDetector] Pre-warmed WASM SIMD session ready for immediate user interaction.');
-          }
-        }
 
         return session;
       } catch (err) {
@@ -427,7 +397,9 @@ Privamon.FaceDetector = (() => {
     const sess = await initialize();
     if (!sess) return [];
 
-    for (const region of eligibleRegions) {
+    for (const region of eligibleRegions.slice(0, 4)) {
+      // Yield to event loop so extension popup / side panel stays responsive
+      await new Promise(r => setTimeout(r, 80));
       try {
         const screenshotBbox = mapper ? mapper.mapBbox(region.bbox) : region.bbox;
         const cropDataUrl = await Privamon.Redactor.extractRegion(screenshotDataUrl, screenshotBbox);

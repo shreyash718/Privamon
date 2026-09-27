@@ -6,6 +6,7 @@
 
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "offscreen",
     "storage",
@@ -16,6 +17,7 @@
     "default_path": "popup.html?view=sidepanel"
   },
   "host_permissions": [
+    "<all_urls>",
     "http://127.0.0.1/*",
     "http://localhost/*",
     "https://privamon.onrender.com/*",

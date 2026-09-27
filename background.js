@@ -150,6 +150,26 @@ function forwardToPopup(message) {
       message: message.message || ''
     });
   }
+  if (message.type === 'pipelineProgress') {
+    chrome.storage.local.set({
+      privamon_redaction_state: {
+        isRunning: true,
+        stageId: message.stageId,
+        status: message.status,
+        statusText: message.statusText
+      }
+    }).catch(() => {});
+  }
+  if (message.type === 'pipelineComplete' || message.type === 'pipelineError') {
+    chrome.storage.local.set({
+      privamon_redaction_state: {
+        isRunning: false,
+        stageId: message.stageId || 'complete',
+        status: message.type === 'pipelineComplete' ? 'done' : 'error',
+        statusText: message.type === 'pipelineComplete' ? 'Redaction complete' : (message.error || 'Error')
+      }
+    }).catch(() => {});
+  }
   chrome.runtime.sendMessage(message).catch(() => {
     // Popup might be closed — stored in chrome.storage.local for popup reopen
   });
@@ -262,6 +282,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Get active redaction test state (for popup UI sync on reopen)
+  if (message.action === 'getRedactionState') {
+    chrome.storage.local.get(['privamon_redaction_state'], (res) => {
+      sendResponse({
+        isRunning: isRedactionTestRunning,
+        state: res.privamon_redaction_state || null
+      });
+    });
+    return true;
+  }
+
   // From offscreen: offscreen document loaded and ready
   if (message.type === 'offscreenReady') {
     offscreenReady = true;
@@ -302,9 +333,13 @@ let lastOperableTabId = null;
  * it returns to the last analyzed tab, or finds an open web tab (across all windows).
  */
 async function getOperableTab() {
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let [activeTab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!activeTab) {
+    [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  }
+  const activeUrl = activeTab?.url || activeTab?.pendingUrl;
 
-  if (activeTab && !isRestrictedUrl(activeTab.url)) {
+  if (activeTab && !isRestrictedUrl(activeUrl)) {
     lastOperableTabId = activeTab.id;
     return activeTab;
   }
@@ -313,13 +348,14 @@ async function getOperableTab() {
   if (lastOperableTabId) {
     try {
       const lastTab = await chrome.tabs.get(lastOperableTabId);
-      if (lastTab && !isRestrictedUrl(lastTab.url)) {
-        console.log(`[Background] Switching back to last analyzed tab: ${lastTab.url}`);
+      const lastUrl = lastTab?.url || lastTab?.pendingUrl;
+      if (lastTab && !isRestrictedUrl(lastUrl)) {
+        console.log(`[Background] Switching back to last analyzed tab: ${lastUrl}`);
         if (lastTab.windowId) {
           await chrome.windows.update(lastTab.windowId, { focused: true }).catch(() => {});
         }
         await chrome.tabs.update(lastTab.id, { active: true });
-        await new Promise(r => setTimeout(r, 450));
+        await new Promise(r => setTimeout(r, 600));
         return lastTab;
       }
     } catch (e) {
@@ -328,27 +364,31 @@ async function getOperableTab() {
   }
 
   // 2. Search tabs in the current window first
-  const isAccessible = (t) => t && t.url && !isRestrictedUrl(t.url);
+  const isAccessible = (t) => {
+    const u = t?.url || t?.pendingUrl;
+    return Boolean(u && !isRestrictedUrl(u));
+  };
   const currentWindowTabs = await chrome.tabs.query({ currentWindow: true });
 
-  let candidate = currentWindowTabs.find(t => t.url && t.url.includes('web.whatsapp.com'))
+  let candidate = currentWindowTabs.find(t => (t.url || t.pendingUrl || '').includes('web.whatsapp.com'))
                || currentWindowTabs.find(isAccessible);
 
   // 3. If not found in current window, search across all open browser windows
   if (!candidate) {
     const allTabs = await chrome.tabs.query({});
-    candidate = allTabs.find(t => t.url && t.url.includes('web.whatsapp.com'))
+    candidate = allTabs.find(t => (t.url || t.pendingUrl || '').includes('web.whatsapp.com'))
              || allTabs.find(isAccessible);
   }
 
   if (candidate) {
-    console.log(`[Background] Active tab is restricted (${activeTab?.url || 'unknown'}). Switching to operable tab: ${candidate.url}`);
+    const candUrl = candidate.url || candidate.pendingUrl || 'unknown';
+    console.log(`[Background] Active tab is restricted (${activeUrl || 'unknown'}). Switching to operable tab: ${candUrl}`);
     if (candidate.windowId) {
       await chrome.windows.update(candidate.windowId, { focused: true }).catch(() => {});
     }
     await chrome.tabs.update(candidate.id, { active: true });
     // Brief settle delay for Chrome to bring tab into focus
-    await new Promise(r => setTimeout(r, 450));
+    await new Promise(r => setTimeout(r, 600));
     lastOperableTabId = candidate.id;
     return candidate;
   }
@@ -395,9 +435,17 @@ async function handleStartAnalysis(task) {
     });
 
     const captureStart = performance.now();
-    const screenshot = await chrome.tabs.captureVisibleTab(null, {
-      format: 'png',
-    });
+    let screenshot = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        screenshot = await chrome.tabs.captureVisibleTab(tab?.windowId || null, { format: 'png' });
+        if (screenshot) break;
+      } catch (capErr) {
+        console.warn(`[Background] captureVisibleTab retry ${attempt + 1}:`, capErr.message);
+        await new Promise(r => setTimeout(r, 650));
+      }
+    }
+    if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure tab is active and visible.');
     const captureTime = Math.round(performance.now() - captureStart);
 
     forwardToPopup({
@@ -588,11 +636,11 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
     let screenshot = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+        screenshot = await chrome.tabs.captureVisibleTab(tab?.windowId || null, { format: 'png' });
         if (screenshot) break;
       } catch (capErr) {
         console.warn(`[Background] captureVisibleTab retry ${attempt + 1}:`, capErr.message);
-        await new Promise(r => setTimeout(r, 450));
+        await new Promise(r => setTimeout(r, 650));
       }
     }
     if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure page is visible.');
@@ -742,8 +790,25 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
  * 4. Stores result in chrome.storage.session for results.html inspection.
  * 5. Returns redacted result directly to caller with ZERO server network calls.
  */
+let isRedactionTestRunning = false;
+
 async function handleTestRedactionOnly() {
+  if (isRedactionTestRunning) {
+    console.log('[Background] Test Redaction already in progress. Ignoring duplicate request.');
+    return { success: true, running: true, message: 'Redaction test already in progress in background' };
+  }
+  isRedactionTestRunning = true;
   console.log('[Background] Test Redaction requested (Zero Server Transmission)');
+
+  chrome.storage.local.set({
+    privamon_redaction_state: {
+      isRunning: true,
+      stageId: 'start',
+      status: 'active',
+      statusText: 'Starting redaction test (Zero Server)...'
+    },
+    privamon_active_mode: 'redaction'
+  }).catch(() => {});
 
   const keepAliveInterval = setInterval(() => {
     chrome.runtime.getPlatformInfo().catch(() => {});
@@ -763,11 +828,11 @@ async function handleTestRedactionOnly() {
     let screenshot = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        screenshot = await chrome.tabs.captureVisibleTab(null, { format: 'png' });
+        screenshot = await chrome.tabs.captureVisibleTab(tab?.windowId || null, { format: 'png' });
         if (screenshot) break;
       } catch (capErr) {
         console.warn(`[Background] captureVisibleTab retry ${attempt + 1}:`, capErr.message);
-        await new Promise(r => setTimeout(r, 450));
+        await new Promise(r => setTimeout(r, 650));
       }
     }
     if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure tab is active and visible.');
@@ -856,7 +921,16 @@ async function handleTestRedactionOnly() {
       pageUrl: tab.url || ''
     };
   } finally {
+    isRedactionTestRunning = false;
     clearInterval(keepAliveInterval);
+    chrome.storage.local.set({
+      privamon_redaction_state: {
+        isRunning: false,
+        stageId: 'complete',
+        status: 'done',
+        statusText: 'Redaction idle'
+      }
+    }).catch(() => {});
   }
 }
 

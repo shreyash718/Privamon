@@ -136,17 +136,25 @@ function detectViewMode() {
 }
 detectViewMode();
 
-// ── Initialization ──
-document.addEventListener('DOMContentLoaded', async () => {
+function initPopup() {
   detectViewMode();
   window.addEventListener('resize', detectViewMode);
-  await loadSettings();
-  await checkServerHealth();
-  await loadChatHistory();
-  await syncActiveLoopState();
-  await initModeAndRedactionTab();
   setupEventListeners();
-});
+
+  // Asynchronously hydrate state without blocking UI responsiveness
+  loadSettings().catch(console.warn);
+  checkServerHealth().catch(console.warn);
+  loadChatHistory().catch(console.warn);
+  syncActiveLoopState().catch(console.warn);
+  syncRedactionProgress().catch(console.warn);
+  initModeAndRedactionTab().catch(console.warn);
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initPopup);
+} else {
+  initPopup();
+}
 
 function setupEventListeners() {
   // Chat query submission
@@ -213,19 +221,21 @@ function setupEventListeners() {
   }
 
   // Open side panel
-  openSidePanelBtn.addEventListener('click', async () => {
-    try {
-      if (chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
-        const window = await chrome.windows.getCurrent();
-        await chrome.sidePanel.open({ windowId: window.id });
-        window.close();
-      } else {
-        alert('Side panel is available in Chrome 114+ by clicking the side panel icon in your toolbar.');
+  if (openSidePanelBtn) {
+    openSidePanelBtn.addEventListener('click', async () => {
+      try {
+        if (chrome.sidePanel && typeof chrome.sidePanel.open === 'function') {
+          const currentWin = await chrome.windows.getCurrent();
+          await chrome.sidePanel.open({ windowId: currentWin.id });
+          window.close(); // DOM window.close() closes the popup bubble
+        } else {
+          alert('Side panel is available in Chrome 114+ by clicking the side panel icon in your toolbar.');
+        }
+      } catch (e) {
+        console.warn('Could not open side panel:', e);
       }
-    } catch (e) {
-      console.warn('Could not open side panel:', e);
-    }
-  });
+    });
+  }
 
   // Lightbox navigation & close handlers
   if (closeLightboxBtn) closeLightboxBtn.addEventListener('click', closeLightbox);
@@ -405,23 +415,50 @@ function setupEventListeners() {
 
   // Listen for pipeline progress from background service worker
   chrome.runtime.onMessage.addListener((message) => {
-    if (message.type === 'pipelineProgress' && isBusy) {
-      updateProgressUI(message.statusText || 'Processing page...', message.stageId);
-    }
-    if (message.type === 'pipelineComplete' && message.result && message.result.turn && isBusy) {
-      const turn = message.result.turn;
-      const existing = document.getElementById(turn.id);
-      if (!existing) {
-        currentTurns.push(turn);
-        const turnEl = createTurnCard(turn);
-        chatTimeline.appendChild(turnEl);
-        scrollToBottom();
+    if (message.type === 'pipelineProgress') {
+      if (activeProgressCard && !activeProgressCard.classList.contains('hidden')) {
+        updateProgressUI(message.statusText || 'Processing page...', message.stageId);
       }
-      isBusy = false;
-      activeProgressCard.classList.add('hidden');
-      taskInput.disabled = false;
-      sendBtn.disabled = false;
-      taskInput.focus();
+      if (redactionProgressHeadline) {
+        redactionProgressHeadline.textContent = message.statusText || 'Processing page...';
+      }
+      if (redactionProgressCard) {
+        redactionProgressCard.classList.remove('hidden');
+      }
+      if (redactionEmptyState) {
+        redactionEmptyState.classList.add('hidden');
+      }
+      if (runRedactionTestBtn) runRedactionTestBtn.disabled = true;
+      if (heroStartTestBtn) heroStartTestBtn.disabled = true;
+      isBusy = true;
+    }
+    if (message.type === 'pipelineComplete') {
+      if (message.result && message.result.turn && isBusy) {
+        const turn = message.result.turn;
+        const existing = document.getElementById(turn.id);
+        if (!existing) {
+          currentTurns.push(turn);
+          const turnEl = createTurnCard(turn);
+          chatTimeline.appendChild(turnEl);
+          scrollToBottom();
+        }
+        isBusy = false;
+        activeProgressCard.classList.add('hidden');
+        taskInput.disabled = false;
+        sendBtn.disabled = false;
+        taskInput.focus();
+      }
+      // Check if session storage has the test redaction result
+      chrome.storage.session.get(['privamon_result'], (sessionData) => {
+        if (sessionData && sessionData.privamon_result && sessionData.privamon_result.sanitizedScreenshot) {
+          testRedactionResult = sessionData.privamon_result;
+          renderRedactionTestResults(testRedactionResult);
+          if (runRedactionTestBtn) runRedactionTestBtn.disabled = false;
+          if (heroStartTestBtn) heroStartTestBtn.disabled = false;
+          if (redactionProgressCard) redactionProgressCard.classList.add('hidden');
+          isBusy = false;
+        }
+      });
     }
     // Action execution feedback
     if (message.type === 'actionExecuted' && message.result) {
@@ -463,7 +500,7 @@ function setupEventListeners() {
     }
   });
 
-  // Real-time synchronization when background saves new turns to storage
+  // Real-time synchronization when background saves new turns or redaction states
   if (isExtensionContext && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === 'local' && changes.privamon_chat_history) {
@@ -486,6 +523,20 @@ function setupEventListeners() {
               taskInput.focus();
             }
           }
+        }
+      }
+      if (area === 'local' && changes.privamon_redaction_state) {
+        syncRedactionProgress();
+      }
+      if (area === 'session' && changes.privamon_result) {
+        const res = changes.privamon_result.newValue;
+        if (res && res.sanitizedScreenshot) {
+          testRedactionResult = res;
+          renderRedactionTestResults(testRedactionResult);
+          if (runRedactionTestBtn) runRedactionTestBtn.disabled = false;
+          if (heroStartTestBtn) heroStartTestBtn.disabled = false;
+          if (redactionProgressCard) redactionProgressCard.classList.add('hidden');
+          isBusy = false;
         }
       }
     });
@@ -608,6 +659,30 @@ function startActiveLoopPolling() {
       loopPollingInterval = null;
     }
   }, 1500);
+}
+
+// ── Background Redaction Test Synchronization ──
+async function syncRedactionProgress() {
+  if (!isExtensionContext) return;
+  try {
+    const res = await chrome.storage.local.get(['privamon_redaction_state']);
+    const state = res.privamon_redaction_state;
+    if (state && state.isRunning) {
+      isBusy = true;
+      if (runRedactionTestBtn) runRedactionTestBtn.disabled = true;
+      if (heroStartTestBtn) heroStartTestBtn.disabled = true;
+      if (redactionProgressCard) redactionProgressCard.classList.remove('hidden');
+      if (redactionEmptyState) redactionEmptyState.classList.add('hidden');
+      if (redactionProgressHeadline) redactionProgressHeadline.textContent = state.statusText || 'Redacting on-device...';
+      if (redactionProgressSub) redactionProgressSub.textContent = 'Processing in background (Zero Server)...';
+    } else if (state && !state.isRunning) {
+      if (runRedactionTestBtn) runRedactionTestBtn.disabled = false;
+      if (heroStartTestBtn) heroStartTestBtn.disabled = false;
+      if (redactionProgressCard && !isBusy) redactionProgressCard.classList.add('hidden');
+    }
+  } catch (e) {
+    console.warn('[Popup] Failed to sync redaction progress:', e);
+  }
 }
 
 // ── Chat History ──
@@ -1557,8 +1632,9 @@ function formatSyntaxHighlight(raw) {
 
 async function initModeAndRedactionTab() {
   try {
-    const stored = await chrome.storage.local.get(['privamon_active_mode']);
-    if (stored && stored.privamon_active_mode === 'redaction') {
+    const stored = await chrome.storage.local.get(['privamon_active_mode', 'privamon_redaction_state']);
+    const isRedactionRunning = stored && stored.privamon_redaction_state && stored.privamon_redaction_state.isRunning;
+    if ((stored && stored.privamon_active_mode === 'redaction') || isRedactionRunning) {
       switchMode('redaction');
     }
   } catch (e) {}
@@ -1659,6 +1735,10 @@ async function runRedactionTest() {
 
   try {
     const resp = await chrome.runtime.sendMessage({ action: 'testRedactionOnly' });
+    if (resp && resp.running) {
+      console.log('[Popup] Redaction test active in background...');
+      return;
+    }
     if (!resp || !resp.success) {
       throw new Error(resp?.error || 'Redaction test returned no data');
     }
@@ -1666,15 +1746,20 @@ async function runRedactionTest() {
     testRedactionResult = resp;
     renderRedactionTestResults(resp);
   } catch (err) {
+    const msg = err.message || '';
+    if (msg.includes('message channel closed') || msg.includes('Receiving end does not exist')) {
+      console.warn('[Popup] Redaction test is executing in background...');
+      return;
+    }
     console.error('[Popup] Redaction test error:', err);
     if (redactionProgressHeadline) redactionProgressHeadline.textContent = 'Redaction Test Failed';
-    if (redactionProgressSub) redactionProgressSub.textContent = err.message || 'Error executing test pipeline';
+    if (redactionProgressSub) redactionProgressSub.textContent = msg || 'Error executing test pipeline';
   } finally {
     isBusy = false;
     if (runRedactionTestBtn) runRedactionTestBtn.disabled = false;
     if (heroStartTestBtn) heroStartTestBtn.disabled = false;
     setTimeout(() => {
-      if (redactionProgressCard) redactionProgressCard.classList.add('hidden');
+      if (redactionProgressCard && !isBusy) redactionProgressCard.classList.add('hidden');
     }, 1200);
   }
 }

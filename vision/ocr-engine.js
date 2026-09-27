@@ -31,7 +31,7 @@ Privamon.OCREngine = (() => {
   const MIN_OCR_WIDTH = 60;
   const MIN_OCR_HEIGHT = 25;
   const MAX_OCR_AREA = 5000000;
-  const MAX_OCR_REGIONS = 6; // Cap at top 6 regions to prevent multi-minute stalls on complex pages
+  const MAX_OCR_REGIONS = 4; // Cap at top 4 regions to keep browser responsive and avoid UI freezes
 
   /**
    * Filter pixel regions to only those worth running OCR on.
@@ -887,6 +887,8 @@ Privamon.OCREngine = (() => {
       const itemsForNER = [];
 
       for (let i = 0; i < regions.length; i++) {
+        // Cooperative yield so extension popup / side panel can open smoothly
+        await new Promise(resolve => setTimeout(resolve, 80));
         const region = regions[i];
         const rId = region.regionId || `region_${i}`;
 

@@ -68,9 +68,13 @@ Privamon.SanitizePipeline = (() => {
       }
     };
 
+    // Cooperative yielding to event loop ensures extension popup / side panel can open at any time
+    const yieldEventLoop = (ms = 80) => new Promise(resolve => setTimeout(resolve, ms));
+
     // ── 1. Image Dimensions & Coordinate Mapping Setup ──
     const screenshotDims = await getImageDimensions(screenshot);
     const mapper = Privamon.CoordinateMapper.create(domData.viewportInfo, screenshotDims);
+    await yieldEventLoop();
 
     // ── 2. Stage: Pixel Region Selection & Parallel OCR / Vision Analysis ──
     progress('pixelId', 'active', 'Selecting pixel-bearing candidates...');
@@ -79,7 +83,7 @@ Privamon.SanitizePipeline = (() => {
     const allPixelRegions = domData.pixelRegions || [];
     const ocrRegions = Privamon.OCREngine.selectRegionsForOCR(allPixelRegions, domData.viewportInfo);
 
-    // Prioritize largest candidate regions for closeup face analysis, cap at 6
+    // Prioritize largest candidate regions for closeup face analysis, cap at top 3
     const candidateVision = Privamon.FaceDetector
       ? allPixelRegions.filter(Privamon.FaceDetector.shouldProcess)
       : [];
@@ -88,7 +92,7 @@ Privamon.SanitizePipeline = (() => {
       const areaB = (b.bbox?.width || 0) * (b.bbox?.height || 0);
       return areaB - areaA;
     });
-    const visionRegions = candidateVision.slice(0, 6);
+    const visionRegions = candidateVision.slice(0, 3);
 
     timings.pixelIdentification = Math.round(performance.now() - tPixelStart);
     progress('pixelId', 'done', `OCR: ${ocrRegions.length}, Vision: ${visionRegions.length}`);
@@ -106,13 +110,13 @@ Privamon.SanitizePipeline = (() => {
         timings.ocr = Math.round(performance.now() - t0);
         return res;
       })(),
-      // Vision Pass: run both per-region and full-screenshot face detection
+      // Vision Pass: high-resolution closeup DOM regions + full screenshot pass
       (async () => {
         const t0 = performance.now();
         if (!Privamon.FaceDetector) return [];
         const allFaces = [];
 
-        // Per-region detection (high-resolution closeups of DOM images)
+        // Per-region detection (high-resolution closeups of profile pictures & avatars)
         try {
           const regionFaces = await Privamon.FaceDetector.processRegions(screenshot, visionRegions, mapper);
           if (regionFaces && regionFaces.length > 0) {
@@ -122,78 +126,49 @@ Privamon.SanitizePipeline = (() => {
           console.warn('[Pipeline] Per-region face detection failed:', e.message);
         }
 
-        // Adaptive multi-scale tiled face detection for high small-face recall.
+        // Full screenshot scan (detects foreground faces across the entire page)
         try {
-          const sw = screenshotDims.width;
-          const sh = screenshotDims.height;
-          const overlapFrac = 0.20; // 20% overlap between tiles
-          const cols = sw > 1200 ? 3 : 2;
-          const rows = sh > 800 ? 2 : 2;
+          await yieldEventLoop(80);
+          const fullFaces = await Privamon.FaceDetector.detect(screenshot, {
+            x: 0,
+            y: 0,
+            width: screenshotDims.width,
+            height: screenshotDims.height
+          });
+          if (fullFaces && fullFaces.length > 0) {
+            for (const face of fullFaces) {
+              let merged = false;
+              for (const existing of allFaces) {
+                if (!existing.bbox || !face.bbox) continue;
+                const ix1 = Math.max(existing.bbox.x, face.bbox.x);
+                const iy1 = Math.max(existing.bbox.y, face.bbox.y);
+                const ix2 = Math.min(existing.bbox.x + existing.bbox.width, face.bbox.x + face.bbox.width);
+                const iy2 = Math.min(existing.bbox.y + existing.bbox.height, face.bbox.y + face.bbox.height);
+                const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
+                const a1 = existing.bbox.width * existing.bbox.height;
+                const a2 = face.bbox.width * face.bbox.height;
+                const union = a1 + a2 - inter;
+                const iou = union > 0 ? inter / union : 0;
 
-          const tileW = Math.ceil(sw / (cols - (cols - 1) * overlapFrac));
-          const tileH = Math.ceil(sh / (rows - (rows - 1) * overlapFrac));
-          const stepX = Math.floor(tileW * (1 - overlapFrac));
-          const stepY = Math.floor(tileH * (1 - overlapFrac));
-
-          const tiles = [];
-          for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-              const tx = Math.min(c * stepX, sw - 60);
-              const ty = Math.min(r * stepY, sh - 60);
-              const tw = Math.min(tileW, sw - tx);
-              const th = Math.min(tileH, sh - ty);
-              if (tw > 60 && th > 60) {
-                tiles.push({ x: tx, y: ty, width: tw, height: th });
-              }
-            }
-          }
-
-          // Also scan the full screenshot as a catch-all for large foreground faces
-          tiles.push({ x: 0, y: 0, width: sw, height: sh });
-
-          for (const tile of tiles) {
-            try {
-              const cropUrl = await Privamon.Redactor.extractRegion(screenshot, tile);
-              const tileFaces = await Privamon.FaceDetector.detect(cropUrl, tile);
-              if (tileFaces && tileFaces.length > 0) {
-                for (const face of tileFaces) {
-                  let merged = false;
-                  for (const existing of allFaces) {
-                    if (!existing.bbox || !face.bbox) continue;
-                    const ix1 = Math.max(existing.bbox.x, face.bbox.x);
-                    const iy1 = Math.max(existing.bbox.y, face.bbox.y);
-                    const ix2 = Math.min(existing.bbox.x + existing.bbox.width, face.bbox.x + face.bbox.width);
-                    const iy2 = Math.min(existing.bbox.y + existing.bbox.height, face.bbox.y + face.bbox.height);
-                    const inter = Math.max(0, ix2 - ix1) * Math.max(0, iy2 - iy1);
-                    const a1 = existing.bbox.width * existing.bbox.height;
-                    const a2 = face.bbox.width * face.bbox.height;
-                    const union = a1 + a2 - inter;
-                    const iou = union > 0 ? inter / union : 0;
-                    const containment = Math.min(a1, a2) > 0 ? inter / Math.min(a1, a2) : 0;
-
-                    if (iou > 0.30 || containment > 0.60) {
-                      const ux1 = Math.min(existing.bbox.x, face.bbox.x);
-                      const uy1 = Math.min(existing.bbox.y, face.bbox.y);
-                      const ux2 = Math.max(existing.bbox.x + existing.bbox.width, face.bbox.x + face.bbox.width);
-                      const uy2 = Math.max(existing.bbox.y + existing.bbox.height, face.bbox.y + face.bbox.height);
-                      existing.bbox = { x: ux1, y: uy1, width: ux2 - ux1, height: uy2 - uy1 };
-                      existing.boxes = [existing.bbox];
-                      existing.confidence = Math.max(existing.confidence, face.confidence);
-                      merged = true;
-                      break;
-                    }
-                  }
-                  if (!merged) {
-                    allFaces.push(face);
-                  }
+                if (iou > 0.30) {
+                  const ux1 = Math.min(existing.bbox.x, face.bbox.x);
+                  const uy1 = Math.min(existing.bbox.y, face.bbox.y);
+                  const ux2 = Math.max(existing.bbox.x + existing.bbox.width, face.bbox.x + face.bbox.width);
+                  const uy2 = Math.max(existing.bbox.y + existing.bbox.height, face.bbox.y + face.bbox.height);
+                  existing.bbox = { x: ux1, y: uy1, width: ux2 - ux1, height: uy2 - uy1 };
+                  existing.boxes = [existing.bbox];
+                  existing.confidence = Math.max(existing.confidence, face.confidence);
+                  merged = true;
+                  break;
                 }
               }
-            } catch (tileErr) {
-              // Non-fatal: individual tile inference failure
+              if (!merged) {
+                allFaces.push(face);
+              }
             }
           }
         } catch (e) {
-          console.warn('[Pipeline] Tiled face detection failed:', e.message);
+          console.warn('[Pipeline] Full-screenshot face detection failed:', e.message);
         }
 
         timings.vision = Math.round(performance.now() - t0);
@@ -204,6 +179,7 @@ Privamon.SanitizePipeline = (() => {
     timings.parallelVisionAndOcr = Math.round(performance.now() - tParallelStart);
     progress('ocr', 'done', `OCR found ${ocrOutput.detections.length} matches`);
     progress('vision', 'done', `Vision detected ${visionCandidates.length} faces`);
+    await yieldEventLoop();
 
     const ocrCandidates = ocrOutput.detections || [];
     const ocrWords = ocrOutput.words || [];
@@ -372,6 +348,7 @@ Privamon.SanitizePipeline = (() => {
 
     timings.domPiiDetection = Math.round(performance.now() - tDomStart);
     progress('domPii', 'done', `Found ${domCandidates.length} DOM candidates`);
+    await yieldEventLoop();
 
     // ── 4. Stage: In-Browser NER (Transformers.js Token Classification) ──
     progress('ner', 'active', 'Running in-browser NER over batched text...');
@@ -423,6 +400,7 @@ Privamon.SanitizePipeline = (() => {
     timings.ner = Math.round(performance.now() - tNerStart);
     progress('ner', 'done', `NER extracted ${nerCandidates.length} entities`);
     progress('coordMap', 'done');
+    await yieldEventLoop();
 
     // ── 5. Stage: Multi-Modal Coordinate Fusion ──
     progress('fusion', 'active', 'Merging multi-modal detections in screenshot space...');
@@ -490,6 +468,7 @@ Privamon.SanitizePipeline = (() => {
     const fusionResult = Privamon.PIIFusion.fuse(rawCandidates);
     timings.fusion = Math.round(performance.now() - tFusionStart);
     progress('fusion', 'done', `Fused: ${fusionResult.redactions.length} REDACT, ${fusionResult.reviews.length} REVIEW`);
+    await yieldEventLoop();
 
     // ── 6. Stage: Canvas Redaction ──
     progress('redaction', 'active', 'Applying solid-fill redactions...');
@@ -498,6 +477,7 @@ Privamon.SanitizePipeline = (() => {
     const redactionResult = await Privamon.Redactor.redact(screenshot, fusionResult.redactions);
     timings.redaction = Math.round(performance.now() - tRedactStart);
     progress('redaction', 'done', `Redacted ${redactionResult.redactedRegions.length} regions`);
+    await yieldEventLoop();
 
     // ── 7. Stage: Post-Redaction Verification ──
     progress('verify', 'active', 'Auditing redaction pixel opacity...');
