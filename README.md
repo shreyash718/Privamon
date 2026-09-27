@@ -1,112 +1,72 @@
-# Privamon — Privacy-Preserving Browser Agent
+# Privamon 🛡️
 
-Privamon is a 100% browser-native privacy-first browser agent that intercepts and sanitizes sensitive screen content (Personally Identifiable Information, credentials, sensitive documents, and human faces) **locally inside your browser** before visual or DOM data can be processed or transmitted.
+Privamon is a privacy-first Chrome extension built for **Smart India Hackathon 2026** (Problem Statement 26171). 
 
----
-
-## Architecture Overview
-
-Privamon operates entirely within Google Chrome (Manifest V3) using an air-gapped, browser-native processing pipeline:
-
-1. **Chrome Extension (Manifest V3)**:
-   - **DOM Extractor & Coordinate Mapper**: Extracts text, inputs, images, and maps viewport CSS coordinates to physical screenshot pixels (`privacy/coordinate-mapper.js`).
-   - **Offscreen Processing Sandbox**: Performs canvas-based image extraction, Tesseract.js OCR, ONNX Runtime Web BlazeFace vision detection, client-side regex & checksum PII verification (Aadhaar Verhoeff, Luhn Credit Card), and solid opaque redaction (`#000000`).
-   - **Interactive Results Viewer (`results.html`)**: Displays the sanitized screenshot, bounding box overlays with confidence scores, pipeline latency metrics, and sanitized DOM.
-
-2. **Server-Side Reasoning Agent (`server_side_agent/`)**:
-   - Optional server-side VLM reasoning service (Qwen3-VL / OpenRouter) that receives sanitized, redacted screen data and returns structured user automation actions safely.
+It automatically detects and blocks out sensitive personal data—like human faces, names, phone numbers, credit cards, and IDs (Aadhaar/PAN)—locally inside your browser before a screen capture is handed over to an AI vision agent. Nothing raw ever leaves your device.
 
 ---
 
-## Prerequisites
+## How to Run Locally
 
-Ensure you have the following installed on your system:
+### 1. Running the Chrome Extension
 
-- **Node.js**: v18.0.0 or higher ([Download Node.js](https://nodejs.org/))
-- **Google Chrome** (or Chromium-based browser: Brave, Edge)
-- **Git** (optional, for cloning)
+You don't need any complex build step to test the extension.
+
+1. **Clone the repo and install dependencies:**
+   ```bash
+   git clone https://github.com/shreyash718/Privamon.git
+   cd Privamon
+   npm install
+   ```
+   *(This copies the local OCR and ONNX model runtime files into `lib/`.)*
+
+2. **Load into Chrome (or Brave / Edge):**
+   - Open your browser and go to `chrome://extensions/`
+   - Turn on **Developer mode** (toggle in the top-right corner)
+   - Click **Load unpacked** (top-left)
+   - Select the `Privamon` project folder
+
+3. **Try it out:**
+   - Go to any webpage with sensitive info (like WhatsApp Web, Gmail, Amazon, or a form).
+   - Click the Privamon extension icon in your browser toolbar and click **Sanitize Screen**.
+   - A results tab will open showing the sanitized screenshot with solid black redaction boxes and detection labels.
+
+> **Tip:** If you make changes to extension files, just click the reload (🔄) icon on the Privamon card in `chrome://extensions/`.
 
 ---
 
-## Step-by-Step Installation Guide
+### 2. Running the Landing Page
 
-### Step 1: Clone or Open the Repository
-
-Open your terminal or PowerShell and navigate to the project directory:
+If you want to view or work on the project website locally:
 
 ```bash
-cd "path/to/Privamon"
+npm start
 ```
+Then open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ---
 
-### Step 2: Install Dependencies
+## How It Works
 
-Install the extension dependencies. The post-install script will automatically copy vendor libraries (Tesseract.js and ONNX Runtime Web) into the `lib/` directory:
-
-```bash
-npm install
-```
-
-> **Note**: If you ever need to manually refresh or re-bundle the vendor libraries, run:
-> ```bash
-> npm run setup
-> ```
+Everything runs 100% on your machine:
+- **Chrome Offscreen API (Manifest V3)**: Handles canvas operations and background model runs without freezing the active tab.
+- **UltraFace ONNX (via ONNX Runtime Web)**: Detects human faces with WebGPU / WASM acceleration.
+- **Tesseract.js**: Client-side OCR for reading on-screen text.
+- **PII Detectors & Checksums**: Verifies sensitive numbers like Aadhaar (Verhoeff algorithm), Credit Cards (Luhn algorithm), PAN, emails, and phone numbers.
+- **Opaque Redaction**: Paints solid `#000000` black boxes over sensitive pixels before anything gets passed to vision models.
 
 ---
 
-### Step 3: Load the Extension into Google Chrome
+## Tech Stack
 
-1. Open **Google Chrome**.
-2. Navigate to `chrome://extensions/` in the address bar.
-3. In the top-right corner, toggle **Developer mode** to **ON**.
-4. Click the **Load unpacked** button in the top-left corner.
-5. Select the root folder of this project (`Privamon`).
-6. The **Privamon — Privacy Browser Agent** card will appear in your extensions list.
-
----
-
-## How to Use Privamon
-
-1. **Open any webpage**: Browse to any page containing sensitive information (e.g. social media feeds, banking pages, emails, photo grids, or forms).
-2. **Open the extension**: Click the Privamon icon in your Chrome extensions toolbar (pin it for convenience).
-3. **Trigger Sanitization**: Click the **Sanitize Screen** button.
-4. **Review Results**: A new tab (`results.html`) will automatically open displaying:
-   - **Sanitized View**: Screenshot with sensitive text and faces painted over with solid black redaction boxes.
-   - **Overlay Badges**: Color-coded detection boxes framing each detected entity (`PERSON`, `EMAIL`, `PHONE`, `face (100%)`, etc.).
-   - **Sidebar Breakdown**: Summary counts for all detected categories, pipeline execution latency, and sanitized DOM structure.
-
----
-
-## Updating the Extension After Code Changes
-
-When modifying JavaScript or extension files:
-
-1. Go to `chrome://extensions/`.
-2. Find **Privamon — Privacy Browser Agent**.
-3. Click the **Reload** (circular arrow 🔄) icon on the card.
-
----
-
-## Running Automated Tests
-
-Run the test suite:
-
-```bash
-npm test
-```
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-| :--- | :--- |
-| **Missing vendor libraries (`tesseract.min.js` or `ort.min.js`)** | Run `npm run setup` in your terminal to re-copy all required vendor libraries into `lib/`. |
-| **Extension needs reload** | Reload the extension in `chrome://extensions` by clicking the 🔄 button on the card. |
+- JavaScript (Vanilla, ES6 Modules)
+- Chrome Extensions Manifest V3
+- WebGPU / WebAssembly (WASM SIMD)
+- ONNX Runtime Web & Tesseract.js
+- HTML5 / CSS3 for the showcase site
 
 ---
 
 ## License
 
-MIT License. Designed for privacy-preserving browser automation and local AI security.
+Apache 2.0 License.
