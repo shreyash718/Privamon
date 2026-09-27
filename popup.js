@@ -103,7 +103,7 @@ const detectionsList        = document.getElementById('detectionsList');
 let isBusy = false;
 let isAutopilotEnabled = true;
 let isAutopilotRunning = false;
-let currentServerUrl = 'http://localhost:8000';
+let currentServerUrl = 'https://privamon.onrender.com';
 let activeTurnImageUrl = '';
 let currentTurns = [];
 let activeInspectorTurn = null;
@@ -184,7 +184,7 @@ function setupEventListeners() {
 
   // Save server settings
   saveSettingsBtn.addEventListener('click', async () => {
-    const url = serverUrlInput.value.trim().replace(/\/+$/, '') || 'http://localhost:8000';
+    const url = serverUrlInput.value.trim().replace(/\/+$/, '') || 'https://privamon.onrender.com';
     currentServerUrl = url;
     await chrome.storage.local.set({ privamon_server_url: url });
     settingsDrawer.classList.add('hidden');

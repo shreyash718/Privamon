@@ -198,7 +198,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Check server health
   if (message.action === 'checkServerStatus') {
-    const url = (message.serverUrl || 'http://localhost:8000').replace(/\/+$/, '') + '/health';
+    const url = (message.serverUrl || 'https://privamon.onrender.com').replace(/\/+$/, '') + '/health';
     fetch(url)
       .then(r => r.json())
       .then(data => sendResponse({ online: data.status === 'ok' || true, data }))
@@ -530,7 +530,7 @@ async function handlePipelineResult(message) {
  * 5. Save the turn in chrome.storage.local (chat history).
  * 6. Return response to popup / side panel.
  */
-async function handleChatWithAgent(task, serverUrl = 'http://localhost:8000') {
+async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.com') {
   const queryText = (task && task.trim()) ? task.trim() : 'Analyze screen and recommend what to do';
   console.log('[Background] Chat with agent requested. Query:', queryText);
 
@@ -1130,8 +1130,8 @@ function rankDomElements(sanitizedDom, task, viewportInfo, maxElements = 35) {
 /**
  * Sends the sanitized image, redacted regions, task, and DOM context to server_side_agent.
  */
-async function sendToServerAgent(result, task, serverUrl = 'http://localhost:8000', tab = null) {
-  const endpoint = (serverUrl || 'http://localhost:8000').replace(/\/+$/, '') + '/interpret';
+async function sendToServerAgent(result, task, serverUrl = 'https://privamon.onrender.com', tab = null) {
+  const endpoint = (serverUrl || 'https://privamon.onrender.com').replace(/\/+$/, '') + '/interpret';
 
   // Format redacted regions
   const redacted_regions = (result.redactions || []).map(r => ({
@@ -1315,7 +1315,7 @@ function stopActionLoop() {
  * Auto-pilot loop: execute the current action, wait, re-capture, re-analyze, repeat.
  * Stops when: action type is 'done', 'ask_user', confidence < 0.45, cancelled, or maxSteps reached.
  */
-async function handleActionLoop(initialTask, serverUrl = 'http://localhost:8000', maxSteps = 5) {
+async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onrender.com', maxSteps = 5) {
   const task = initialTask || 'Continue the current task';
   const steps = [];
 

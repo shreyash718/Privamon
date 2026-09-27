@@ -18,6 +18,8 @@
   "host_permissions": [
     "http://127.0.0.1/*",
     "http://localhost/*",
+    "https://privamon.onrender.com/*",
+    "https://*.onrender.com/*",
     "https://huggingface.co/*",
     "https://*.huggingface.co/*",
     "https://cdn-lfs.huggingface.co/*"
