@@ -64,7 +64,11 @@ async def interpret(req: InterpretRequest):
 
     return response
 
-@app.get("/health")
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    return {"status": "ok", "service": "Privamon Server-Side Reasoning Agent"}
+
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     provider = get_vlm_provider()
     return {
