@@ -308,21 +308,21 @@ SPECIAL GUIDANCE FOR IRCTC & COMPLEX TRAVEL/FORM WORKFLOWS:
   1. MISSING TRAVEL DETAILS & PREMATURE SEARCH (CRITICAL RULE):
      - If the user says "book ticket", "search trains", or similar without specifying origin, destination, date, or class, DO NOT GUESS OR HALLUCINATE!
      - CRITICAL: NEVER emit action type "click" on the "Search Trains" or search submit button when the From or To inputs are empty! IRCTC will fail with "Error! Please submit correct input". Clicking Search before stations are filled is STRICTLY FORBIDDEN.
-     - Instead, emit action type "ask_user" with a structured JSON string in the "value" field requesting the needed fields:
+     - Instead, emit action type "ask_user" (or "wait" with needsClarification: true) requesting the needed fields:
      Example:
      {{
-       "reasoning": "I need your travel details (from/to stations, date, and class) to search trains on IRCTC.",
+       "reasoning": "Please fill in your From Station, To Station, and Journey Date directly on the page before searching trains. Use 'Show Me Where' to highlight them, then click Continue once filled.",
        "confidence": 0.95,
        "action": {{
          "type": "ask_user",
          "targetElementId": null,
-         "value": "{{\"question\": \"Please provide travel details before searching trains:\", \"fields\": [{{\"name\": \"from\", \"label\": \"From Station\", \"type\": \"text\", \"placeholder\": \"e.g. NDLS / New Delhi\"}}, {{\"name\": \"to\", \"label\": \"To Station\", \"type\": \"text\", \"placeholder\": \"e.g. BCT / Mumbai Central\"}}, {{\"name\": \"date\", \"label\": \"Journey Date\", \"type\": \"date\"}}, {{\"name\": \"class\", \"label\": \"Class\", \"type\": \"select\", \"options\": [\"All Classes\", \"Sleeper (SL)\", \"AC 3 Tier (3A)\", \"AC 2 Tier (2A)\", \"AC First Class (1A)\"]}}]}}",
+         "value": "{{\"title\": \"Enter Journey Details on IRCTC\", \"question\": \"Please fill in your travel stations and date directly on the page before proceeding:\", \"fields\": [{{\"name\": \"from\", \"label\": \"From Station\", \"description\": \"Enter departure station (e.g. NDLS / New Delhi)\"}}, {{\"name\": \"to\", \"label\": \"To Station\", \"description\": \"Enter destination station (e.g. BCT / Mumbai Central)\"}}, {{\"name\": \"date\", \"label\": \"Journey Date\", \"description\": \"Select your travel date\"}}, {{\"name\": \"class\", \"label\": \"Class / Quota\", \"description\": \"Choose your coach class\"}}]}}",
          "scrollDirection": null
        }},
        "assumptions": ["user needs to specify origin, destination, and journey date before searching trains"],
        "needsClarification": true
      }}
-     The extension client will render an interactive local form where the user enters private data securely (it NEVER leaves their device).
+     The extension client guides the user step-by-step on what to fill directly on the page with interactive field highlights.
   2. AUTOCOMPLETE STATIONS: When filling station fields (e.g. From/To station on IRCTC which use p-autocomplete), use action type "type_and_select" (or "type") with the station code or name in "value" (e.g. "NDLS" or "New Delhi").
   3. DATE PICKERS: When filling date fields (e.g. Journey Date on IRCTC which uses p-calendar), use action type "pick_date" (or "type") with the formatted date (e.g. "DD/MM/YYYY" or "YYYY-MM-DD") in "value".
   4. CLASS / QUOTA SELECTION: When selecting class or quota (which use PrimeNG p-dropdown), use action type "select_custom" (or "select") with the class name in "value".
@@ -1738,47 +1738,36 @@ def _normalize_travel_booking_action(
     # If from or to are empty, WE CANNOT CLICK SEARCH TRAINS OR EMIT DONE!
     if is_from_empty or is_to_empty:
         if is_clicking_search or resp.action.type == "done":
-            print("[*] Circuit-breaker: Model attempted to click 'Search Trains' or emit 'done' before journey details were entered!")
+            print("[*] Circuit-breaker: Blocked premature search click or done because journey details are empty!")
             req_from, req_to, req_date = extract_travel_station_query(task)
 
-            # If user prompt provided the station names:
-            if req_from and is_from_empty and from_el:
-                resp.action.type = "type_and_select"
-                resp.action.targetElementId = from_el.get("elementId") or from_el.get("id") or "from"
-                resp.action.value = req_from
-                resp.reasoning = f"Entering origin station '{req_from}' into From field before searching."
-                resp.assumptions = ["Origin station must be filled before searching trains."]
-                resp.needsClarification = False
-                return
+            from_desc = f"Enter departure station (e.g. '{req_from}')" if req_from else "Enter departure station (e.g. New Delhi / NDLS)"
+            to_desc = f"Enter destination station (e.g. '{req_to}')" if req_to else "Enter destination station (e.g. Mumbai / BCT)"
+            date_desc = f"Select your date ({req_date})" if req_date else "Select your travel date"
 
-            if req_to and is_to_empty and to_el:
-                resp.action.type = "type_and_select"
-                resp.action.targetElementId = to_el.get("elementId") or to_el.get("id") or "to"
-                resp.action.value = req_to
-                resp.reasoning = f"Entering destination station '{req_to}' into To field before searching."
-                resp.assumptions = ["Destination station must be filled before searching trains."]
-                resp.needsClarification = False
-                return
-
-            # Otherwise, details are unknown -> convert to ask_user!
-            resp.action.type = "ask_user"
+            # Guide user to fill the details on-page
+            resp.action.type = "wait"
             resp.action.targetElementId = None
             ask_payload = {
-                "question": "Please provide your journey details before searching trains:",
+                "title": "Enter Journey Details on IRCTC",
+                "question": "Please fill in your travel stations and date directly on the page before proceeding:",
                 "fields": [
-                    {"name": "from", "label": "From Station", "type": "text", "placeholder": "e.g. NDLS / New Delhi"},
-                    {"name": "to", "label": "To Station", "type": "text", "placeholder": "e.g. BCT / Mumbai Central"},
-                    {"name": "date", "label": "Journey Date", "type": "date"},
-                    {"name": "class", "label": "Class", "type": "select", "options": ["All Classes", "Sleeper (SL)", "AC 3 Tier (3A)", "AC 2 Tier (2A)", "AC First Class (1A)", "Second Sitting (2S)"]}
+                    {"name": "from", "label": "From Station", "description": from_desc},
+                    {"name": "to", "label": "To Station", "description": to_desc},
+                    {"name": "date", "label": "Journey Date", "description": date_desc},
+                    {"name": "class", "label": "Class / Quota", "description": "Choose your desired coach class"}
                 ]
             }
             resp.action.value = json.dumps(ask_payload)
             resp.action.scrollDirection = None
             resp.needsClarification = True
-            resp.reasoning = "Origin and destination stations must be entered before clicking Search Trains."
+            resp.reasoning = (
+                f"Please fill your From Station ({req_from or 'origin'}), To Station ({req_to or 'destination'}), and Journey Date directly on the page. "
+                "Click 'Show Me Where' to highlight them, then click Continue once filled."
+            )
             resp.assumptions = ["IRCTC requires From and To station inputs before searching trains."]
             resp.confidence = max(resp.confidence, 0.95)
-            print("[*] Converted premature search click to 'ask_user' travel form clarification.")
+            print("[*] Converted premature search click to on-page guidance for user.")
 
 def _normalize_action(
     resp: InterpretResponse,

@@ -282,7 +282,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  // Submit user clarification / form data back to active auto-pilot loop (locally)
+  // Submit user clarification / confirmation back to active auto-pilot loop (locally)
   if (message.action === 'submitUserData') {
     const { requestId, data, cancelled } = message;
     const pending = pendingUserInputs.get(requestId);
@@ -292,6 +292,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else {
       sendResponse({ success: false, message: 'No pending input request' });
     }
+    return true;
+  }
+
+  // Highlight required guidance fields directly on active web page
+  if (message.action === 'highlightFields') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) {
+          sendResponse({ success: false, message: 'No active tab found' });
+          return;
+        }
+        await highlightRequiredFieldsOnTab(tab.id, message.fields || []);
+        sendResponse({ success: true });
+      } catch (err) {
+        console.error('[Background] highlightFields error:', err);
+        sendResponse({ success: false, error: err.message });
+      }
+    })();
     return true;
   }
 
@@ -616,6 +635,138 @@ async function handlePipelineResult(message) {
 }
 
 /**
+ * Injects a visual pulse and guide badges directly onto missing fields in the user's active tab.
+ */
+async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (fieldsList) => {
+        // Collect candidate inputs on page
+        const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea, [role="combobox"], [role="searchbox"], p-autocomplete, p-calendar'));
+        const matchedElements = [];
+
+        function matchesGuidance(el, terms) {
+          const id = (el.id || '').toLowerCase();
+          const name = (el.name || '').toLowerCase();
+          const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
+          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+          const text = (el.innerText || el.textContent || '').toLowerCase();
+          const parentText = (el.parentElement ? el.parentElement.innerText || '' : '').toLowerCase();
+
+          return terms.some(t => {
+            const term = t.toLowerCase();
+            return id.includes(term) || name.includes(term) || ph.includes(term) || aria.includes(term) || parentText.includes(term);
+          });
+        }
+
+        // Look for origin / From station
+        const fromEl = allInputs.find(el => matchesGuidance(el, ['from', 'origin', 'departure', 'source', 'board']));
+        // Look for destination / To station
+        const toEl = allInputs.find(el => matchesGuidance(el, ['to', 'destination', 'arrival', 'dest']));
+        // Look for travel / Journey date
+        const dateEl = allInputs.find(el => matchesGuidance(el, ['date', 'journey', 'depart', 'calendar']));
+
+        if (fromEl) matchedElements.push({ el: fromEl, label: 'From Station' });
+        if (toEl) matchedElements.push({ el: toEl, label: 'To Station' });
+        if (dateEl) matchedElements.push({ el: dateEl, label: 'Journey Date' });
+
+        // If no match by keywords, fallback to first 2-3 empty inputs on the page
+        if (matchedElements.length === 0) {
+          allInputs.filter(el => !el.value || el.value.trim() === '').slice(0, 3).forEach(el => {
+            matchedElements.push({ el, label: 'Required Input' });
+          });
+        }
+
+        if (matchedElements.length === 0) return false;
+
+        // Ensure keyframe pulse animation and badge styles exist
+        if (!document.getElementById('privamon-guidance-style')) {
+          const style = document.createElement('style');
+          style.id = 'privamon-guidance-style';
+          style.textContent = `
+            @keyframes privamonGlowPulse {
+              0% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0.7); }
+              70% { box-shadow: 0 0 0 12px rgba(99, 102, 241, 0); }
+              100% { box-shadow: 0 0 0 0 rgba(99, 102, 241, 0); }
+            }
+            .privamon-field-highlight {
+              outline: 3px solid #6366f1 !important;
+              outline-offset: 2px !important;
+              animation: privamonGlowPulse 1.8s infinite !important;
+              transition: all 0.3s ease !important;
+            }
+            .privamon-guidance-badge {
+              position: absolute;
+              top: -26px;
+              left: 0;
+              background: linear-gradient(135deg, #6366f1, #8b5cf6);
+              color: #ffffff;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+              font-size: 11px;
+              font-weight: 600;
+              padding: 3px 8px;
+              border-radius: 6px;
+              box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+              z-index: 2147483647;
+              pointer-events: none;
+              white-space: nowrap;
+              letter-spacing: 0.3px;
+            }
+          `;
+          document.head.appendChild(style);
+        }
+
+        // Apply highlights
+        matchedElements.forEach(({ el, label }) => {
+          const target = (el.tagName === 'P-AUTOCOMPLETE' || el.tagName === 'P-CALENDAR')
+            ? (el.querySelector('input') || el)
+            : el;
+
+          target.classList.add('privamon-field-highlight');
+
+          let badge = null;
+          if (target.parentElement) {
+            badge = document.createElement('div');
+            badge.className = 'privamon-guidance-badge';
+            badge.textContent = `👉 Fill ${label}`;
+            try {
+              const currentPos = window.getComputedStyle(target.parentElement).position;
+              if (currentPos === 'static') {
+                target.parentElement.style.position = 'relative';
+              }
+              target.parentElement.appendChild(badge);
+            } catch (e) {}
+          }
+
+          const removeHighlight = () => {
+            target.classList.remove('privamon-field-highlight');
+            if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+            target.removeEventListener('input', removeHighlight);
+            target.removeEventListener('focus', removeHighlight);
+          };
+          target.addEventListener('input', removeHighlight, { once: true });
+          setTimeout(removeHighlight, 6000);
+        });
+
+        // Smoothly center the first target on screen
+        const firstTarget = matchedElements[0].el;
+        const focusable = firstTarget.tagName.includes('-') ? (firstTarget.querySelector('input') || firstTarget) : firstTarget;
+        focusable.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        setTimeout(() => {
+          try { focusable.focus(); } catch (e) {}
+        }, 300);
+
+        return true;
+      },
+      args: [guidanceFields]
+    });
+  } catch (err) {
+    console.warn('[Background] Could not highlight fields on tab:', err);
+  }
+}
+
+/**
  * Circuit-breaker to prevent clicking "Search Trains" or search buttons
  * when origin/destination stations on travel booking pages (like IRCTC) are empty.
  */
@@ -678,13 +829,16 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
 
   const isTravelContext = isIrctcUrl || isTravelTask || fromElement !== null || toElement !== null;
   const reasonText = String(reasoning || '').toLowerCase();
-  const isSearchClick = action.type === 'click' && (
+  const targetId = String(action.targetElementId || '').toLowerCase();
+  const isSearchClick = (action.type === 'click' && (
     reasonText.includes('search train') ||
     reasonText.includes('search trains') ||
     reasonText.includes('proceed with booking') ||
     reasonText.includes('find train') ||
+    reasonText.includes('find trains') ||
+    targetId.includes('search') ||
     (searchElement !== null)
-  );
+  ));
 
   if (isTravelContext && (isSearchClick || (action.type === 'done' && (fromElement || toElement)))) {
     const fromEmpty = !fromElement || !fromElement.value || fromElement.value.trim() === '';
@@ -726,22 +880,24 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
 
       return {
         action: {
-          type: 'ask_user',
+          type: 'wait',
           targetElementId: null,
-          value: JSON.stringify({
-            question: 'Please provide your journey details before searching trains:',
-            fields: [
-              { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
-              { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
-              { name: 'date', label: 'Journey Date', type: 'date' },
-              { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
-            ]
-          }),
+          value: 'Please fill From Station, To Station, and Journey Date directly on the page before searching trains.',
           scrollDirection: null
         },
-        reasoning: 'Origin and destination stations must be entered before clicking Search Trains.',
+        reasoning: 'Please fill in your From Station, To Station, and Journey Date directly on the page before searching. Click "Show Me Where" if you need guidance, then click Continue once filled.',
         assumptions: ['IRCTC requires From and To stations before searching trains.'],
-        needsClarification: true
+        needsClarification: true,
+        guidance: {
+          title: 'Enter Journey Details on IRCTC',
+          question: 'Please fill in the travel stations and date directly on the page before proceeding:',
+          fields: [
+            { name: 'from', label: 'From Station', description: 'Enter departure station (e.g. New Delhi / NDLS)' },
+            { name: 'to', label: 'To Station', description: 'Enter destination station (e.g. Mumbai / BCT)' },
+            { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
+            { name: 'class', label: 'Class / Quota', description: 'Select your desired coach class' }
+          ]
+        }
       };
     }
   }
@@ -889,6 +1045,12 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
       if (travelIntercept.reasoning) turn.reasoning = travelIntercept.reasoning;
       if (travelIntercept.assumptions) turn.assumptions = travelIntercept.assumptions;
       if (travelIntercept.needsClarification !== undefined) turn.needsClarification = travelIntercept.needsClarification;
+      if (travelIntercept.guidance) turn.guidance = travelIntercept.guidance;
+
+      // Automatically highlight fields on active tab to guide the user visually!
+      if (tab?.id) {
+        highlightRequiredFieldsOnTab(tab.id, travelIntercept.guidance?.fields || []).catch(() => {});
+      }
     }
 
     // Step 6: Append to persistent chat history in chrome.storage.local
@@ -1795,19 +1957,26 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
         }
       }
 
-      if (action.type === 'ask_user' || turn.needsClarification) {
-        let question = 'Please provide details needed to complete this task:';
+      if (action.type === 'ask_user' || turn.needsClarification || (action.type === 'wait' && turn.needsClarification)) {
+        let question = 'Please fill in the required details directly on the page before proceeding:';
+        let title = 'Action Needed on Page';
         let fields = [];
 
-        // Check if action.value is structured JSON
-        if (action.value) {
+        // Check if turn.guidance or action.value is structured JSON
+        if (turn.guidance) {
+          title = turn.guidance.title || title;
+          question = turn.guidance.question || question;
+          fields = turn.guidance.fields || [];
+        } else if (action.value) {
           try {
             const parsed = JSON.parse(action.value);
             if (parsed.fields && Array.isArray(parsed.fields)) {
               fields = parsed.fields;
               question = parsed.question || question;
+              title = parsed.title || title;
             } else if (typeof parsed === 'object') {
               question = parsed.question || action.value;
+              title = parsed.title || title;
             }
           } catch (e) {
             question = action.value;
@@ -1817,19 +1986,28 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
         // If no fields were provided in value, but the task relates to booking or IRCTC, auto-generate standard travel fields!
         if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(task || '')) {
           fields = [
-            { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
-            { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
-            { name: 'date', label: 'Journey Date', type: 'date' },
-            { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+            { name: 'from', label: 'From Station', description: 'Enter departure station (e.g. New Delhi / NDLS)' },
+            { name: 'to', label: 'To Station', description: 'Enter destination station (e.g. Mumbai / BCT)' },
+            { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
+            { name: 'class', label: 'Class / Quota', description: 'Choose coach class (e.g. Sleeper or 3A)' }
           ];
         }
 
         const requestId = 'req_' + Date.now();
-        console.log(`[Background] Pausing auto-pilot loop for user clarification (${requestId}):`, question, fields);
+        console.log(`[Background] Pausing auto-pilot loop for user guidance on page (${requestId}):`, question, fields);
+
+        // Highlight fields automatically on active tab
+        try {
+          const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (activeTab && activeTab.id) {
+            highlightRequiredFieldsOnTab(activeTab.id, fields).catch(() => {});
+          }
+        } catch (e) {}
 
         forwardToPopup({
           type: 'askUserPrompt',
           requestId,
+          title,
           question,
           fields,
           task
@@ -1840,44 +2018,35 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
           step: step + 1,
           maxSteps,
           status: 'clarification',
-          message: `Agent needs details: "${question.length > 60 ? question.slice(0, 60) + '...' : question}"`
+          message: `Awaiting required details: Fill on page and click Continue ➔`
         });
 
-        // Wait for user to submit data in popup (or cancel)
+        // Wait for user to confirm on page (or dismiss)
         const userResponse = await waitForUserInput(requestId, 180000); // 3 minute timeout
 
-        if (!userResponse || userResponse.cancelled || !userResponse.data) {
-          steps.push({ step: step + 1, action, result: 'Clarification cancelled by user', stopped: 'cancelled' });
-          forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Clarification cancelled.' });
+        if (!userResponse || userResponse.cancelled) {
+          steps.push({ step: step + 1, action, result: 'Guidance dismissed by user', stopped: 'cancelled' });
+          forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Guidance dismissed.' });
           break;
         }
 
-        console.log('[Background] Received user response data locally. Executing local form fill...');
+        console.log('[Background] User confirmed required details were filled on page. Resuming loop...');
         forwardToPopup({
           type: 'autopilotProgress',
           step: step + 1,
           maxSteps,
           status: 'executing',
-          message: 'Filling fields locally on page (private data remains on device)...'
+          message: 'Details filled on page. Re-inspecting page to proceed with next step...'
         });
-
-        // Execute local form fill using fill_form action
-        const fillAction = {
-          type: 'fill_form',
-          fields: userResponse.data
-        };
-        const fillResult = await handleExecuteAction(fillAction);
-        console.log('[Background] Local fill_form result:', fillResult);
 
         steps.push({
           step: step + 1,
-          action: fillAction,
-          execResult: fillResult,
-          message: 'User details filled locally on device.'
+          action: { type: 'wait', value: 'User filled details on page' },
+          message: 'User filled required details directly on page.'
         });
 
         // Settle page and continue the loop!
-        await new Promise(r => setTimeout(r, 1200));
+        await new Promise(r => setTimeout(r, 600));
         continue;
       }
 

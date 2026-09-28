@@ -99,89 +99,85 @@ const imgBadgeOverlay       = document.getElementById('imgBadgeOverlay');
 const badgeTotalItems       = document.getElementById('badgeTotalItems');
 const detectionsList        = document.getElementById('detectionsList');
 
-// ── Interactive Local Ask-User Form References ──
+// ── Interactive Local Guidance Card References ──
 const askUserCard         = document.getElementById('askUserCard');
 const askUserTitle        = document.getElementById('askUserTitle');
 const askUserQuestion     = document.getElementById('askUserQuestion');
-const askUserForm         = document.getElementById('askUserForm');
+const guidanceFieldsList  = document.getElementById('guidanceFieldsList');
+const highlightFieldsBtn  = document.getElementById('highlightFieldsBtn');
 const cancelAskUserBtn    = document.getElementById('cancelAskUserBtn');
 const submitAskUserBtn    = document.getElementById('submitAskUserBtn');
 
 let currentAskUserRequestId = null;
+let currentGuidanceFields = [];
 let lastSubmittedTask = '';
 
 // ── Helpers for Extension vs Standalone Preview ──
 const isExtensionContext = Boolean(typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function');
 
-// ── Interactive Local Ask-User Form Rendering (Top-Level) ──
+// ── Interactive Local Guidance Card Rendering (Top-Level) ──
 function renderAskUserForm(promptData) {
-  if (!askUserCard || !askUserForm) return;
+  if (!askUserCard) return;
 
   currentAskUserRequestId = promptData.requestId || 'req_' + Date.now();
+  if (promptData.task) {
+    lastSubmittedTask = promptData.task;
+  }
   if (askUserTitle) {
-    askUserTitle.textContent = promptData.title || 'Details Needed';
+    askUserTitle.textContent = promptData.title || 'Action Needed on Page';
   }
   if (askUserQuestion) {
-    askUserQuestion.textContent = promptData.question || 'Please provide details needed to complete this task:';
+    askUserQuestion.textContent = promptData.question || 'Please fill in the required details directly on the page before proceeding:';
   }
 
-  askUserForm.innerHTML = '';
-  const fields = promptData.fields || [];
-
-  fields.forEach((field, idx) => {
-    const group = document.createElement('div');
-    group.className = 'ask-user-field-group';
-    if (field.fullWidth || field.type === 'textarea') {
-      group.classList.add('full-width');
-    }
-
-    const label = document.createElement('label');
-    label.className = 'ask-user-field-label';
-    label.textContent = field.label || field.name;
-
-    let input;
-    if (field.type === 'select' && Array.isArray(field.options)) {
-      input = document.createElement('select');
-      input.className = 'ask-user-field-select';
-      input.name = field.name || `field_${idx}`;
-      field.options.forEach(opt => {
-        const optEl = document.createElement('option');
-        const val = typeof opt === 'object' ? opt.value : opt;
-        const txt = typeof opt === 'object' ? opt.text : opt;
-        optEl.value = val;
-        optEl.textContent = txt;
-        if (field.value === val) optEl.selected = true;
-        input.appendChild(optEl);
-      });
+  let fields = promptData.fields || [];
+  if (!Array.isArray(fields) || fields.length === 0) {
+    const taskToCheck = promptData.task || lastSubmittedTask || '';
+    if (/\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(taskToCheck)) {
+      fields = [
+        { name: 'from', label: 'From Station', description: 'Enter departure station (e.g. New Delhi / NDLS)' },
+        { name: 'to', label: 'To Station', description: 'Enter destination station (e.g. Mumbai / BCT)' },
+        { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
+        { name: 'class', label: 'Class / Quota', description: 'Choose your coach class' }
+      ];
     } else {
-      input = document.createElement('input');
-      input.type = field.type || 'text';
-      input.className = 'ask-user-field-input';
-      input.name = field.name || `field_${idx}`;
-      input.placeholder = field.placeholder || '';
-      if (field.value) input.value = field.value;
-      if (field.type === 'date' && !input.value) {
-        const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-        input.value = tomorrow.toISOString().split('T')[0];
-      }
+      fields = [
+        { name: 'details', label: 'Required Info', description: 'Fill the required fields directly on the page' }
+      ];
     }
+  }
 
-    if (field.widgetType) {
-      input.dataset.widgetType = field.widgetType;
-    }
+  currentGuidanceFields = fields;
 
-    group.appendChild(label);
-    group.appendChild(input);
-    askUserForm.appendChild(group);
-  });
+  if (guidanceFieldsList) {
+    guidanceFieldsList.innerHTML = '';
+    fields.forEach((field) => {
+      const li = document.createElement('li');
+      li.className = 'guidance-field-item';
+
+      const dot = document.createElement('span');
+      dot.className = 'guidance-dot';
+      dot.textContent = '•';
+
+      const textWrap = document.createElement('div');
+      textWrap.className = 'guidance-field-text';
+
+      const strong = document.createElement('strong');
+      strong.textContent = (field.label || field.name || 'Field') + ': ';
+
+      const desc = document.createElement('span');
+      desc.textContent = field.description || field.placeholder || field.guide || 'Fill directly on page';
+
+      textWrap.appendChild(strong);
+      textWrap.appendChild(desc);
+
+      li.appendChild(dot);
+      li.appendChild(textWrap);
+      guidanceFieldsList.appendChild(li);
+    });
+  }
 
   askUserCard.classList.remove('hidden');
-
-  const firstInput = askUserForm.querySelector('input, select, textarea');
-  if (firstInput) {
-    setTimeout(() => firstInput.focus(), 100);
-  }
-
   askUserCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
@@ -189,7 +185,6 @@ function hideAskUserForm() {
   if (!askUserCard) return;
   askUserCard.classList.add('hidden');
   currentAskUserRequestId = null;
-  if (askUserForm) askUserForm.innerHTML = '';
 }
 
 // ── Local State ──
@@ -473,7 +468,7 @@ function setupEventListeners() {
     expandRedactedBtn.addEventListener('click', openRedactedInLightbox);
   }
 
-  // Interactive Local Ask-User Form Listeners
+  // Interactive Local Guidance Card Button Listeners
   if (cancelAskUserBtn) {
     cancelAskUserBtn.addEventListener('click', () => {
       if (currentAskUserRequestId && isExtensionContext) {
@@ -487,61 +482,46 @@ function setupEventListeners() {
     });
   }
 
-  if (askUserForm) {
-    askUserForm.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (!currentAskUserRequestId) return;
-
-      const formData = new FormData(askUserForm);
-      const data = {};
-      const fieldsArray = [];
-
-      for (const [key, val] of formData.entries()) {
-        const trimmed = String(val).trim();
-        data[key] = trimmed;
-        const inputEl = askUserForm.querySelector(`[name="${key}"]`);
-        fieldsArray.push({
-          name: key,
-          value: trimmed,
-          widgetType: inputEl?.dataset?.widgetType || null
-        });
-      }
-
-      console.log('[Popup] Submitting local user data for requestId:', currentAskUserRequestId, data);
-
+  if (highlightFieldsBtn) {
+    highlightFieldsBtn.addEventListener('click', () => {
+      const originalHtml = highlightFieldsBtn.innerHTML;
+      highlightFieldsBtn.innerHTML = '<span>✨ Highlighting...</span>';
       if (isExtensionContext) {
-        if (currentAskUserRequestId.startsWith('turn_')) {
-          const originalTask = lastSubmittedTask || 'Continue task with travel details';
-          updateProgressUI('Filling details locally on page...', 'executing');
-          chrome.runtime.sendMessage({
-            action: 'executeAction',
-            payload: {
-              type: 'fill_form',
-              fields: fieldsArray.length > 0 ? fieldsArray : data
-            }
-          }).then(() => {
-            if (isAutopilotEnabled) {
-              setTimeout(() => {
-                chrome.runtime.sendMessage({
-                  action: 'executeActionLoop',
-                  task: originalTask,
-                  serverUrl: currentServerUrl,
-                  maxSteps: 8
-                });
-              }, 600);
-            }
-          }).catch(err => console.warn('[Popup] Fill form error:', err));
-        } else {
-          chrome.runtime.sendMessage({
-            action: 'submitUserData',
-            requestId: currentAskUserRequestId,
-            data: fieldsArray.length > 0 ? fieldsArray : data
-          });
-        }
+        chrome.runtime.sendMessage({
+          action: 'highlightFields',
+          fields: currentGuidanceFields || []
+        }, (res) => {
+          highlightFieldsBtn.innerHTML = '<span>✨ Highlighted on Page!</span>';
+          setTimeout(() => {
+            highlightFieldsBtn.innerHTML = originalHtml;
+          }, 2500);
+        });
+      } else {
+        setTimeout(() => {
+          highlightFieldsBtn.innerHTML = originalHtml;
+        }, 1200);
       }
+    });
+  }
 
+  if (submitAskUserBtn) {
+    submitAskUserBtn.addEventListener('click', () => {
+      const reqId = currentAskUserRequestId;
       hideAskUserForm();
-      updateProgressUI('Filling details locally into tab...', 'executing');
+
+      if (reqId && !reqId.startsWith('turn_') && isExtensionContext) {
+        // Autopilot loop is waiting for user confirmation
+        chrome.runtime.sendMessage({
+          action: 'submitUserData',
+          requestId: reqId,
+          data: { filledOnPage: true, fields: currentGuidanceFields }
+        });
+        updateProgressUI('Continuing task with filled details...', 'executing');
+      } else {
+        // Manual chat turn: resume task with continuation query
+        const resumeTask = lastSubmittedTask || 'I have filled the required details on the page. Please continue.';
+        submitChatQuery(resumeTask);
+      }
     });
   }
   if (redactionImageFrame) {
@@ -1084,31 +1064,38 @@ async function submitChatQuery(query) {
         }
       }
 
-      // If agent needs clarification / details, display interactive local form immediately
-      if (turn.action && turn.action.type === 'ask_user') {
+      // If agent needs clarification / details, display interactive local guidance card immediately
+      if (turn.needsClarification || (turn.action && (turn.action.type === 'ask_user' || (turn.action.type === 'wait' && turn.needsClarification)))) {
         let fields = [];
-        let question = turn.reasoning || 'Please provide details needed to complete this task:';
-        if (turn.action.value) {
+        let question = turn.reasoning || 'Please fill in the required details directly on the page before proceeding:';
+        let title = 'Action Needed on Page';
+        if (turn.guidance) {
+          title = turn.guidance.title || title;
+          question = turn.guidance.question || question;
+          fields = turn.guidance.fields || [];
+        } else if (turn.action && turn.action.value) {
           try {
             const parsed = JSON.parse(turn.action.value);
             if (parsed.fields && Array.isArray(parsed.fields)) {
               fields = parsed.fields;
               question = parsed.question || question;
+              title = parsed.title || title;
             }
           } catch (e) {
             question = turn.action.value;
           }
         }
-        if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || '')) {
+        if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || lastSubmittedTask || '')) {
           fields = [
-            { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
-            { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
-            { name: 'date', label: 'Journey Date', type: 'date' },
-            { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+            { name: 'from', label: 'From Station', description: 'Enter departure station (e.g. New Delhi / NDLS)' },
+            { name: 'to', label: 'To Station', description: 'Enter destination station (e.g. Mumbai / BCT)' },
+            { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
+            { name: 'class', label: 'Class / Quota', description: 'Select your desired coach class' }
           ];
         }
         renderAskUserForm({
           requestId: 'turn_' + turn.id,
+          title,
           question,
           fields,
           task: turn.task
@@ -1191,9 +1178,9 @@ function getActionPillButtonHtml(act, idx, turn) {
   if (act.actionType === 'done') {
     return '<span class="action-done-pill">✓ Task Complete</span>';
   }
-  if (act.actionType === 'ask_user') {
-    return `<button class="btn-provide-details" data-turn-id="${turn.id}" title="Provide details securely on this device">
-      <span>🔒 Provide Details</span>
+  if (act.actionType === 'ask_user' || (act.actionType === 'wait' && turn.needsClarification) || turn.needsClarification) {
+    return `<button class="btn-provide-details" data-turn-id="${turn.id}" title="View required fields and guidance on page">
+      <span>👉 View Guidance</span>
     </button>`;
   }
   if (turn.outcome) {
@@ -1407,37 +1394,51 @@ function createTurnCard(turn, isError = false) {
     });
   }
 
-  // Provide Details button listeners for ask_user actions
+  // Provide Guidance button listeners for ask_user and clarification actions
   const detailBtns = responseCard.querySelectorAll('.btn-provide-details');
   detailBtns.forEach((btn) => {
     btn.addEventListener('click', () => {
       let fields = [];
-      let question = turn.reasoning || 'Please provide details needed to complete this task:';
-      if (turn.action?.value) {
+      let question = turn.reasoning || 'Please fill in the required details directly on the page before proceeding:';
+      let title = 'Action Needed on Page';
+      if (turn.guidance) {
+        title = turn.guidance.title || title;
+        question = turn.guidance.question || question;
+        fields = turn.guidance.fields || [];
+      } else if (turn.action?.value) {
         try {
           const parsed = JSON.parse(turn.action.value);
           if (parsed.fields && Array.isArray(parsed.fields)) {
             fields = parsed.fields;
             question = parsed.question || question;
+            title = parsed.title || title;
           }
         } catch (e) {
           question = turn.action.value;
         }
       }
-      if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || '')) {
+      if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || lastSubmittedTask || '')) {
         fields = [
-          { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
-          { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
-          { name: 'date', label: 'Journey Date', type: 'date' },
-          { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+          { name: 'from', label: 'From Station', description: 'Enter departure station (e.g. New Delhi / NDLS)' },
+          { name: 'to', label: 'To Station', description: 'Enter destination station (e.g. Mumbai / BCT)' },
+          { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
+          { name: 'class', label: 'Class / Quota', description: 'Select your desired coach class' }
         ];
       }
       renderAskUserForm({
         requestId: 'turn_' + turn.id,
+        title,
         question,
         fields,
         task: turn.task
       });
+      // Also highlight fields directly on tab
+      if (isExtensionContext) {
+        chrome.runtime.sendMessage({
+          action: 'highlightFields',
+          fields
+        });
+      }
     });
   });
   const execBtns = responseCard.querySelectorAll('.btn-execute-action');

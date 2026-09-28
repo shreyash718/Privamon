@@ -143,30 +143,35 @@
         </button>
       </section>
 
-      <!-- Interactive Local Ask-User / Clarification Form (Private Details Stays On-Device) -->
-      <section class="ask-user-card hidden" id="askUserCard">
+      <!-- User Guidance Card: Tells user what to fill on the page and guides them -->
+      <section class="ask-user-card guidance-card hidden" id="askUserCard">
         <div class="ask-user-header">
           <div class="ask-user-title-wrap">
-            <span class="ask-user-icon">🤖</span>
-            <span class="ask-user-title" id="askUserTitle">Details Needed</span>
+            <span class="ask-user-icon">👉</span>
+            <span class="ask-user-title" id="askUserTitle">Action Needed on Page</span>
           </div>
-          <span class="ask-user-privacy-badge">🔒 On-Device Only</span>
+          <span class="ask-user-privacy-badge">🔒 Direct on Page</span>
         </div>
-        <p class="ask-user-question" id="askUserQuestion">The agent needs details to complete this task:</p>
-        <form id="askUserForm" class="ask-user-fields-container">
-          <!-- Dynamic form fields injected by popup.js -->
-        </form>
+        <p class="ask-user-question" id="askUserQuestion">Please fill in the required details directly on the page before proceeding:</p>
+        <ul class="guidance-fields-list" id="guidanceFieldsList">
+          <li class="guidance-field-item"><span class="guidance-dot">•</span> <span><strong>From Station:</strong> Enter departure station (e.g. New Delhi / NDLS)</span></li>
+          <li class="guidance-field-item"><span class="guidance-dot">•</span> <span><strong>To Station:</strong> Enter destination station (e.g. Kanpur / CNB)</span></li>
+          <li class="guidance-field-item"><span class="guidance-dot">•</span> <span><strong>Journey Date:</strong> Select your travel date</span></li>
+        </ul>
         <div class="ask-user-guarantee">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
           </svg>
-          <span>Filled directly into your browser tab. <strong>Zero data sent to any server.</strong></span>
+          <span>Fill directly on the website for complete privacy and native autocomplete.</span>
         </div>
         <div class="ask-user-actions">
-          <button type="button" class="btn-cancel-ask-user" id="cancelAskUserBtn">Cancel</button>
-          <button type="submit" form="askUserForm" class="btn-submit-ask-user" id="submitAskUserBtn">
-            <span>🔒 Fill Locally & Continue ➔</span>
+          <button type="button" class="btn-highlight-fields" id="highlightFieldsBtn" title="Highlight the fields on your open tab">
+            <span>✨ Show Me Where</span>
           </button>
+          <button type="button" class="btn-submit-ask-user" id="submitAskUserBtn" title="Continue with the task once filled">
+            <span>▶ I've Filled Them — Continue ➔</span>
+          </button>
+          <button type="button" class="btn-cancel-ask-user" id="cancelAskUserBtn">Dismiss</button>
         </div>
       </section>
 
