@@ -110,6 +110,88 @@ const submitAskUserBtn    = document.getElementById('submitAskUserBtn');
 let currentAskUserRequestId = null;
 let lastSubmittedTask = '';
 
+// ── Helpers for Extension vs Standalone Preview ──
+const isExtensionContext = Boolean(typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function');
+
+// ── Interactive Local Ask-User Form Rendering (Top-Level) ──
+function renderAskUserForm(promptData) {
+  if (!askUserCard || !askUserForm) return;
+
+  currentAskUserRequestId = promptData.requestId || 'req_' + Date.now();
+  if (askUserTitle) {
+    askUserTitle.textContent = promptData.title || 'Details Needed';
+  }
+  if (askUserQuestion) {
+    askUserQuestion.textContent = promptData.question || 'Please provide details needed to complete this task:';
+  }
+
+  askUserForm.innerHTML = '';
+  const fields = promptData.fields || [];
+
+  fields.forEach((field, idx) => {
+    const group = document.createElement('div');
+    group.className = 'ask-user-field-group';
+    if (field.fullWidth || field.type === 'textarea') {
+      group.classList.add('full-width');
+    }
+
+    const label = document.createElement('label');
+    label.className = 'ask-user-field-label';
+    label.textContent = field.label || field.name;
+
+    let input;
+    if (field.type === 'select' && Array.isArray(field.options)) {
+      input = document.createElement('select');
+      input.className = 'ask-user-field-select';
+      input.name = field.name || `field_${idx}`;
+      field.options.forEach(opt => {
+        const optEl = document.createElement('option');
+        const val = typeof opt === 'object' ? opt.value : opt;
+        const txt = typeof opt === 'object' ? opt.text : opt;
+        optEl.value = val;
+        optEl.textContent = txt;
+        if (field.value === val) optEl.selected = true;
+        input.appendChild(optEl);
+      });
+    } else {
+      input = document.createElement('input');
+      input.type = field.type || 'text';
+      input.className = 'ask-user-field-input';
+      input.name = field.name || `field_${idx}`;
+      input.placeholder = field.placeholder || '';
+      if (field.value) input.value = field.value;
+      if (field.type === 'date' && !input.value) {
+        const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+        input.value = tomorrow.toISOString().split('T')[0];
+      }
+    }
+
+    if (field.widgetType) {
+      input.dataset.widgetType = field.widgetType;
+    }
+
+    group.appendChild(label);
+    group.appendChild(input);
+    askUserForm.appendChild(group);
+  });
+
+  askUserCard.classList.remove('hidden');
+
+  const firstInput = askUserForm.querySelector('input, select, textarea');
+  if (firstInput) {
+    setTimeout(() => firstInput.focus(), 100);
+  }
+
+  askUserCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function hideAskUserForm() {
+  if (!askUserCard) return;
+  askUserCard.classList.add('hidden');
+  currentAskUserRequestId = null;
+  if (askUserForm) askUserForm.innerHTML = '';
+}
+
 // ── Local State ──
 let isBusy = false;
 let isAutopilotEnabled = true;
@@ -391,85 +473,6 @@ function setupEventListeners() {
     expandRedactedBtn.addEventListener('click', openRedactedInLightbox);
   }
 
-  // ── Interactive Local Ask-User Form Rendering ──
-  function renderAskUserForm(promptData) {
-    if (!askUserCard || !askUserForm) return;
-
-    currentAskUserRequestId = promptData.requestId || 'req_' + Date.now();
-    if (askUserTitle) {
-      askUserTitle.textContent = promptData.title || 'Details Needed';
-    }
-    if (askUserQuestion) {
-      askUserQuestion.textContent = promptData.question || 'Please provide details needed to complete this task:';
-    }
-
-    askUserForm.innerHTML = '';
-    const fields = promptData.fields || [];
-
-    fields.forEach((field, idx) => {
-      const group = document.createElement('div');
-      group.className = 'ask-user-field-group';
-      if (field.fullWidth || field.type === 'textarea') {
-        group.classList.add('full-width');
-      }
-
-      const label = document.createElement('label');
-      label.className = 'ask-user-field-label';
-      label.textContent = field.label || field.name;
-
-      let input;
-      if (field.type === 'select' && Array.isArray(field.options)) {
-        input = document.createElement('select');
-        input.className = 'ask-user-field-select';
-        input.name = field.name || `field_${idx}`;
-        field.options.forEach(opt => {
-          const optEl = document.createElement('option');
-          const val = typeof opt === 'object' ? opt.value : opt;
-          const txt = typeof opt === 'object' ? opt.text : opt;
-          optEl.value = val;
-          optEl.textContent = txt;
-          if (field.value === val) optEl.selected = true;
-          input.appendChild(optEl);
-        });
-      } else {
-        input = document.createElement('input');
-        input.type = field.type || 'text';
-        input.className = 'ask-user-field-input';
-        input.name = field.name || `field_${idx}`;
-        input.placeholder = field.placeholder || '';
-        if (field.value) input.value = field.value;
-        if (field.type === 'date' && !input.value) {
-          const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-          input.value = tomorrow.toISOString().split('T')[0];
-        }
-      }
-
-      if (field.widgetType) {
-        input.dataset.widgetType = field.widgetType;
-      }
-
-      group.appendChild(label);
-      group.appendChild(input);
-      askUserForm.appendChild(group);
-    });
-
-    askUserCard.classList.remove('hidden');
-
-    const firstInput = askUserForm.querySelector('input, select, textarea');
-    if (firstInput) {
-      setTimeout(() => firstInput.focus(), 100);
-    }
-
-    askUserCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }
-
-  function hideAskUserForm() {
-    if (!askUserCard) return;
-    askUserCard.classList.add('hidden');
-    currentAskUserRequestId = null;
-    if (askUserForm) askUserForm.innerHTML = '';
-  }
-
   // Interactive Local Ask-User Form Listeners
   if (cancelAskUserBtn) {
     cancelAskUserBtn.addEventListener('click', () => {
@@ -709,9 +712,6 @@ function setupEventListeners() {
     });
   }
 }
-
-// ── Helpers for Extension vs Standalone Preview ──
-const isExtensionContext = typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
 
 // ── Settings ──
 async function loadSettings() {
