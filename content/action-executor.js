@@ -914,8 +914,9 @@
       el.classList?.contains('search_btn') || el.classList?.contains('train_Search') ||
       (el.type === 'submit' && (window.location.hostname.includes('irctc.co.in') || document.querySelector('p-autocomplete')));
     if (isSearchTrainsBtn) {
-      const fromInp = document.querySelector('p-autocomplete[formcontrolname*="origin" i] input, p-autocomplete[id*="origin" i] input, input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
-      const toInp = document.querySelector('p-autocomplete[formcontrolname*="destination" i] input, p-autocomplete[id*="destination" i] input, input[placeholder*="to" i], input[aria-label*="to" i], #destination input');
+      const pAutos = Array.from(document.querySelectorAll('p-autocomplete input, .ui-autocomplete input'));
+      const fromInp = pAutos[0] || document.querySelector('input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
+      const toInp = pAutos[1] || document.querySelector('input[placeholder*="to" i], input[aria-label*="to" i], #destination input');
       const fromEmpty = !fromInp || !fromInp.value || fromInp.value.trim() === '';
       const toEmpty = !toInp || !toInp.value || toInp.value.trim() === '';
       if (fromEmpty || toEmpty) {

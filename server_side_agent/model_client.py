@@ -1615,27 +1615,37 @@ def find_travel_booking_elements(sanitized_dom: Union[list, str, None]) -> dict:
     if not isinstance(sanitized_dom, list):
         return result
 
+    # 1. Match from autocomplete widgets first
+    autocompletes = [
+        el for el in sanitized_dom
+        if str(el.get("widgetType") or "").lower() == "autocomplete"
+        or (el.get("tag") or "").lower() == "p-autocomplete"
+        or "autocomplete" in str(el.get("className") or "").lower()
+        or str(el.get("placeholder") or "").lower().startswith("from")
+        or str(el.get("placeholder") or "").lower().startswith("to")
+    ]
+    if len(autocompletes) >= 2:
+        result["from_input"] = autocompletes[0]
+        result["to_input"] = autocompletes[1]
+
     for el in sanitized_dom:
         tag = (el.get("tag") or "").lower()
         lbl = str(el.get("label") or "").lower()
         ph = str(el.get("placeholder") or "").lower()
         txt = str(el.get("text") or "").lower()
         eid = str(el.get("elementId") or el.get("id") or "").lower()
+        cls = str(el.get("className") or "").lower()
         inp_type = str(el.get("inputType") or "").lower()
         widget_type = str(el.get("widgetType") or "").lower()
 
-        # From / Origin
+        # From / Origin fallback
         if not result["from_input"]:
-            if (("from" in lbl or "from" in ph or "origin" in eid or "source" in eid) and "to" not in lbl and "to" not in ph):
-                result["from_input"] = el
-            elif widget_type == "autocomplete" and not result["to_input"]:
+            if (ph.startswith("from") or "origin" in eid or "source" in eid or (lbl.startswith("from") and not ph.startswith("to"))):
                 result["from_input"] = el
 
-        # To / Destination
+        # To / Destination fallback
         if not result["to_input"]:
-            if ("to" in lbl or "to" in ph or "destination" in eid or "dest" in eid) and "from" not in lbl and "from" not in ph:
-                result["to_input"] = el
-            elif widget_type == "autocomplete" and result["from_input"] and el != result["from_input"]:
+            if el != result["from_input"] and (ph.startswith("to") or "destination" in eid or "dest" in eid or (lbl.startswith("to") and not ph.startswith("from"))):
                 result["to_input"] = el
 
         # Date input
@@ -1651,7 +1661,8 @@ def find_travel_booking_elements(sanitized_dom: Union[list, str, None]) -> dict:
         # Search button
         if not result["search_button"]:
             if ("search trains" in txt or "find trains" in txt or "search train" in txt or
-                "train_search" in eid or "search_btn" in eid or ("search" in txt and tag in ("button", "a"))):
+                "train_search" in eid or "search_btn" in eid or "search_btn" in cls or
+                ("search" in txt and tag in ("button", "a"))):
                 result["search_button"] = el
 
     return result
@@ -1734,6 +1745,19 @@ def _normalize_travel_booking_action(
             or re.search(r'\b(search\s*train|primary\s+action\s+to\s+proceed)\b', str(resp.assumptions or ''), re.I)
         )
     )
+
+    # If from and to ARE FILLED on page:
+    if not is_from_empty and not is_to_empty:
+        if search_btn and (resp.action.type in ("wait", "ask_user") or resp.needsClarification or resp.action.type == "done"):
+            print("[*] Stations are filled on page! Auto-converting to Search Trains click.")
+            resp.action.type = "click"
+            resp.action.targetElementId = search_btn.get("elementId") or search_btn.get("id") or "search_btn"
+            resp.action.value = None
+            resp.reasoning = "Origin and destination stations are filled. Clicking Search Trains to proceed with booking."
+            resp.assumptions = ["Origin and destination are filled on page."]
+            resp.needsClarification = False
+            resp.confidence = max(resp.confidence, 0.98)
+            return
 
     # If from or to are empty, WE CANNOT CLICK SEARCH TRAINS OR EMIT DONE!
     if is_from_empty or is_to_empty:

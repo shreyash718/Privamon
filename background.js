@@ -314,6 +314,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Directly continue task after user filled guidance fields on page
+  if (message.action === 'continueAfterGuidance') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab || !tab.id) return;
+
+        // Directly click the Search Trains button on page if present!
+        const searchRes = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
+            const searchBtn = buttons.find(b => {
+              const text = (b.textContent || b.value || '').toLowerCase();
+              const cls = String(b.className || '').toLowerCase();
+              const id = String(b.id || '').toLowerCase();
+              return text.includes('search train') || text.includes('find train') || cls.includes('search_btn') || cls.includes('train_search');
+            });
+            if (searchBtn) {
+              searchBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              searchBtn.click();
+              return { success: true, text: searchBtn.textContent?.trim() || 'Search Trains' };
+            }
+            return { success: false };
+          }
+        });
+
+        const clicked = searchRes[0]?.result?.success;
+        if (clicked) {
+          console.log('[Background] continueAfterGuidance: Successfully clicked Search Trains button on page!');
+          forwardToPopup({
+            type: 'autopilotProgress',
+            status: 'executing',
+            message: 'Clicked Search Trains! Waiting for train results to load...'
+          });
+
+          // Wait 2.2s for trains to render, then run agent analysis on results
+          await new Promise(r => setTimeout(r, 2200));
+          await handleChatWithAgent('Inspect train search results on page', currentServerUrl);
+          return;
+        }
+
+        // If no direct Search Trains button, resume normal chat turn
+        await handleChatWithAgent(message.task || 'Search trains now', currentServerUrl);
+      } catch (err) {
+        console.error('[Background] continueAfterGuidance error:', err);
+      }
+    })();
+    return true;
+  }
+
   // Get active redaction test state (for popup UI sync on reopen)
   if (message.action === 'getRedactionState') {
     chrome.storage.local.get(['privamon_redaction_state'], (res) => {
@@ -643,38 +694,47 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
       target: { tabId },
       func: (fieldsList) => {
         // Collect candidate inputs on page
-        const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea, [role="combobox"], [role="searchbox"], p-autocomplete, p-calendar'));
-        const matchedElements = [];
+        const pAutos = Array.from(document.querySelectorAll('p-autocomplete, .ui-autocomplete'));
+        let fromEl = null;
+        let toEl = null;
 
-        function matchesGuidance(el, terms) {
-          const id = (el.id || '').toLowerCase();
-          const name = (el.name || '').toLowerCase();
-          const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
-          const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-          const text = (el.innerText || el.textContent || '').toLowerCase();
-          const parentText = (el.parentElement ? el.parentElement.innerText || '' : '').toLowerCase();
+        if (pAutos.length >= 2) {
+          fromEl = pAutos[0].querySelector('input') || pAutos[0];
+          toEl = pAutos[1].querySelector('input') || pAutos[1];
+        } else {
+          const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), [role="searchbox"], [role="combobox"]'));
+          fromEl = allInputs.find(el => {
+            const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            const id = (el.id || '').toLowerCase();
+            const name = (el.name || '').toLowerCase();
+            return ph.includes('from') || aria.includes('from') || id.includes('origin') || id.includes('from') || name.includes('origin');
+          });
 
-          return terms.some(t => {
-            const term = t.toLowerCase();
-            return id.includes(term) || name.includes(term) || ph.includes(term) || aria.includes(term) || parentText.includes(term);
+          toEl = allInputs.find(el => {
+            if (el === fromEl) return false;
+            const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
+            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+            const id = (el.id || '').toLowerCase();
+            const name = (el.name || '').toLowerCase();
+            return ph.includes('to') || aria.includes('to') || id.includes('destination') || id.includes('dest') || name.includes('destination');
           });
         }
 
-        // Look for origin / From station
-        const fromEl = allInputs.find(el => matchesGuidance(el, ['from', 'origin', 'departure', 'source', 'board']));
-        // Look for destination / To station
-        const toEl = allInputs.find(el => matchesGuidance(el, ['to', 'destination', 'arrival', 'dest']));
-        // Look for travel / Journey date
-        const dateEl = allInputs.find(el => matchesGuidance(el, ['date', 'journey', 'depart', 'calendar']));
+        // Travel / Journey date
+        const dateEl = document.querySelector('p-calendar input, .ui-calendar input, input[type="date"], input[placeholder*="date" i], input[placeholder*="dd/mm" i], input[aria-label*="date" i]')
+          || document.querySelector('p-calendar');
 
-        if (fromEl) matchedElements.push({ el: fromEl, label: 'From Station' });
-        if (toEl) matchedElements.push({ el: toEl, label: 'To Station' });
+        const matchedElements = [];
+        if (fromEl) matchedElements.push({ el: fromEl, label: 'From Station (Origin)' });
+        if (toEl && toEl !== fromEl) matchedElements.push({ el: toEl, label: 'To Station (Destination)' });
         if (dateEl) matchedElements.push({ el: dateEl, label: 'Journey Date' });
 
-        // If no match by keywords, fallback to first 2-3 empty inputs on the page
+        // If no matches found, fallback to empty inputs
         if (matchedElements.length === 0) {
-          allInputs.filter(el => !el.value || el.value.trim() === '').slice(0, 3).forEach(el => {
-            matchedElements.push({ el, label: 'Required Input' });
+          const fallbackInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), select, textarea')).filter(el => !el.value || el.value.trim() === '');
+          fallbackInputs.slice(0, 3).forEach(el => {
+            matchedElements.push({ el, label: 'Required Field' });
           });
         }
 
@@ -723,11 +783,15 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
             ? (el.querySelector('input') || el)
             : el;
 
+          // Remove any existing highlight/badge on target or parent
+          target.classList.remove('privamon-field-highlight');
+          const oldBadge = target.parentElement?.querySelector('.privamon-guidance-badge');
+          if (oldBadge) oldBadge.remove();
+
           target.classList.add('privamon-field-highlight');
 
-          let badge = null;
           if (target.parentElement) {
-            badge = document.createElement('div');
+            const badge = document.createElement('div');
             badge.className = 'privamon-guidance-badge';
             badge.textContent = `👉 Fill ${label}`;
             try {
@@ -741,7 +805,8 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
 
           const removeHighlight = () => {
             target.classList.remove('privamon-field-highlight');
-            if (badge && badge.parentNode) badge.parentNode.removeChild(badge);
+            const b = target.parentElement?.querySelector('.privamon-guidance-badge');
+            if (b) b.remove();
             target.removeEventListener('input', removeHighlight);
             target.removeEventListener('focus', removeHighlight);
           };
@@ -749,13 +814,19 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
           setTimeout(removeHighlight, 6000);
         });
 
-        // Smoothly center the first target on screen
-        const firstTarget = matchedElements[0].el;
-        const focusable = firstTarget.tagName.includes('-') ? (firstTarget.querySelector('input') || firstTarget) : firstTarget;
-        focusable.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        setTimeout(() => {
-          try { focusable.focus(); } catch (e) {}
-        }, 300);
+        // Scroll to first empty target or first target
+        const emptyTarget = matchedElements.find(m => {
+          const inp = m.el.querySelector ? (m.el.querySelector('input') || m.el) : m.el;
+          return !inp.value || inp.value.trim() === '';
+        }) || matchedElements[0];
+
+        if (emptyTarget) {
+          const focusable = emptyTarget.el.querySelector ? (emptyTarget.el.querySelector('input') || emptyTarget.el) : emptyTarget.el;
+          focusable.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setTimeout(() => {
+            try { focusable.focus(); } catch (e) {}
+          }, 300);
+        }
 
         return true;
       },
@@ -768,7 +839,8 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
 
 /**
  * Circuit-breaker to prevent clicking "Search Trains" or search buttons
- * when origin/destination stations on travel booking pages (like IRCTC) are empty.
+ * when origin/destination stations on travel booking pages (like IRCTC) are empty,
+ * and to automatically trigger Search Trains when origin and destination are filled.
  */
 function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl) {
   if (!action) return null;
@@ -783,44 +855,56 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
   let searchElement = null;
 
   if (Array.isArray(domElements)) {
+    // 1. Check for autocomplete station inputs:
+    const autocompletes = domElements.filter(el => {
+      const w = String(el.widgetType || '').toLowerCase();
+      const tag = String(el.tag || '').toLowerCase();
+      const ph = String(el.placeholder || el.attributes?.placeholder || '').toLowerCase();
+      return w === 'autocomplete' || tag === 'p-autocomplete' || (tag === 'input' && (ph.startsWith('from') || ph.startsWith('to')));
+    });
+
+    if (autocompletes.length >= 2) {
+      fromElement = autocompletes[0];
+      toElement = autocompletes[1];
+    }
+
     for (const el of domElements) {
       const elId = String(el.elementId || el.id || '');
       const text = String(el.text || '').toLowerCase();
       const label = String(el.label || '').toLowerCase();
       const ph = String(el.placeholder || el.attributes?.placeholder || '').toLowerCase();
       const tag = String(el.tag || '').toLowerCase();
-      const widget = String(el.widgetType || '').toLowerCase();
+      const cls = String(el.className || '').toLowerCase();
 
-      // Check if this matches the target element
-      if (action.targetElementId && (elId === action.targetElementId || elId.includes(action.targetElementId))) {
-        if (text.includes('search') || label.includes('search') || ph.includes('search') || tag === 'button') {
+      // Search button
+      if (!searchElement) {
+        if (text.includes('search train') || text.includes('find train') || cls.includes('search_btn') || cls.includes('train_search') ||
+            (tag === 'button' && (text.includes('search') || label.includes('search')))) {
           searchElement = el;
+        } else if (action.targetElementId && (elId === action.targetElementId || elId.includes(action.targetElementId))) {
+          if (text.includes('search') || label.includes('search') || ph.includes('search') || tag === 'button') {
+            searchElement = el;
+          }
         }
       }
 
-      // From / Origin element
+      // From / Origin fallback
       if (!fromElement) {
-        if ((label.includes('from') || ph.includes('from') || elId.toLowerCase().includes('origin')) &&
-            !label.includes('to') && !ph.includes('to')) {
-          fromElement = el;
-        } else if (widget === 'autocomplete' && !toElement) {
+        if (ph.startsWith('from') || elId.includes('origin') || (label.startsWith('from') && !label.includes('to'))) {
           fromElement = el;
         }
       }
 
-      // To / Destination element
+      // To / Destination fallback
       if (!toElement) {
-        if ((label.includes('to') || ph.includes('to') || elId.toLowerCase().includes('destination')) &&
-            !label.includes('from') && !ph.includes('from')) {
-          toElement = el;
-        } else if (widget === 'autocomplete' && fromElement && el !== fromElement) {
+        if (el !== fromElement && (ph.startsWith('to') || elId.includes('destination') || elId.includes('dest') || (label.startsWith('to') && !label.includes('from')))) {
           toElement = el;
         }
       }
 
       // Date element
       if (!dateElement) {
-        if (label.includes('date') || ph.includes('date') || widget === 'datepicker') {
+        if (label.includes('date') || ph.includes('date') || ph.includes('dd/mm') || el.widgetType === 'datepicker') {
           dateElement = el;
         }
       }
@@ -840,10 +924,34 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
     (searchElement !== null)
   ));
 
-  if (isTravelContext && (isSearchClick || (action.type === 'done' && (fromElement || toElement)))) {
-    const fromEmpty = !fromElement || !fromElement.value || fromElement.value.trim() === '';
-    const toEmpty = !toElement || !toElement.value || toElement.value.trim() === '';
+  const fromVal = String(fromElement?.value || fromElement?.text || '').trim();
+  const toVal = String(toElement?.value || toElement?.text || '').trim();
+  const fromEmpty = !fromElement || fromVal === '';
+  const toEmpty = !toElement || toVal === '';
 
+  // IF FROM AND TO ARE FILLED:
+  if (isTravelContext && !fromEmpty && !toEmpty) {
+    // If the model emitted wait/ask_user or needs clarification, convert to click Search Trains button!
+    if (action.type === 'wait' || action.type === 'ask_user' || reasoning.toLowerCase().includes('fill') || action.type === 'done') {
+      const sId = (searchElement?.elementId || searchElement?.id || 'button_search');
+      console.log(`[Background] Stations are filled (From="${fromVal}", To="${toVal}"). Auto-converting to click Search Trains (${sId})!`);
+      return {
+        action: {
+          type: 'click',
+          targetElementId: sId,
+          value: null,
+          scrollDirection: null
+        },
+        reasoning: `Stations are filled ("${fromVal}" to "${toVal}"). Clicking Search Trains to proceed with booking.`,
+        assumptions: ['Origin and destination stations are filled on page.'],
+        needsClarification: false
+      };
+    }
+    return null; // Don't block search clicks!
+  }
+
+  // IF FROM OR TO ARE EMPTY, BLOCK SEARCH:
+  if (isTravelContext && (isSearchClick || (action.type === 'done' && (fromElement || toElement)))) {
     if (fromEmpty || toEmpty) {
       console.warn('[Background] Travel Circuit-Breaker: Blocked premature search click because From/To are empty!');
       const taskStr = task || '';

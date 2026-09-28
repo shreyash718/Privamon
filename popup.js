@@ -518,9 +518,17 @@ function setupEventListeners() {
         });
         updateProgressUI('Continuing task with filled details...', 'executing');
       } else {
-        // Manual chat turn: resume task with continuation query
-        const resumeTask = lastSubmittedTask || 'I have filled the required details on the page. Please continue.';
-        submitChatQuery(resumeTask);
+        // User confirmed details are filled on page.
+        // Directly trigger continuation which clicks Search Trains and proceeds!
+        updateProgressUI('Details filled on page. Proceeding with search...', 'executing');
+        if (isExtensionContext) {
+          chrome.runtime.sendMessage({
+            action: 'continueAfterGuidance',
+            task: lastSubmittedTask || 'Search trains with entered details'
+          });
+        } else {
+          submitChatQuery('Search trains with entered details');
+        }
       }
     });
   }
