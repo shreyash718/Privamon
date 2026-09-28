@@ -358,7 +358,107 @@ assert v20_norm.action.value is not None, "Message value should not be None"
 assert any(w in v20_norm.action.value.lower() for w in ("lecture", "attend", "apolog", "tomorrow")), f"Value lacked lecture message content: {v20_norm.action.value}"
 print("✓ Test 20 (Polite message drafting & cross-task prior action isolation) passed")
 
-print("\nAll 20 reasoning agent validation tests PASSED!")
+# Test 21: WhatsApp "send samar 10 line poem on love" when chat is already open
+t21_task = "send samar 10 line poem on love"
+dom_whatsapp_samar_open = [
+    {"elementId": "dom-tok-hdr", "tag": "span", "text": "Samar", "label": "Samar", "bbox": {"x": 320, "y": 45}},
+    {"elementId": "dom-tok-search", "tag": "div", "role": "textbox", "placeholder": "Search or start new chat", "bbox": {"x": 120, "y": 60}},
+    {"elementId": "dom-tok-status", "tag": "button", "role": "button", "label": "Status", "isWhatsAppStatus": True, "bbox": {"x": 20, "y": 110}},
+    {"elementId": "dom-tok-msgbox", "tag": "div", "role": "textbox", "placeholder": "Type a message", "bbox": {"x": 600, "y": 700}}
+]
+t21_raw = json.dumps({
+    "reasoning": "Sending 10 line poem to Samar.",
+    "confidence": 0.85,
+    "action": {"type": "type", "targetElementId": "dom-tok-msgbox", "value": None, "scrollDirection": None},
+    "assumptions": [],
+    "needsClarification": False
+})
+v21, _ = parse_and_validate(t21_raw)
+v21_norm = _normalize_action(v21, t21_task, dom_whatsapp_samar_open, prior_actions=[])
+assert v21_norm.action.type == "type", f"Expected 'type', got {v21_norm.action.type}"
+assert v21_norm.action.targetElementId == "dom-tok-msgbox", f"Expected msgbox target, got {v21_norm.action.targetElementId}"
+assert v21_norm.action.value is not None, "Expected poem in action.value"
+lines_21 = [l.strip() for l in v21_norm.action.value.split('\n') if l.strip()]
+assert len(lines_21) == 10, f"Expected exactly 10 lines of poem, got {len(lines_21)}: {v21_norm.action.value}"
+assert any(k in v21_norm.action.value.lower() for k in ("love", "soul", "heart", "flame")), f"Poem lacked love sentiment: {v21_norm.action.value}"
+print("✓ Test 21 (WhatsApp 'send samar 10 line poem on love' direct message box typing) passed")
+
+# Test 22: WhatsApp Status page recovery (clicks Chats tab to return from Status screen)
+from model_client import is_whatsapp_on_status_page, find_whatsapp_chats_tab
+dom_whatsapp_status_screen = [
+    {"elementId": "dom-tok-chats-tab", "tag": "button", "role": "button", "label": "Chats", "isWhatsAppChatsTab": True, "bbox": {"x": 20, "y": 50}},
+    {"elementId": "dom-tok-status-tab", "tag": "button", "role": "button", "label": "Status", "isWhatsAppStatus": True, "bbox": {"x": 20, "y": 110}},
+    {"elementId": "dom-tok-status-hdr", "tag": "h1", "text": "Status", "bbox": {"x": 100, "y": 50}},
+    {"elementId": "dom-tok-my-status", "tag": "div", "text": "My status", "label": "Click to add status update", "bbox": {"x": 100, "y": 120}},
+    {"elementId": "dom-tok-share-status", "tag": "div", "text": "Share statuses", "label": "Share photos, videos and text that disappear after 24 hours.", "bbox": {"x": 600, "y": 400}}
+]
+assert is_whatsapp_on_status_page(dom_whatsapp_status_screen) == True, "Failed to detect WhatsApp Status screen"
+chats_tab = find_whatsapp_chats_tab(dom_whatsapp_status_screen)
+assert chats_tab is not None and chats_tab.get("elementId") == "dom-tok-chats-tab", f"Failed to find Chats tab: {chats_tab}"
+
+t22_raw = json.dumps({
+    "reasoning": "Navigating to Samar.",
+    "confidence": 0.8,
+    "action": {"type": "type", "targetElementId": "dom-tok-status-hdr", "value": "samar", "scrollDirection": None},
+    "assumptions": [],
+    "needsClarification": False
+})
+v22, _ = parse_and_validate(t22_raw)
+v22_norm = _normalize_action(v22, "send samar 10 line poem on love", dom_whatsapp_status_screen, prior_actions=[])
+assert v22_norm.action.type == "click", f"Expected 'click' to return to Chats, got {v22_norm.action.type}"
+assert v22_norm.action.targetElementId == "dom-tok-chats-tab", f"Expected Chats tab target, got {v22_norm.action.targetElementId}"
+print("✓ Test 22 (WhatsApp Status page recovery to Chats tab) passed")
+
+# Test 23: Circuit breaker blocks click on Status element during messaging task and redirects to message box
+t23_raw = json.dumps({
+    "reasoning": "Clicking Status on left to send poem.",
+    "confidence": 0.7,
+    "action": {"type": "click", "targetElementId": "dom-tok-status", "value": None, "scrollDirection": None},
+    "assumptions": [],
+    "needsClarification": False
+})
+v23, _ = parse_and_validate(t23_raw)
+v23_norm = _normalize_action(v23, "send samar 10 line poem on love", dom_whatsapp_samar_open, prior_actions=[])
+assert v23_norm.action.type == "type", f"Circuit breaker should redirect to 'type', got {v23_norm.action.type}"
+assert v23_norm.action.targetElementId == "dom-tok-msgbox", f"Target should be message box, got {v23_norm.action.targetElementId}"
+assert len([l for l in v23_norm.action.value.split('\n') if l.strip()]) == 10, "Poem must be 10 lines"
+print("✓ Test 23 (Circuit breaker blocks Status click and redirects to message box) passed")
+
+# Test 24: ERP and non-WhatsApp isolation: ensures ERP results, fees, attendance are 100% unaffected
+from model_client import is_whatsapp_dom
+dom_erp_result_page = [
+    {"elementId": "dom-erp-fee-status", "tag": "td", "text": "Fee Status: Paid", "label": "Fee Status", "bbox": {"x": 300, "y": 200}},
+    {"elementId": "dom-erp-reg-status", "tag": "td", "text": "Registration Status: Verified", "label": "Registration Status", "bbox": {"x": 300, "y": 240}},
+    {"elementId": "dom-erp-sem-dropdown", "tag": "select", "id": "ddlSemester", "label": "Select Semester", "bbox": {"x": 200, "y": 300}},
+    {"elementId": "dom-erp-btn-result", "tag": "button", "id": "btnShowResult", "label": "Show Result", "text": "Show Result", "bbox": {"x": 350, "y": 300}}
+]
+assert is_whatsapp_dom(dom_erp_result_page) == False, "ERP DOM must NOT be identified as WhatsApp DOM"
+assert is_whatsapp_on_status_page(dom_erp_result_page) == False, "ERP 'Fee Status' must NOT trigger WhatsApp status recovery"
+
+t24_erp_raw = json.dumps({
+    "reasoning": "Clicking Show Result button for 4th semester result.",
+    "confidence": 0.95,
+    "action": {"type": "click", "targetElementId": "dom-erp-btn-result", "value": None, "scrollDirection": None},
+    "assumptions": ["ERP portal"],
+    "needsClarification": False
+})
+v24_erp, _ = parse_and_validate(t24_erp_raw)
+
+# Turn 1: ERP dropdown auto-normalization correctly selects the semester from the dropdown first
+v24_erp_turn1, _ = parse_and_validate(t24_erp_raw)
+v24_erp_norm1 = _normalize_action(v24_erp_turn1, "open my 4th semester result", dom_erp_result_page, prior_actions=[])
+assert v24_erp_norm1.action.type == "select", f"ERP dropdown should be selected first, got {v24_erp_norm1.action.type}"
+assert v24_erp_norm1.action.targetElementId == "dom-erp-sem-dropdown"
+
+# Turn 2: Once semester dropdown is selected, click on Show Result button is preserved
+v24_erp_turn2, _ = parse_and_validate(t24_erp_raw)
+v24_erp_norm2 = _normalize_action(v24_erp_turn2, "open my 4th semester result", dom_erp_result_page, prior_actions=['select dom-erp-sem-dropdown "4th semester" [outcome: executed]'])
+assert v24_erp_norm2.action.type == "click", f"ERP click must remain click on Turn 2, got {v24_erp_norm2.action.type}"
+assert v24_erp_norm2.action.targetElementId == "dom-erp-btn-result", f"ERP target element must be preserved, got {v24_erp_norm2.action.targetElementId}"
+print("✓ Test 24 (ERP and non-WhatsApp isolation preserved) passed")
+
+print("\nAll 24 reasoning agent validation tests PASSED!")
+
 
 
 

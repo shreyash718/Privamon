@@ -647,6 +647,18 @@
       label = (label ? `${label} ` : '') + '(Microphone / Voice Search / Audio Record Button - NOT A TEXTBOX OR SEARCH BUTTON)';
     }
 
+    // WhatsApp Navigation Rail detection (Status tab, Chats tab)
+    const isWhatsAppSite = typeof window !== 'undefined' && window.location?.hostname?.includes('whatsapp.com');
+    if (isWhatsAppSite) {
+      const combinedNav = `${ariaLabel} ${titleAttr} ${dataIcon} ${idAttr} ${el.textContent || ''}`.toLowerCase();
+      if (/status|share\s*status/i.test(combinedNav)) {
+        entry.isWhatsAppStatus = true;
+        label = (label ? `${label} ` : '') + '(WhatsApp Status Tab - NOT A CHAT OR CONTACT OR MESSAGE BOX)';
+      } else if (/^chats?\b/i.test(combinedNav) || ariaLabel === 'chats' || titleAttr === 'chats') {
+        entry.isWhatsAppChatsTab = true;
+      }
+    }
+
     // YouTube video title enrichment with metadata (views, channel name, duration, members-only status)
     if (el.id === 'video-title' || (tag === 'A' && el.closest?.('ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer'))) {
       const container = el.closest('ytd-video-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer');

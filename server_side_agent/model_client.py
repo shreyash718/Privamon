@@ -254,17 +254,21 @@ HOW TO REASON UNDER REDACTION:
 9. Don't hallucinate content behind a redaction.
 
 SPECIAL GUIDANCE FOR CHAT & MESSAGING: (e.g. WhatsApp, Slack, Messenger)
-- Multi-Step Contact Search & Message Flow (e.g. "message Tanishq I will not be available", "search for contact Tanishq and message him...", "send 'Tanishq' a 10 line poem"):
-  * Step 1 (Search for contact): Type the contact name into the left contact search bar (look for placeholder "Search or start new chat", "Search", id="search", or role="textbox" on top-left at x < 400, y < 150). DO NOT type into the bottom message textbox on the right!
-  * Step 2 (Select contact from search list): In the search results under "Chats" on the left (x < 450, 65 <= y <= 400), click the FIRST/TOP contact result card that matches the contact name. DO NOT click the message textbox on the right yet.
+- Multi-Step Contact Search & Message Flow (e.g. "message Tanishq I will not be available", "search for contact Tanishq and message him...", "send 'Tanishq' a 10 line poem", "send samar 10 line poem on love"):
+  * Priority Step 0 (Conversation already open): If the contact's chat conversation is already open on the right (or the bottom message textbox "Type a message" is visible and active for the recipient), DO NOT search again or click any sidebar items! Immediately emit action type "type" targeting the message textbox at the bottom (role="textbox", contenteditable, placeholder "Type a message") with the message/poem in "value".
+  * Step 1 (Search for contact): If the recipient's chat is NOT open, type the contact name into the left contact search bar (look for placeholder "Search or start new chat", "Search", id="search", or role="textbox" on top-left at x < 400, y < 150). DO NOT type into the bottom message textbox on the right!
+  * Step 2 (Select contact from search list): In the search results under "Chats" on the left (65 <= x < 450, 65 <= y <= 600), click the FIRST/TOP contact result card that matches the contact name. DO NOT click the message textbox on the right yet.
   * Step 3 (Open conversation pane): Once the contact's chat is open, identify the bottom message input box (placeholder "Type a message", role="textbox", contenteditable at bottom y > 500). Emit action type "type" targeting that elementId with the message content in "value". The browser client automatically types and sends the message.
   * Step 4 (Task Complete): If the message has been sent or is visible in chat history, return action type "done".
 
-- Generative vs. Literal Messaging Rules:
-  * GENERATIVE / DRAFTING REQUESTS: If the user asks to compose, draft, or generate creative content, greetings, or wishes (e.g. "send 'Shivam' greeting message for his marriage", "send 'Tanishq' a beautiful 10 line poem", "wish Rahul happy birthday", "draft wedding wishes for Priya", "compose a formal apology", "congratulate him on his promotion"), you MUST draft and compose the FULL, warm, personalized message yourself and put it into action.value! (e.g. For marriage greetings: "Congratulations on your wedding, Shivam! Wishing you and your partner a lifetime of love, joy, and endless happiness together!"). NEVER send placeholder text, short summaries, or the literal task instruction words (e.g. NEVER send "greeting message for his marriage" or "wedding wishes").
-  * LITERAL REQUESTS: If the user gives an exact or specific message (e.g. "message Tanishq I will not be available for tomorrow", "say hello", "tell him meeting is cancelled"), send ONLY that exact message in action.value without adding poems, greetings, or creative embellishments.
+- CRITICAL WHATSAPP NAVIGATION & STATUS RULES:
+  * NEVER click "Status" or navigation rail icons (x < 65) when asked to send a message or poem!
+  * If WhatsApp Web is currently stuck on the "Status" screen (header shows "Status", "My status", "Share statuses"), emit action type "click" targeting the "Chats" icon at the top of the left rail (x < 65, y < 100) to return to Chats.
+  * NEVER target a microphone or voice recording button (labeled "Voice message", "Microphone", "PTT", or "(Microphone / Voice Record Button - NOT A TEXTBOX)") for text tasks or "type" actions. Always target the actual TEXTBOX (labeled "Type a message", role="textbox", contenteditable).
 
-- CRITICAL: NEVER target a microphone or voice recording button (labeled "Voice message", "Microphone", "PTT", or "(Microphone / Voice Record Button - NOT A TEXTBOX)") for text tasks or "type" actions. Always target the actual TEXTBOX (labeled "Type a message", role="textbox", contenteditable).
+- Generative vs. Literal Messaging Rules:
+  * GENERATIVE / DRAFTING REQUESTS: If the user asks to compose, draft, or generate creative content, greetings, or wishes (e.g. "send 'Shivam' greeting message for his marriage", "send 'Tanishq' a beautiful 10 line poem", "send samar 10 line poem on love", "wish Rahul happy birthday", "draft wedding wishes for Priya", "compose a formal apology", "congratulate him on his promotion"), you MUST draft and compose the FULL, warm, personalized message yourself and put it into action.value! (e.g. For marriage greetings: "Congratulations on your wedding, Shivam! Wishing you and your partner a lifetime of love, joy, and endless happiness together!"). NEVER send placeholder text, short summaries, or the literal task instruction words (e.g. NEVER send "greeting message for his marriage" or "wedding wishes").
+  * LITERAL REQUESTS: If the user gives an exact or specific message (e.g. "message Tanishq I will not be available for tomorrow", "say hello", "tell him meeting is cancelled"), send ONLY that exact message in action.value without adding poems, greetings, or creative embellishments.
 
 SPECIAL GUIDANCE FOR SEARCH & FORM INPUTS: (e.g. Flipkart, YouTube, Amazon, Google)
 - When the user asks to search for something, find a product/video/song/topic, or look up information (e.g. "search stylish watches for me", "search watches on flipkart", "search Indias got latent and play most viewed video", "search 'Khat' and play first video"):
@@ -811,6 +815,7 @@ def is_creative_generation_task(task: str) -> bool:
     - 'send "shivam" greeting message for his marriage'
     - 'send "shivam" message that I will not able to attend his lecture tommorow be polite'
     - 'send "Tanishq" a beatifull 10 line poem'
+    - 'send samar 10 line poem on love'
     - 'send shivam wedding wishes'
     - 'wish rahul happy birthday'
     - 'draft wedding message for priya'
@@ -831,11 +836,11 @@ def is_creative_generation_task(task: str) -> bool:
         r"greeting\w*|wish\w*|blessing\w*|congratulat\w*|"
         r"marriage|wedding|anniversary|birthday|promotion|festival|"
         r"lines?\s+of|lines?\s+on|\d+\s+line|"
-        r"message\s+(?:about|for|wishing|congratulating|that|saying)|"
-        r"tell\s+(?:\w+\s+)?(?:that|saying)|"
-        r"write\s+(?:a\s+)?(?:message|note|greeting|wish)|"
-        r"draft\w*\s+(?:a\s+)?(?:\w+\s+)?(?:poem|song|story|greeting|wish|speech|lyrics|essay|message|note)|"
-        r"be\s+polite|politely|formal\w*|courteous\w*|sorry|emotion\w*|excuse|reason|unable\s+to\s+attend|cannot\s+attend|will\s+not\s+be\s+able"
+        r"message\s+(?:about|for|wishing|congratulating)|"
+        r"tell\s+(?:\w+\s+)?(?:about|to\s+congratulate)|"
+        r"write\s+(?:a\s+)?(?:poem|greeting|wish)|"
+        r"draft\w*\s+(?:a\s+)?(?:\w+\s+)?(?:poem|song|story|greeting|wish|speech|lyrics|essay)|"
+        r"be\s+polite|politely|formal\w*|courteous\w*"
         r")\b",
         task,
         re.I
@@ -988,45 +993,121 @@ def compose_creative_fallback(task: str) -> str:
         "From darkest dusk to morning light."
     )
 
+def is_whatsapp_dom(sanitized_dom: Union[list, str, None]) -> bool:
+    """Checks if the sanitized DOM belongs to WhatsApp Web."""
+    if not isinstance(sanitized_dom, list):
+        return False
+    for el in sanitized_dom:
+        if el.get("isWhatsAppStatus") or el.get("isWhatsAppChatsTab"):
+            return True
+        attrs = el.get("attributes") or {}
+        combined = f"{el.get('text', '')} {el.get('label', '')} {el.get('placeholder', '')} {attrs.get('placeholder', '')} {el.get('id', '')}".lower()
+        if "type a message" in combined or "search or start new chat" in combined:
+            return True
+        if "share statuses" in combined or "my status" in combined or "disappear after 24 hours" in combined:
+            return True
+        if "status updates" in combined and "whatsapp" in combined:
+            return True
+    return False
+
+def is_whatsapp_on_status_page(sanitized_dom: Union[list, str, None]) -> bool:
+    """Checks if WhatsApp Web is currently displaying the Status screen instead of Chats."""
+    if not isinstance(sanitized_dom, list):
+        return False
+    if not is_whatsapp_dom(sanitized_dom):
+        return False
+    status_keywords = 0
+    for el in sanitized_dom:
+        if el.get("isWhatsAppStatus"):
+            continue
+        combined = f"{el.get('text', '')} {el.get('label', '')}".lower()
+        if any(k in combined for k in ["share statuses", "my status", "status updates", "disappear after 24 hours"]):
+            return True
+        if combined.strip() == "status":
+            status_keywords += 1
+    return status_keywords >= 2
+
+def find_whatsapp_chats_tab(sanitized_dom: Union[list, str, None]) -> Optional[dict]:
+    """Finds the 'Chats' navigation tab button on WhatsApp Web's left navbar."""
+    if not isinstance(sanitized_dom, list):
+        return None
+    for el in sanitized_dom:
+        if el.get("isWhatsAppChatsTab"):
+            return el
+        lbl = str(el.get("label") or "").lower()
+        txt = str(el.get("text") or "").lower()
+        attrs = el.get("attributes") or {}
+        title = str(attrs.get("title") or el.get("title") or "").lower()
+        aria_label = str(attrs.get("aria-label") or el.get("aria-label") or "").lower()
+        combined = f"{lbl} {txt} {title} {aria_label}"
+        bbox = el.get("bbox") or {}
+        x = bbox.get("x")
+        y = bbox.get("y")
+        tag = (el.get("tag") or "").lower()
+        role = (el.get("role") or "").lower()
+        if ("chats" in combined or combined.strip() == "chats") and (x is None or x < 70) and (y is None or y < 150):
+            return el
+        if (tag in ("button", "span", "div") or role == "button") and (x is not None and x < 65) and (y is not None and 30 <= y <= 90):
+            if not any(k in combined for k in ["status", "channel", "communit", "setting", "meta"]):
+                return el
+    return None
+
 def is_contact_result_item(el: dict, contact_name: Optional[str] = None) -> bool:
     """Checks if a DOM element is a contact search result card in WhatsApp Web."""
     if not isinstance(el, dict):
         return False
-    if el.get("isAudioRecord"):
+    if el.get("isAudioRecord") or el.get("isWhatsAppStatus"):
         return False
 
     tag = (el.get("tag") or "").lower()
     role = (el.get("role") or "").lower()
     attrs = el.get("attributes") or {}
     ph = str(el.get("placeholder") or attrs.get("placeholder") or "").strip().lower()
-    lbl = str(el.get("label") or "").strip().lower()
+    lbl = str(el.get("label") or attrs.get("aria-label") or "").strip().lower()
     txt = str(el.get("text") or "").strip().lower()
     eid = str(el.get("elementId") or el.get("id") or "").lower()
+    title = str(attrs.get("title") or el.get("title") or "").strip().lower()
+    combined_info = f"{lbl} {txt} {eid} {title}"
 
-    # Reject search input fields and textboxes
+    # Strict rejection of navigation rail icons and status/channel tabs
+    nav_keywords = [
+        "status", "my status", "share statuses", "status updates",
+        "channel", "communit", "setting", "meta ai", "profile",
+        "archived", "filter chats", "new chat", "menu", "starred",
+        "disappear after 24 hours"
+    ]
+    if any(k in combined_info for k in nav_keywords):
+        return False
+
+    # Reject search input fields and message textboxes
     if "search" in ph or "search" in lbl or "search" in eid or role in ("searchbox", "combobox"):
         return False
-    if role == "textbox" and (tag in ("input", "textarea") or "search" in ph or "chat" in ph):
+    if role == "textbox" or tag in ("input", "textarea") or "message" in ph or "chat" in ph or "type a message" in combined_info:
         return False
 
-    if lbl in {"all", "unread", "favourites", "groups", "chats", "status", "channels", "communities", "archived", "filter chats by"}:
+    if lbl in {"all", "unread", "favourites", "groups", "chats"}:
         return False
 
     bbox = el.get("bbox") or {}
     x = bbox.get("x")
     y = bbox.get("y")
 
+    # The WhatsApp left navigation rail is at x < 65: NEVER match as contact!
+    if x is not None and x < 65:
+        return False
+
     # If contact name is known, check if it directly appears in label or text
     if contact_name and len(contact_name) >= 2:
         c_lower = contact_name.lower()
         if c_lower in lbl or c_lower in txt:
-            if x is None or x < 500:
+            if x is None or (65 <= x < 500):
                 return True
 
     # Spatial check for left-pane contact search result under "Chats"
+    # WhatsApp chat search result items are strictly in the left list pane: 65 <= x < 450, 65 <= y <= 650
     if x is not None and y is not None:
-        if x < 450 and 65 <= y <= 450:
-            if role in ("listitem", "row", "gridcell") or tag in ("div", "span", "a", "button"):
+        if 65 <= x < 450 and 65 <= y <= 650:
+            if role in ("listitem", "row", "gridcell") or tag in ("div", "span", "a"):
                 return True
 
     return False
@@ -1059,6 +1140,7 @@ def find_chat_message_textbox(sanitized_dom: Union[list, str, None]) -> Optional
     """Finds the active chat's message input textbox (typically at the bottom)."""
     if not isinstance(sanitized_dom, list):
         return None
+    is_wa = is_whatsapp_dom(sanitized_dom)
     for el in sanitized_dom:
         if el.get("isAudioRecord"):
             continue
@@ -1067,16 +1149,22 @@ def find_chat_message_textbox(sanitized_dom: Union[list, str, None]) -> Optional
         attrs = el.get("attributes") or {}
         ph = str(el.get("placeholder") or attrs.get("placeholder") or "").lower()
         lbl = str(el.get("label") or "").lower()
+        eid = str(el.get("id") or el.get("elementId") or "").lower()
         is_contenteditable = bool(el.get("isContentEditable") or el.get("inputType") == "contenteditable" or attrs.get("type") == "contenteditable")
+
+        # Exclude search inputs and navigation boxes from ever being matched as message textboxes
+        if "search" in ph or "search" in lbl or "search" in eid or role in ("searchbox", "combobox"):
+            continue
 
         if "type a message" in ph or "type a message" in lbl:
             return el
-        if (role == "textbox" or tag in ("textarea", "input") or is_contenteditable) and ("message" in ph or "message" in lbl or "chat" in ph):
+        if (role == "textbox" or tag in ("textarea", "input") or is_contenteditable) and ("message" in ph or "message" in lbl):
             return el
         bbox = el.get("bbox") or {}
         y = bbox.get("y")
         if (role == "textbox" or is_contenteditable) and (y is not None and y > 450):
-            return el
+            if is_wa or is_contenteditable or "chat" in lbl or "message" in lbl:
+                return el
     return None
 
 def extract_search_query(task: str) -> Optional[str]:
@@ -1406,11 +1494,13 @@ def _normalize_contact_chat_action(
 ) -> InterpretResponse:
     """
     Normalizes multi-step contact messaging workflows (e.g. on WhatsApp Web):
-    - Step 1: Types contact name into contact search bar.
-    - Step 2: Clicks top contact result under Chats on the left.
+    - Status Recovery: If stuck on WhatsApp Status page, navigates back to Chats.
+    - Chat Conversation Already Open: Directly types message or generated creative poem into message box.
+    - Step 1: Types contact name into contact search bar (if recipient's chat not open).
+    - Step 2: Clicks top contact result under Chats on the left (strictly 65 <= x < 450, no nav items).
     - Step 3: Types message or generated poem into message textbox.
-    - Step 4: Handles verified completion / 'done'.
-    - Preserves generated creative content (poems/rhymes) when is_creative_generation_task is True.
+    - Circuit Breaker: Blocks any invalid click targeting Status or nav-rail elements during messaging.
+    - ERP/Non-WhatsApp Isolation: Skips completely if not WhatsApp and no contact specified.
     """
     if not resp or not resp.action:
         return resp
@@ -1426,6 +1516,26 @@ def _normalize_contact_chat_action(
     )
     if not has_chat_intent:
         return resp
+
+    # CRITICAL ERP / NON-WHATSAPP ISOLATION:
+    # If this is not WhatsApp Web and no explicit contact name was specified in the task,
+    # skip contact chat normalization completely so ERP and other web workflows are never affected.
+    is_wa = is_whatsapp_dom(sanitized_dom)
+    if not is_wa and not contact_name:
+        return resp
+
+    # 0. WhatsApp Status Page Recovery: If on the Status screen, click Chats tab to return to chat view
+    if is_wa and is_whatsapp_on_status_page(sanitized_dom):
+        chats_tab = find_whatsapp_chats_tab(sanitized_dom)
+        if chats_tab:
+            chats_id = chats_tab.get("elementId") or chats_tab.get("id")
+            print(f"[*] Auto-normalizing contact action: WhatsApp is on Status page; clicking Chats tab {chats_id} to return to chat view")
+            resp.action.type = "click"
+            resp.action.targetElementId = chats_id
+            resp.action.value = None
+            resp.reasoning = "Switching from WhatsApp Status view back to Chats view to access contacts."
+            resp.confidence = max(resp.confidence, 0.95)
+            return resp
 
     # Check prior actions history
     has_prior_search = False
@@ -1457,18 +1567,34 @@ def _normalize_contact_chat_action(
                         has_prior_message_sent = True
                         break
 
-    # Check if chat conversation is already open on screen with contact_name
-    if contact_name and not has_prior_click_contact and isinstance(sanitized_dom, list):
-        for el in sanitized_dom:
-            bbox = el.get("bbox") or {}
-            x = bbox.get("x") or 0
-            y = bbox.get("y") or 0
-            if x >= 350 and y <= 150:
-                txt = str(el.get("text") or el.get("label") or "").lower()
-                if contact_name.lower() in txt:
-                    has_prior_search = True
-                    has_prior_click_contact = True
-                    break
+    contact_search_input = find_contact_search_input(sanitized_dom)
+    msg_textbox = find_chat_message_textbox(sanitized_dom)
+    msg_id = (msg_textbox.get("elementId") or msg_textbox.get("id")) if msg_textbox else None
+
+    # Check if chat conversation is already open on screen with recipient
+    chat_is_already_open = False
+    if msg_textbox and isinstance(sanitized_dom, list):
+        # 1. If contact was clicked in prior actions, chat is open
+        if has_prior_click_contact:
+            chat_is_already_open = True
+        elif contact_name:
+            # 2. Check if contact_name appears in the conversation header area (top of right pane: x >= 200, y <= 200)
+            for el in sanitized_dom:
+                bbox = el.get("bbox") or {}
+                x = bbox.get("x") or 0
+                y = bbox.get("y") or 0
+                if x >= 200 and y <= 200:
+                    attrs = el.get("attributes") or {}
+                    combined_hdr = f"{el.get('text', '')} {el.get('label', '')} {attrs.get('title', '')} {attrs.get('aria-label', '')}".lower()
+                    if contact_name.lower() in combined_hdr:
+                        chat_is_already_open = True
+                        has_prior_click_contact = True
+                        break
+
+        # 3. If contact was NOT searched yet (turn 1) and model directly targeted the message textbox, respect it
+        if not chat_is_already_open and not has_prior_search and resp.action.targetElementId == msg_id:
+            chat_is_already_open = True
+            has_prior_click_contact = True
 
     # 1. Circuit breaker: if message already sent, return 'done'
     is_reasoning_done = bool(re.search(
@@ -1484,11 +1610,8 @@ def _normalize_contact_chat_action(
         resp.confidence = max(resp.confidence, 0.95)
         return resp
 
-    contact_search_input = find_contact_search_input(sanitized_dom)
-    msg_textbox = find_chat_message_textbox(sanitized_dom)
-
-    # Step 1: If contact is specified and hasn't been searched yet
-    if contact_name and not has_prior_search:
+    # Step 1: If contact is specified, chat is NOT already open, and hasn't been searched yet
+    if contact_name and not chat_is_already_open and not has_prior_search:
         if contact_search_input:
             search_id = contact_search_input.get("elementId") or contact_search_input.get("id")
             raw_val = contact_search_input.get("value") or (contact_search_input.get("attributes") or {}).get("value")
@@ -1503,8 +1626,8 @@ def _normalize_contact_chat_action(
                     resp.confidence = max(resp.confidence, 0.95)
                     return resp
 
-    # Step 2: Contact was searched in prior action, now must click top contact result card on the left
-    if contact_name and has_prior_search and not has_prior_click_contact:
+    # Step 2: Contact was searched in prior action, must click top contact result card on the left
+    if contact_name and not chat_is_already_open and has_prior_search and not has_prior_click_contact:
         contact_el = None
         if isinstance(sanitized_dom, list):
             # First pass: find element whose label or text explicitly contains contact_name
@@ -1515,7 +1638,7 @@ def _normalize_contact_chat_action(
                     if contact_name.lower() in lbl or contact_name.lower() in txt:
                         contact_el = el
                         break
-            # Second pass: fallback to top contact result item in the search list
+            # Second pass: fallback to top contact result item in the search list (strictly 65 <= x < 450, no nav icons)
             if not contact_el:
                 for el in sanitized_dom:
                     if is_contact_result_item(el, contact_name=contact_name):
@@ -1526,7 +1649,7 @@ def _normalize_contact_chat_action(
             # If model already clicked contact_el, preserve it!
             if resp.action.type == "click" and resp.action.targetElementId == contact_el_id:
                 return resp
-            # If model tried to type into bottom message box or emitted done prematurely, convert to click on contact
+            # If model tried to emit done prematurely or target wrong element, convert to click on contact
             if resp.action.type in ("done", "type") or resp.action.targetElementId != contact_el_id:
                 print(f"[*] Auto-normalizing contact action: Step 2 selecting contact '{contact_name}' by clicking {contact_el_id}")
                 resp.action.type = "click"
@@ -1536,27 +1659,56 @@ def _normalize_contact_chat_action(
                 resp.confidence = max(resp.confidence, 0.95)
                 return resp
 
-    # Step 3: Contact conversation is open (or prior click occurred / direct chat task), handle message box
+    # Step 3: Contact conversation is open (or direct chat task), handle message box
     if msg_textbox:
-        msg_id = msg_textbox.get("elementId") or msg_textbox.get("id")
-        if resp.action.targetElementId == msg_id or (resp.action.type == "click" and not resp.action.targetElementId and (has_prior_click_contact or not contact_name)):
-            resp.action.type = "type"
-            resp.action.targetElementId = msg_id
-
-        if resp.action.targetElementId == msg_id:
-            resp.action.type = "type"
-            if is_creative or is_prompt_echo(resp.action.value, clean_task):
-                if is_prompt_echo(resp.action.value, clean_task):
-                    print(f"[*] Auto-normalizing contact action: detected prompt echo or empty value '{resp.action.value}'; composing full creative text")
-                    resp.action.value = compose_creative_fallback(clean_task)
-                else:
-                    print(f"[*] Auto-normalizing contact action: preserved creative text in action.value ({len(resp.action.value)} chars)")
+        resp.action.type = "type"
+        resp.action.targetElementId = msg_id
+        if is_creative:
+            if is_prompt_echo(resp.action.value, clean_task) or not resp.action.value:
+                print(f"[*] Auto-normalizing contact action: composing full creative text for '{clean_task}'")
+                resp.action.value = compose_creative_fallback(clean_task)
             else:
-                extracted = extract_message_text(clean_task)
-                if extracted and (not resp.action.value or resp.action.type == "click"):
-                    resp.action.value = extracted
-                elif not resp.action.value and body:
-                    resp.action.value = body
+                print(f"[*] Auto-normalizing contact action: preserved creative text in action.value ({len(resp.action.value)} chars)")
+        else:
+            extracted = extract_message_text(clean_task)
+            if extracted and (not resp.action.value or resp.action.type == "click"):
+                resp.action.value = extracted
+            elif not resp.action.value and body:
+                resp.action.value = body
+        if not resp.reasoning or "search" in resp.reasoning.lower():
+            resp.reasoning = f"Typing {'poem' if is_creative else 'message'} into message input textbox."
+        resp.confidence = max(resp.confidence, 0.95)
+        return resp
+
+    # Circuit breaker: NEVER allow clicking Status or navigation rail icons during a messaging task
+    if resp.action.type == "click" and resp.action.targetElementId and isinstance(sanitized_dom, list):
+        target_el = next((el for el in sanitized_dom if (el.get("elementId") or el.get("id")) == resp.action.targetElementId), None)
+        if target_el:
+            t_lbl = str(target_el.get("label") or "").lower()
+            t_txt = str(target_el.get("text") or "").lower()
+            t_eid = str(target_el.get("elementId") or target_el.get("id") or "").lower()
+            t_bbox = target_el.get("bbox") or {}
+            t_x = t_bbox.get("x")
+            is_status_target = target_el.get("isWhatsAppStatus") or any(k in f"{t_lbl} {t_txt} {t_eid}" for k in ["status", "share statuses", "my status"])
+            is_rail_target = (t_x is not None and t_x < 65)
+
+            if is_status_target or (is_rail_target and not is_whatsapp_on_status_page(sanitized_dom)):
+                print(f"[!] CIRCUIT BREAKER ACTIVATED: Blocked invalid click on Status/nav-rail element {resp.action.targetElementId} during messaging task!")
+                if msg_textbox:
+                    resp.action.type = "type"
+                    resp.action.targetElementId = msg_id
+                    resp.action.value = compose_creative_fallback(clean_task) if is_creative else (body or extract_message_text(clean_task) or clean_task)
+                    resp.reasoning = "Redirecting directly to message input textbox to type the message."
+                    resp.confidence = max(resp.confidence, 0.95)
+                    return resp
+                elif contact_search_input and contact_name:
+                    search_id = contact_search_input.get("elementId") or contact_search_input.get("id")
+                    resp.action.type = "type"
+                    resp.action.targetElementId = search_id
+                    resp.action.value = contact_name
+                    resp.reasoning = f"Searching for contact '{contact_name}' in WhatsApp search bar."
+                    resp.confidence = max(resp.confidence, 0.95)
+                    return resp
 
     return resp
 
@@ -1594,8 +1746,12 @@ def _normalize_select_dropdown_action(
                     target_select_el = el
                 break
 
-    # If it's a dropdown task and target is not a select, find the matching select element in DOM
-    if is_dropdown_task and not target_is_select and isinstance(sanitized_dom, list):
+    has_prior_select = False
+    if prior_actions:
+        has_prior_select = any("select" in str(act).lower() for act in prior_actions)
+
+    # If it's a dropdown task, target is not a select, and dropdown hasn't been selected yet:
+    if is_dropdown_task and not target_is_select and not has_prior_select and isinstance(sanitized_dom, list):
         for el in sanitized_dom:
             tag = (el.get("tag") or "").lower()
             inp_type = (el.get("inputType") or "").lower()
@@ -2075,8 +2231,8 @@ def _normalize_action(
                         break
             if is_textbox:
                 is_creative = is_creative_generation_task(task)
-                if is_creative or is_prompt_echo(resp.action.value, task):
-                    if is_prompt_echo(resp.action.value, task):
+                if is_creative:
+                    if is_prompt_echo(resp.action.value, task) or not resp.action.value:
                         print(f"[*] Auto-normalizing chat action: detected prompt echo or empty value '{resp.action.value}'; composing full creative text")
                         resp.action.value = compose_creative_fallback(task)
                 else:
