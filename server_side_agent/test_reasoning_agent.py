@@ -457,7 +457,69 @@ assert v24_erp_norm2.action.type == "click", f"ERP click must remain click on Tu
 assert v24_erp_norm2.action.targetElementId == "dom-erp-btn-result", f"ERP target element must be preserved, got {v24_erp_norm2.action.targetElementId}"
 print("✓ Test 24 (ERP and non-WhatsApp isolation preserved) passed")
 
-print("\nAll 24 reasoning agent validation tests PASSED!")
+# Test 25: WhatsApp wrong recipient prevention & search sequence
+# When user asks: "send kaapa message I will not be able to attend tommorws meeting"
+# and the currently open chat is with someone else ("Bhaiya"), the agent MUST NOT type
+# into Bhaiya's chat. It must search for "kaapa" in the search bar.
+dom_whatsapp_bhaiya_open = [
+    {"elementId": "dom-tok-chats-tab", "tag": "button", "label": "Chats", "isWhatsAppChatsTab": True, "bbox": {"x": 20, "y": 50}},
+    {"elementId": "dom-tok-search", "tag": "div", "role": "textbox", "placeholder": "Search or start new chat", "bbox": {"x": 120, "y": 60}},
+    {"elementId": "dom-tok-hdr", "tag": "span", "text": "Bhaiya", "label": "Bhaiya", "bbox": {"x": 320, "y": 45}},
+    {"elementId": "dom-tok-msgbox", "tag": "div", "role": "textbox", "placeholder": "Type a message", "bbox": {"x": 600, "y": 700}}
+]
+
+# Simulate model erroneously assuming open chat with Bhaiya can receive Kaapa's message
+t25_raw = json.dumps({
+    "reasoning": "The chat with Bhaiya is open, so I can directly type the message into the active message textbox.",
+    "confidence": 0.95,
+    "action": {"type": "type", "targetElementId": "dom-tok-msgbox", "value": "I will not be able to attend tommorws meeting", "scrollDirection": None},
+    "assumptions": ["The chat with Bhaiya is already open, and the message textbox is available for typing."],
+    "needsClarification": False
+})
+
+# Turn 1: Intercepts typing into wrong recipient's chat and forces search for 'kaapa'
+v25_turn1, _ = parse_and_validate(t25_raw)
+v25_norm1 = _normalize_action(v25_turn1, "send kaapa message I will not be able to attend tommorws meeting", dom_whatsapp_bhaiya_open, prior_actions=[])
+assert v25_norm1.action.type == "type", f"Expected 'type', got {v25_norm1.action.type}"
+assert v25_norm1.action.targetElementId == "dom-tok-search", f"Target should be search input, got {v25_norm1.action.targetElementId}"
+assert v25_norm1.action.value == "kaapa", f"Search value should be 'kaapa', got {v25_norm1.action.value}"
+
+# Turn 2: Once searched, agent clicks Kaapa's contact card from search results
+dom_whatsapp_search_results = [
+    {"elementId": "dom-tok-chats-tab", "tag": "button", "label": "Chats", "isWhatsAppChatsTab": True, "bbox": {"x": 20, "y": 50}},
+    {"elementId": "dom-tok-search", "tag": "div", "role": "textbox", "placeholder": "Search or start new chat", "value": "kaapa", "bbox": {"x": 120, "y": 60}},
+    {"elementId": "dom-tok-kaapa-card", "tag": "div", "role": "listitem", "text": "Kaapa", "label": "Kaapa", "bbox": {"x": 100, "y": 150}},
+    {"elementId": "dom-tok-msgbox", "tag": "div", "role": "textbox", "placeholder": "Type a message", "bbox": {"x": 600, "y": 700}}
+]
+v25_turn2, _ = parse_and_validate(t25_raw)
+v25_norm2 = _normalize_action(v25_turn2, "send kaapa message I will not be able to attend tommorws meeting", dom_whatsapp_search_results, prior_actions=['type dom-tok-search "kaapa" [outcome: executed]'])
+assert v25_norm2.action.type == "click", f"Expected 'click', got {v25_norm2.action.type}"
+assert v25_norm2.action.targetElementId == "dom-tok-kaapa-card", f"Expected click on Kaapa card, got {v25_norm2.action.targetElementId}"
+
+# Turn 3: Kaapa's chat is now open in header, agent types message into Kaapa's textbox
+dom_whatsapp_kaapa_open = [
+    {"elementId": "dom-tok-chats-tab", "tag": "button", "label": "Chats", "isWhatsAppChatsTab": True, "bbox": {"x": 20, "y": 50}},
+    {"elementId": "dom-tok-search", "tag": "div", "role": "textbox", "placeholder": "Search or start new chat", "bbox": {"x": 120, "y": 60}},
+    {"elementId": "dom-tok-hdr", "tag": "span", "text": "Kaapa", "label": "Kaapa", "bbox": {"x": 320, "y": 45}},
+    {"elementId": "dom-tok-msgbox", "tag": "div", "role": "textbox", "placeholder": "Type a message", "bbox": {"x": 600, "y": 700}}
+]
+v25_turn3, _ = parse_and_validate(t25_raw)
+v25_norm3 = _normalize_action(v25_turn3, "send kaapa message I will not be able to attend tommorws meeting", dom_whatsapp_kaapa_open, prior_actions=['type dom-tok-search "kaapa" [outcome: executed]', 'click dom-tok-kaapa-card [outcome: executed]'])
+assert v25_norm3.action.type == "type", f"Expected 'type', got {v25_norm3.action.type}"
+assert v25_norm3.action.targetElementId == "dom-tok-msgbox", f"Expected message box target, got {v25_norm3.action.targetElementId}"
+assert "will not be able to attend" in v25_norm3.action.value, f"Expected message value, got {v25_norm3.action.value}"
+
+# Turn 4: Message sent, agent concludes task with done
+v25_turn4, _ = parse_and_validate(t25_raw)
+v25_norm4 = _normalize_action(v25_turn4, "send kaapa message I will not be able to attend tommorws meeting", dom_whatsapp_kaapa_open, prior_actions=[
+    'type dom-tok-search "kaapa" [outcome: executed]',
+    'click dom-tok-kaapa-card [outcome: executed]',
+    'type dom-tok-msgbox "I will not be able to attend tommorws meeting" [outcome: executed]'
+])
+assert v25_norm4.action.type == "done", f"Expected 'done', got {v25_norm4.action.type}"
+print("✓ Test 25 (WhatsApp wrong recipient chat interception and search sequence) passed")
+
+print("\nAll 25 reasoning agent validation tests PASSED!")
 
 
 

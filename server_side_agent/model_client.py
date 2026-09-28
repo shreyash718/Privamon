@@ -254,8 +254,9 @@ HOW TO REASON UNDER REDACTION:
 9. Don't hallucinate content behind a redaction.
 
 SPECIAL GUIDANCE FOR CHAT & MESSAGING: (e.g. WhatsApp, Slack, Messenger)
-- Multi-Step Contact Search & Message Flow (e.g. "message Tanishq I will not be available", "search for contact Tanishq and message him...", "send 'Tanishq' a 10 line poem", "send samar 10 line poem on love"):
-  * Priority Step 0 (Conversation already open): If the contact's chat conversation is already open on the right (or the bottom message textbox "Type a message" is visible and active for the recipient), DO NOT search again or click any sidebar items! Immediately emit action type "type" targeting the message textbox at the bottom (role="textbox", contenteditable, placeholder "Type a message") with the message/poem in "value".
+- Multi-Step Contact Search & Message Flow (e.g. "message Tanishq I will not be available", "search for contact Tanishq and message him...", "send 'Tanishq' a 10 line poem", "send samar 10 line poem on love", "send kaapa message I will not be able to attend tommorws meeting"):
+  * Priority Step 0 (Recipient's conversation already confirmed open): ONLY if the active conversation header on the right pane EXPLICITLY displays the requested contact's name (e.g. the header at top of chat pane says "Kaapa" or "Samar"), you may directly type into the bottom message textbox.
+  * WRONG RECIPIENT CRITICAL WARNING: If the conversation currently open on the right is with ANY OTHER PERSON (for example, header says "Bhaiya", "Alice", or anyone else instead of "Kaapa"), NEVER type into that chat! It is a critical privacy violation to send a message to the wrong person. Instead, ALWAYS proceed to Step 1: type the requested contact's name into the left search bar ("Search or start new chat")!
   * Step 1 (Search for contact): If the recipient's chat is NOT open, type the contact name into the left contact search bar (look for placeholder "Search or start new chat", "Search", id="search", or role="textbox" on top-left at x < 400, y < 150). DO NOT type into the bottom message textbox on the right!
   * Step 2 (Select contact from search list): In the search results under "Chats" on the left (65 <= x < 450, 65 <= y <= 600), click the FIRST/TOP contact result card that matches the contact name. DO NOT click the message textbox on the right yet.
   * Step 3 (Open conversation pane): Once the contact's chat is open, identify the bottom message input box (placeholder "Type a message", role="textbox", contenteditable at bottom y > 500). Emit action type "type" targeting that elementId with the message content in "value". The browser client automatically types and sends the message.
@@ -725,7 +726,7 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
         return None, f"Schema validation error: {ve}"
 
 INVALID_CONTACT_NAMES = {
-    "this chat", "chat which is open", "the chat", "chat", "someone", "him", "her", "them",
+    "i", "this chat", "chat which is open", "the chat", "chat", "someone", "him", "her", "them",
     "this", "open chat", "active chat", "user", "message", "a message", "the message", "poem", "song",
     "story", "lines", "line", "love", "photo", "image", "video", "text", "a text", "the text", "audio", "note",
     "somethin", "something", "everything", "anything", "that", "it", "its", "me", "you", "us", "he", "she", "they",
@@ -753,6 +754,7 @@ def parse_contact_task(task: str) -> tuple[Optional[str], Optional[str]]:
     - 'tell Parth Bhaiya that meeting is cancelled' -> ('Parth Bhaiya', 'meeting is cancelled')
     - 'send "shivam" greeting message for his marriage' -> ('shivam', 'greeting message for his marriage')
     - 'send "shivam" message that I will not able to attend his lecture tommorow be polite' -> ('shivam', 'I will not able to attend his lecture tommorow be polite')
+    - 'send kaapa message I will not be able to attend tommorws meeting' -> ('kaapa', 'I will not be able to attend tommorws meeting')
     """
     if not task:
         return None, None
@@ -786,21 +788,29 @@ def parse_contact_task(task: str) -> tuple[Optional[str], Optional[str]]:
         if is_valid_contact_name(c):
             return c, m.group(2).strip()
 
-    # 5. Single word contact followed by "a" / "an" / "that" / "saying":
-    m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(?:a|an|that|saying)\s+(.+)$", cleaned, re.I)
+    # 5. Single word contact followed by (a )message/text/note/chat (that/saying) or that/saying:
+    # e.g. "send kaapa message I will not be able to attend...", "send kaapa message that...", "send kaapa a text saying..."
+    m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(?:(?:a\s+)?(?:message|text|note|chat)\s*(?:that\s+|saying\s+)?|that\s+|saying\s+)(.+)$", cleaned, re.I)
     if m:
         c = m.group(1).strip()
         if is_valid_contact_name(c):
             return c, m.group(2).strip()
 
-    # 6. Single word contact followed by message starting with pronoun or verb:
+    # 6. Single word contact followed by "a" / "an":
+    m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(?:a|an)\s+(.+)$", cleaned, re.I)
+    if m:
+        c = m.group(1).strip()
+        if is_valid_contact_name(c):
+            return c, m.group(2).strip()
+
+    # 7. Single word contact followed by message starting with pronoun or verb:
     m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(?=(?:I|we|you|he|she|they|please|call|meeting|let|can|will|dont|am|are|is|hello|hi|hey)\b)(.+)$", cleaned, re.I)
     if m:
         c = m.group(1).strip()
         if is_valid_contact_name(c):
             return c, m.group(2).strip()
 
-    # 7. Fallback: message/text <contact> <msg>
+    # 8. Fallback: message/text <contact> <msg>
     m = re.search(r"\b(?:send|message|tell|text)\s+([A-Za-z0-9_]+)\s+(.+)$", cleaned, re.I)
     if m:
         c = m.group(1).strip()
@@ -846,10 +856,20 @@ def is_creative_generation_task(task: str) -> bool:
         re.I
     ))
 
-def clean_composed_lines(text: str) -> str:
+def clean_composed_lines(text: str, task: str = "") -> str:
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if lines and re.match(r"^(?:\d+\s+line|poem|here\s+is|title:|a\s+poem|song)\b", lines[0], re.I):
         lines = lines[1:]
+    if task and any(k in task.lower() for k in ("poem", "poetry", "rhyme")):
+        lines = [
+            l for l in lines
+            if not re.match(r"^(?:dear\b|with\s+(?:all\s+my\s+|warm\s+|best\s+)?(?:love|regards|wishes|heart)|\[|\(?your\s+name\)?)", l, re.I)
+        ]
+        m_lines = re.search(r'\b(\d+)\s+lines?\b', task, re.I)
+        if m_lines:
+            target_count = int(m_lines.group(1))
+            if len(lines) >= target_count:
+                lines = lines[:target_count]
     return "\n".join(lines)
 
 def is_prompt_echo(value: Optional[str], task: str) -> bool:
@@ -909,6 +929,7 @@ def compose_creative_fallback(task: str) -> str:
         f"Draft and write the complete, warm, beautifully written message requested by the user: {task!r}.\n"
         f"If the request asks to be polite, apologize, or excuse oneself (e.g. unable to attend a lecture or meeting), draft a courteous, natural, polite message directly addressed to the recipient.\n"
         f"If the request is for a wedding, marriage, birthday, anniversary, or greeting message, write a heartwarming, joyful greeting message directly addressed to the recipient.\n"
+        f"If the request asks for a poem with a specific number of lines (e.g. '10 line poem'), write EXACTLY that number of lines of poetry, each line separated by a newline (\\n). Do NOT include letters, greetings ('Dear...'), or sign-offs ('[Your Name]'). Output ONLY the poetry lines.\n"
         f"For poems, separate each line with a newline character (\\n).\n"
         f"Do NOT include explanations, titles, or prompt echoes. Output ONLY the drafted message into the 'text' field."
     )
@@ -925,9 +946,16 @@ def compose_creative_fallback(task: str) -> str:
                 text = str(d["value"]).strip()
         if (text.startswith('"') and text.endswith('"')) or (text.startswith("'") and text.endswith("'")):
             text = text[1:-1].strip()
-        cleaned = clean_composed_lines(text)
+        cleaned = clean_composed_lines(text, task=task)
+        m_lines = re.search(r'\b(\d+)\s+lines?\b', task, re.I)
+        target_lines = int(m_lines.group(1)) if m_lines else None
         if cleaned and len(cleaned) > 20 and not cleaned.startswith("{") and not is_prompt_echo(cleaned, task):
-            return cleaned
+            if target_lines:
+                num_lines = len([l for l in cleaned.split("\n") if l.strip()])
+                if num_lines == target_lines:
+                    return cleaned
+            else:
+                return cleaned
     except Exception as e:
         print("[!] Warning: Creative fallback composition call failed:", e)
 
@@ -1590,23 +1618,18 @@ def _normalize_contact_chat_action(
                         chat_is_already_open = True
                         has_prior_click_contact = True
                         break
-
-        # 3. If contact was NOT searched yet (turn 1) and model directly targeted the message textbox, respect it
-        if not chat_is_already_open and not has_prior_search and resp.action.targetElementId == msg_id:
+        else:
+            # 3. If no specific contact was requested (e.g. "type hello into chat"), any open message box is valid
             chat_is_already_open = True
             has_prior_click_contact = True
 
     # 1. Circuit breaker: if message already sent, return 'done'
-    is_reasoning_done = bool(re.search(
-        r'\b(task is complete|already typed|already sent|visible in chat|goal is accomplished|message has been sent)\b',
-        resp.reasoning or '',
-        re.I
-    ))
-    if has_prior_message_sent and (is_reasoning_done or resp.action.type == "done" or (resp.action.type == "type" and not resp.action.value)):
+    if has_prior_message_sent:
         print("[*] Auto-normalizing contact action: message was already sent in prior turn; converting to 'done'")
         resp.action.type = "done"
         resp.action.targetElementId = None
         resp.action.value = None
+        resp.reasoning = "Message was already typed and sent to recipient; task complete."
         resp.confidence = max(resp.confidence, 0.95)
         return resp
 
