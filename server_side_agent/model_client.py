@@ -60,7 +60,10 @@ STRICT_ACTION_SCHEMA = {
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["click", "type", "scroll", "select", "wait", "ask_user", "done"]
+                    "enum": [
+                        "click", "type", "scroll", "select", "wait", "ask_user", "done",
+                        "type_and_select", "pick_date", "select_custom", "fill_form"
+                    ]
                 },
                 "targetElementId": {
                     "type": ["string", "null"],
@@ -300,6 +303,31 @@ SPECIAL GUIDANCE FOR DROPDOWN / SELECT ELEMENTS:
   3. In the "value" field, provide the option value or text (e.g. "4th Semester", "fourth semester", or "4").
   4. DO NOT use action type "click" or "type" when interacting with a native <select> dropdown. Use action type "select".
 
+SPECIAL GUIDANCE FOR IRCTC & COMPLEX TRAVEL/FORM WORKFLOWS:
+- When booking tickets or searching trains/flights (e.g. on IRCTC, MakeMyTrip, RedBus, airlines):
+  1. MISSING TRAVEL DETAILS & PREMATURE SEARCH (CRITICAL RULE):
+     - If the user says "book ticket", "search trains", or similar without specifying origin, destination, date, or class, DO NOT GUESS OR HALLUCINATE!
+     - CRITICAL: NEVER emit action type "click" on the "Search Trains" or search submit button when the From or To inputs are empty! IRCTC will fail with "Error! Please submit correct input". Clicking Search before stations are filled is STRICTLY FORBIDDEN.
+     - Instead, emit action type "ask_user" with a structured JSON string in the "value" field requesting the needed fields:
+     Example:
+     {{
+       "reasoning": "I need your travel details (from/to stations, date, and class) to search trains on IRCTC.",
+       "confidence": 0.95,
+       "action": {{
+         "type": "ask_user",
+         "targetElementId": null,
+         "value": "{{\"question\": \"Please provide travel details before searching trains:\", \"fields\": [{{\"name\": \"from\", \"label\": \"From Station\", \"type\": \"text\", \"placeholder\": \"e.g. NDLS / New Delhi\"}}, {{\"name\": \"to\", \"label\": \"To Station\", \"type\": \"text\", \"placeholder\": \"e.g. BCT / Mumbai Central\"}}, {{\"name\": \"date\", \"label\": \"Journey Date\", \"type\": \"date\"}}, {{\"name\": \"class\", \"label\": \"Class\", \"type\": \"select\", \"options\": [\"All Classes\", \"Sleeper (SL)\", \"AC 3 Tier (3A)\", \"AC 2 Tier (2A)\", \"AC First Class (1A)\"]}}]}}",
+         "scrollDirection": null
+       }},
+       "assumptions": ["user needs to specify origin, destination, and journey date before searching trains"],
+       "needsClarification": true
+     }}
+     The extension client will render an interactive local form where the user enters private data securely (it NEVER leaves their device).
+  2. AUTOCOMPLETE STATIONS: When filling station fields (e.g. From/To station on IRCTC which use p-autocomplete), use action type "type_and_select" (or "type") with the station code or name in "value" (e.g. "NDLS" or "New Delhi").
+  3. DATE PICKERS: When filling date fields (e.g. Journey Date on IRCTC which uses p-calendar), use action type "pick_date" (or "type") with the formatted date (e.g. "DD/MM/YYYY" or "YYYY-MM-DD") in "value".
+  4. CLASS / QUOTA SELECTION: When selecting class or quota (which use PrimeNG p-dropdown), use action type "select_custom" (or "select") with the class name in "value".
+  5. SUBMIT SEARCH: ONLY once From, To, and Date fields are filled, emit action type "click" targeting the "Search" / "Find Trains" / "Search Trains" button.
+
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
 {{
@@ -314,7 +342,7 @@ You must return ONLY a single valid JSON object strictly matching this schema wi
   "assumptions": ["inferred primary action button based on role and position"],
   "needsClarification": false
 }}
-(Valid action types: click, type, scroll, select, wait, ask_user, done. For scroll, scrollDirection can be "up" or "down".)
+(Valid action types: click, type, scroll, select, wait, ask_user, done, type_and_select, pick_date, select_custom, fill_form. For scroll, scrollDirection can be "up" or "down".)
 """
 
 def build_format_param(provider: str, schema: dict) -> dict:
@@ -574,11 +602,13 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
     if not isinstance(data, dict):
         return None, "Root JSON must be an object"
 
+    VALID_ACTION_TYPES = ("click", "type", "scroll", "select", "wait", "ask_user", "done", "type_and_select", "pick_date", "select_custom", "fill_form")
+
     # Normalize legacy {"actions": [...]} if model slipped into older output format
     if "actions" in data and isinstance(data["actions"], list) and data["actions"]:
         first = data["actions"][0]
         act_type = str(first.get("type", "click")).lower()
-        if act_type not in ("click", "type", "scroll", "select", "wait", "ask_user", "done"):
+        if act_type not in VALID_ACTION_TYPES:
             act_type = "click"
         data = {
             "reasoning": data.get("message") or first.get("reasoning") or "Proceeding with recommended step.",
@@ -601,7 +631,7 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
     if "action" in data and isinstance(data["action"], dict):
         act = data["action"]
         raw_type = str(act.get("type", "click")).lower()
-        if raw_type not in ("click", "type", "scroll", "select", "wait", "ask_user", "done"):
+        if raw_type not in VALID_ACTION_TYPES:
             raw_type = "click"
         act["type"] = raw_type
         # Ensure null values for absent fields
@@ -613,7 +643,7 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
         act["scrollDirection"] = direction
     elif "action" in data and isinstance(data["action"], str):
         raw_type = data["action"].lower()
-        if raw_type in ("click", "type", "scroll", "select", "wait", "ask_user", "done"):
+        if raw_type in VALID_ACTION_TYPES:
             direction = data.get("scrollDirection")
             if direction not in ("up", "down"):
                 direction = None
@@ -627,7 +657,7 @@ def parse_and_validate(raw_text: str) -> tuple[Optional[InterpretResponse], Opti
             return None, f"Invalid action string: '{data['action']}' is not a valid action type"
     elif "type" in data and isinstance(data["type"], str):
         raw_type = data["type"].lower()
-        if raw_type not in ("click", "type", "scroll", "select", "wait", "ask_user", "done"):
+        if raw_type not in VALID_ACTION_TYPES:
             raw_type = "click"
         direction = data.get("scrollDirection")
         if direction not in ("up", "down"):
@@ -1561,6 +1591,195 @@ def _normalize_select_dropdown_action(
                 resp.action.value = clean_task
         print(f"[*] Auto-normalizing dropdown action: target={resp.action.targetElementId}, value='{resp.action.value}', type='select'")
 
+def is_travel_booking_task(task: str, sanitized_dom: Union[list, str, None] = None) -> bool:
+    """Checks if the user prompt or DOM relates to train, flight, or travel booking."""
+    clean_task = clean_task_text(task).lower()
+    if re.search(r'\b(book|ticket|train|irctc|railway|tatkal|journey|flight|bus|reservation|seat)\b', clean_task):
+        return True
+    if isinstance(sanitized_dom, list):
+        for el in sanitized_dom:
+            txt = f"{el.get('text', '')} {el.get('label', '')} {el.get('placeholder', '')} {el.get('elementId', '')}".lower()
+            if any(k in txt for k in ["search trains", "find trains", "book ticket", "p-autocomplete", "origin", "destination", "irctc"]):
+                return True
+    return False
+
+def find_travel_booking_elements(sanitized_dom: Union[list, str, None]) -> dict:
+    """Extracts From, To, Date, Class, and Search button elements from sanitized DOM."""
+    result = {
+        "from_input": None,
+        "to_input": None,
+        "date_input": None,
+        "class_select": None,
+        "search_button": None
+    }
+    if not isinstance(sanitized_dom, list):
+        return result
+
+    for el in sanitized_dom:
+        tag = (el.get("tag") or "").lower()
+        lbl = str(el.get("label") or "").lower()
+        ph = str(el.get("placeholder") or "").lower()
+        txt = str(el.get("text") or "").lower()
+        eid = str(el.get("elementId") or el.get("id") or "").lower()
+        inp_type = str(el.get("inputType") or "").lower()
+        widget_type = str(el.get("widgetType") or "").lower()
+
+        # From / Origin
+        if not result["from_input"]:
+            if (("from" in lbl or "from" in ph or "origin" in eid or "source" in eid) and "to" not in lbl and "to" not in ph):
+                result["from_input"] = el
+            elif widget_type == "autocomplete" and not result["to_input"]:
+                result["from_input"] = el
+
+        # To / Destination
+        if not result["to_input"]:
+            if ("to" in lbl or "to" in ph or "destination" in eid or "dest" in eid) and "from" not in lbl and "from" not in ph:
+                result["to_input"] = el
+            elif widget_type == "autocomplete" and result["from_input"] and el != result["from_input"]:
+                result["to_input"] = el
+
+        # Date input
+        if not result["date_input"]:
+            if "date" in lbl or "date" in ph or "journey" in lbl or "calendar" in eid or inp_type == "date" or widget_type == "datepicker":
+                result["date_input"] = el
+
+        # Class select / dropdown
+        if not result["class_select"]:
+            if "class" in lbl or "classes" in ph or "quota" in lbl or widget_type == "dropdown":
+                result["class_select"] = el
+
+        # Search button
+        if not result["search_button"]:
+            if ("search trains" in txt or "find trains" in txt or "search train" in txt or
+                "train_search" in eid or "search_btn" in eid or ("search" in txt and tag in ("button", "a"))):
+                result["search_button"] = el
+
+    return result
+
+def extract_travel_station_query(task: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Extracts (from_station, to_station, date) if explicitly mentioned in task text."""
+    clean = clean_task_text(task)
+    from_st = None
+    to_st = None
+    date_val = None
+
+    # Matches "from <origin> to <dest>"
+    m = re.search(r'\bfrom\s+([A-Za-z0-9\s/]+?)\s+to\s+([A-Za-z0-9\s/]+?)(?:\s+(?:on|for|at|date)\s+|$)', clean, re.I)
+    if m:
+        from_st = m.group(1).strip()
+        to_st = m.group(2).strip()
+    else:
+        mf = re.search(r'\bfrom\s+([A-Za-z0-9\s/]+?)(?:\s+to|\s+on|\s+date|\s+in|$)', clean, re.I)
+        if mf:
+            from_st = mf.group(1).strip()
+        mt = re.search(r'\bto\s+([A-Za-z0-9\s/]+?)(?:\s+from|\s+on|\s+date|\s+in|$)', clean, re.I)
+        if mt:
+            to_st = mt.group(1).strip()
+
+    md = re.search(r'\b(?:on|date)\s+([0-9\/\-]+|[0-9]{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+(?:\s+[0-9]{4})?|tomorrow|today)', clean, re.I)
+    if md:
+        date_val = md.group(1).strip()
+
+    return from_st, to_st, date_val
+
+def _normalize_travel_booking_action(
+    resp: InterpretResponse,
+    task: str,
+    sanitized_dom: Union[list, str, None],
+    prior_actions: list = None
+) -> None:
+    """
+    Prevents premature clicks on 'Search Trains' or 'Search' buttons before From/To stations are entered.
+    If details are missing, converts the action to 'ask_user' requesting details locally.
+    """
+    if not resp or not resp.action:
+        return
+
+    if not is_travel_booking_task(task, sanitized_dom):
+        return
+
+    elements = find_travel_booking_elements(sanitized_dom)
+    from_el = elements.get("from_input")
+    to_el = elements.get("to_input")
+    search_btn = elements.get("search_button")
+
+    # Check if from and to inputs currently have values in DOM or prior actions
+    from_val = from_el.get("value") if from_el else None
+    to_val = to_el.get("value") if to_el else None
+
+    # Check prior actions for type or fill_form on from / to
+    has_prior_from_fill = False
+    has_prior_to_fill = False
+    if prior_actions:
+        for act in prior_actions:
+            act_str = str(act).lower()
+            if "fill_form" in act_str or "filled" in act_str:
+                has_prior_from_fill = True
+                has_prior_to_fill = True
+                break
+            if "type" in act_str:
+                if from_el and (from_el.get("elementId") or "").lower() in act_str:
+                    has_prior_from_fill = True
+                if to_el and (to_el.get("elementId") or "").lower() in act_str:
+                    has_prior_to_fill = True
+
+    is_from_empty = not from_val and not has_prior_from_fill
+    is_to_empty = not to_val and not has_prior_to_fill
+
+    search_btn_id = (search_btn.get("elementId") or search_btn.get("id")) if search_btn else None
+    is_clicking_search = (
+        resp.action.type == "click" and (
+            (search_btn_id and resp.action.targetElementId == search_btn_id)
+            or re.search(r'\b(search\s*train|search|proceed\s+with\s+booking|submit\s+search)\b', resp.reasoning or '', re.I)
+            or re.search(r'\b(search\s*train|primary\s+action\s+to\s+proceed)\b', str(resp.assumptions or ''), re.I)
+        )
+    )
+
+    # If from or to are empty, WE CANNOT CLICK SEARCH TRAINS OR EMIT DONE!
+    if is_from_empty or is_to_empty:
+        if is_clicking_search or resp.action.type == "done":
+            print("[*] Circuit-breaker: Model attempted to click 'Search Trains' or emit 'done' before journey details were entered!")
+            req_from, req_to, req_date = extract_travel_station_query(task)
+
+            # If user prompt provided the station names:
+            if req_from and is_from_empty and from_el:
+                resp.action.type = "type_and_select"
+                resp.action.targetElementId = from_el.get("elementId") or from_el.get("id") or "from"
+                resp.action.value = req_from
+                resp.reasoning = f"Entering origin station '{req_from}' into From field before searching."
+                resp.assumptions = ["Origin station must be filled before searching trains."]
+                resp.needsClarification = False
+                return
+
+            if req_to and is_to_empty and to_el:
+                resp.action.type = "type_and_select"
+                resp.action.targetElementId = to_el.get("elementId") or to_el.get("id") or "to"
+                resp.action.value = req_to
+                resp.reasoning = f"Entering destination station '{req_to}' into To field before searching."
+                resp.assumptions = ["Destination station must be filled before searching trains."]
+                resp.needsClarification = False
+                return
+
+            # Otherwise, details are unknown -> convert to ask_user!
+            resp.action.type = "ask_user"
+            resp.action.targetElementId = None
+            ask_payload = {
+                "question": "Please provide your journey details before searching trains:",
+                "fields": [
+                    {"name": "from", "label": "From Station", "type": "text", "placeholder": "e.g. NDLS / New Delhi"},
+                    {"name": "to", "label": "To Station", "type": "text", "placeholder": "e.g. BCT / Mumbai Central"},
+                    {"name": "date", "label": "Journey Date", "type": "date"},
+                    {"name": "class", "label": "Class", "type": "select", "options": ["All Classes", "Sleeper (SL)", "AC 3 Tier (3A)", "AC 2 Tier (2A)", "AC First Class (1A)", "Second Sitting (2S)"]}
+                ]
+            }
+            resp.action.value = json.dumps(ask_payload)
+            resp.action.scrollDirection = None
+            resp.needsClarification = True
+            resp.reasoning = "Origin and destination stations must be entered before clicking Search Trains."
+            resp.assumptions = ["IRCTC requires From and To station inputs before searching trains."]
+            resp.confidence = max(resp.confidence, 0.95)
+            print("[*] Converted premature search click to 'ask_user' travel form clarification.")
+
 def _normalize_action(
     resp: InterpretResponse,
     task: str,
@@ -1568,18 +1787,21 @@ def _normalize_action(
     prior_actions: list = None
 ) -> InterpretResponse:
     """
-    Normalizes and fixes model actions for search, chat/messaging, contact selection, and clicks with text values.
+    Normalizes and fixes model actions for search, chat/messaging, travel booking, contact selection, and clicks with text values.
     """
     if not resp or not resp.action:
         return resp
 
-    # 1. Normalize contact search & messaging tasks (WhatsApp multi-step sequence)
+    # 1. Normalize travel booking & IRCTC tasks (circuit-breaker for premature search)
+    _normalize_travel_booking_action(resp, task, sanitized_dom, prior_actions=prior_actions)
+
+    # 2. Normalize contact search & messaging tasks (WhatsApp multi-step sequence)
     _normalize_contact_chat_action(resp, task, sanitized_dom, prior_actions=prior_actions)
 
-    # 2. Normalize search tasks (YouTube, Flipkart, Amazon)
+    # 3. Normalize search tasks (YouTube, Flipkart, Amazon)
     _normalize_search_action(resp, task, sanitized_dom, prior_actions=prior_actions)
 
-    # 3. Normalize select dropdown tasks
+    # 4. Normalize select dropdown tasks
     _normalize_select_dropdown_action(resp, task, sanitized_dom, prior_actions=prior_actions)
 
     # 4. If action has type='click' but non-empty value, model intended to type (unless target is a select)

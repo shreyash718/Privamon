@@ -15,7 +15,7 @@
  *
  * Returns: { success: boolean, actionType: string, targetElementId: string|null, message: string }
  */
-(() => {
+(async () => {
   'use strict';
 
   // The action payload is injected via chrome.scripting.executeScript args
@@ -163,7 +163,442 @@
       }
     }
 
+    // Strategy 9: Semantic Travel / IRCTC field resolution (from, to, date, class)
+    const lowerId = elementId.toLowerCase().trim();
+    if (lowerId === 'from' || lowerId === 'origin') {
+      const fromEl = document.querySelector('p-autocomplete input, .ui-autocomplete input, [placeholder*="from" i], [aria-label*="from" i], input#origin, input[name*="origin" i]');
+      if (fromEl) return fromEl;
+      const allAuto = document.querySelectorAll('p-autocomplete input, .ui-autocomplete input');
+      if (allAuto.length >= 1) return allAuto[0];
+    }
+    if (lowerId === 'to' || lowerId === 'destination') {
+      const toEl = document.querySelector('[placeholder*="to" i]:not([placeholder*="from" i]), [aria-label*="to" i]:not([aria-label*="from" i]), input#destination, input[name*="destination" i]');
+      if (toEl) return toEl;
+      const allAuto = document.querySelectorAll('p-autocomplete input, .ui-autocomplete input');
+      if (allAuto.length >= 2) return allAuto[1];
+    }
+    if (lowerId === 'date' || lowerId === 'journey date' || lowerId === 'journey_date') {
+      const dateEl = document.querySelector('p-calendar input, .ui-calendar input, [placeholder*="dd/mm" i], [placeholder*="date" i], input[type="date"], [aria-label*="date" i]');
+      if (dateEl) return dateEl;
+    }
+    if (lowerId === 'class' || lowerId === 'quota') {
+      const classEl = document.querySelector('p-dropdown, .ui-dropdown, [placeholder*="classes" i], [aria-label*="class" i], select[name*="class" i]');
+      if (classEl) return classEl;
+    }
+
     return null;
+  }
+
+  /**
+   * Resolves an element to an editable input child if it is a wrapper container
+   * (e.g. p-autocomplete, p-calendar, mat-form-field).
+   */
+  function resolveInputTarget(el) {
+    if (!el) return null;
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) {
+      return el;
+    }
+    const inner = el.querySelector?.('input:not([type="hidden"]), textarea, [contenteditable="true"]');
+    return inner || el;
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Polls the DOM until the selector or predicate returns a visible element.
+   */
+  async function waitForElement(selectorOrFn, timeoutMs = 1500, pollIntervalMs = 50) {
+    const start = performance.now();
+    while (performance.now() - start < timeoutMs) {
+      const el = typeof selectorOrFn === 'function' ? selectorOrFn() : document.querySelector(selectorOrFn);
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) return el;
+      }
+      await sleep(pollIntervalMs);
+    }
+    return null;
+  }
+
+  /**
+   * Sets value on an input bypassing React/Angular synthetic property descriptor overrides.
+   */
+  function setNativeValue(element, val) {
+    if (!element) return;
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      element.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype,
+      'value'
+    )?.set;
+    if (valueSetter) {
+      valueSetter.call(element, val);
+    } else {
+      element.value = val;
+    }
+  }
+
+  /**
+   * Dispatches Angular / PrimeNG / modern framework compatible input and change events.
+   * Crucial for IRCTC p-autocomplete, p-calendar, and ngModel bindings.
+   */
+  function dispatchAngularEvent(element, eventType = 'input', data = '') {
+    if (!element) return;
+    try {
+      if (eventType === 'input') {
+        try {
+          element.dispatchEvent(new InputEvent('input', {
+            bubbles: true,
+            composed: true,
+            cancelable: true,
+            inputType: 'insertText',
+            data: data || element.value || ''
+          }));
+        } catch (e) {
+          element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+        }
+      } else {
+        element.dispatchEvent(new Event(eventType, { bubbles: true, composed: true }));
+      }
+
+      // Check for Angular NgZone or ng component to trigger change detection
+      if (typeof window !== 'undefined' && window.ng) {
+        try {
+          const comp = window.ng.getComponent?.(element);
+          if (comp) window.ng.applyChanges?.(comp);
+        } catch (e) {}
+      }
+    } catch (e) {}
+  }
+
+  /**
+   * Interacts with autocomplete inputs (e.g. IRCTC station search):
+   * Focuses -> types query -> waits for suggestion overlay -> clicks matching station item.
+   */
+  async function executeTypeAndSelect(targetId, queryText) {
+    let el = findElement(targetId);
+    if (!el) {
+      return { success: false, actionType: 'type_and_select', targetElementId: targetId, message: `Autocomplete element not found: "${targetId}"` };
+    }
+    const inputEl = resolveInputTarget(el);
+    if (!inputEl) {
+      return { success: false, actionType: 'type_and_select', targetElementId: targetId, message: `No editable input found for "${targetId}"` };
+    }
+
+    inputEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    inputEl.focus();
+
+    // Clear existing value
+    setNativeValue(inputEl, '');
+    dispatchAngularEvent(inputEl, 'input', '');
+
+    // Type character by character with small delay so PrimeNG/Angular filter kicks in
+    const textToType = String(queryText || '').trim();
+    for (let i = 0; i < textToType.length; i++) {
+      const char = textToType[i];
+      inputEl.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, composed: true }));
+      inputEl.dispatchEvent(new KeyboardEvent('keypress', { key: char, bubbles: true, composed: true }));
+      setNativeValue(inputEl, inputEl.value + char);
+      dispatchAngularEvent(inputEl, 'input', inputEl.value);
+      inputEl.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true, composed: true }));
+      await sleep(25);
+    }
+    dispatchAngularEvent(inputEl, 'change');
+
+    // Wait for dropdown suggestion panel to appear
+    const panelSelectors = [
+      '.p-autocomplete-panel', '.ui-autocomplete-panel', '.mat-autocomplete-panel',
+      '[role="listbox"]', 'ul.ui-autocomplete', 'ul.ui-autocomplete-items', 'ul.p-autocomplete-items',
+      '.ng-dropdown-panel', '.typeahead-popup', '.dropdown-menu', '.suggestions'
+    ].join(', ');
+
+    const panel = await waitForElement(() => {
+      const panels = document.querySelectorAll(panelSelectors);
+      for (const p of panels) {
+        const style = window.getComputedStyle(p);
+        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+          const rect = p.getBoundingClientRect();
+          if (rect.width > 20 && rect.height > 10) return p;
+        }
+      }
+      return null;
+    }, 2500, 60);
+
+    let selectedItemText = '';
+    if (panel) {
+      const items = Array.from(panel.querySelectorAll('li, .p-autocomplete-item, .ui-autocomplete-list-item, mat-option, [role="option"], .suggestion-item'));
+      if (items.length > 0) {
+        const qLower = textToType.toLowerCase();
+        // Priority 1: Match station code or exact text (e.g. "NDLS" or "NEW DELHI")
+        let targetItem = items.find(it => {
+          const t = (it.textContent || '').toLowerCase();
+          return t.includes(`(${qLower})`) || t.includes(`- ${qLower}`) || t.startsWith(qLower);
+        });
+        // Priority 2: Contains query
+        if (!targetItem) {
+          targetItem = items.find(it => (it.textContent || '').toLowerCase().includes(qLower));
+        }
+        // Priority 3: First available item
+        if (!targetItem) {
+          targetItem = items[0];
+        }
+
+        selectedItemText = (targetItem.textContent || '').trim();
+        targetItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        await sleep(100);
+
+        // Click the suggestion item
+        const rect = targetItem.getBoundingClientRect();
+        const ev = { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, composed: true };
+        targetItem.dispatchEvent(new MouseEvent('mouseover', ev));
+        targetItem.dispatchEvent(new MouseEvent('mousedown', ev));
+        targetItem.dispatchEvent(new MouseEvent('mouseup', ev));
+        targetItem.dispatchEvent(new MouseEvent('click', ev));
+        if (typeof targetItem.click === 'function') targetItem.click();
+
+        await sleep(150);
+        dispatchAngularEvent(inputEl, 'change');
+        inputEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+
+        return {
+          success: true,
+          actionType: 'type_and_select',
+          targetElementId: targetId,
+          message: `Typed "${textToType}" and selected suggestion "${selectedItemText}"`
+        };
+      }
+    }
+
+    // Fallback if no dropdown panel appeared: Press Enter and Tab
+    const enterOpts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, composed: true };
+    inputEl.dispatchEvent(new KeyboardEvent('keydown', enterOpts));
+    inputEl.dispatchEvent(new KeyboardEvent('keypress', enterOpts));
+    inputEl.dispatchEvent(new KeyboardEvent('keyup', enterOpts));
+    inputEl.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    inputEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+
+    return {
+      success: true,
+      actionType: 'type_and_select',
+      targetElementId: targetId,
+      message: `Typed "${textToType}" into autocomplete field "${targetId}" (no dropdown appeared, submitted via Enter)`
+    };
+  }
+
+  /**
+   * Interacts with date pickers (e.g. IRCTC p-calendar / Angular Material datepicker).
+   * Direct input setting with DD/MM/YYYY formatting, plus calendar popup selection.
+   */
+  async function executePickDate(targetId, dateValue) {
+    let el = findElement(targetId);
+    if (!el) {
+      return { success: false, actionType: 'pick_date', targetElementId: targetId, message: `Date element not found: "${targetId}"` };
+    }
+    const inputEl = resolveInputTarget(el);
+    if (!inputEl) {
+      return { success: false, actionType: 'pick_date', targetElementId: targetId, message: `No date input found for "${targetId}"` };
+    }
+
+    // Parse date value (handles YYYY-MM-DD, DD/MM/YYYY, DD-MM-YYYY, or today/tomorrow)
+    let rawDate = String(dateValue || '').trim();
+    let targetDay = null;
+    let targetMonth = null;
+    let targetYear = null;
+    let formattedDDMMYYYY = '';
+
+    const now = new Date();
+    if (/tomorrow/i.test(rawDate)) {
+      const tom = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+      targetDay = tom.getDate();
+      targetMonth = tom.getMonth() + 1;
+      targetYear = tom.getFullYear();
+    } else if (/today/i.test(rawDate)) {
+      targetDay = now.getDate();
+      targetMonth = now.getMonth() + 1;
+      targetYear = now.getFullYear();
+    } else {
+      const ymd = rawDate.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+      if (ymd) {
+        targetYear = parseInt(ymd[1], 10);
+        targetMonth = parseInt(ymd[2], 10);
+        targetDay = parseInt(ymd[3], 10);
+      } else {
+        const dmy = rawDate.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/);
+        if (dmy) {
+          targetDay = parseInt(dmy[1], 10);
+          targetMonth = parseInt(dmy[2], 10);
+          targetYear = parseInt(dmy[3], 10);
+        }
+      }
+    }
+
+    if (targetDay && targetMonth && targetYear) {
+      const dd = String(targetDay).padStart(2, '0');
+      const mm = String(targetMonth).padStart(2, '0');
+      formattedDDMMYYYY = `${dd}/${mm}/${targetYear}`;
+    } else {
+      formattedDDMMYYYY = rawDate;
+    }
+
+    inputEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    inputEl.focus();
+
+    // 1. Direct input setting with Angular events (most reliable on IRCTC <p-calendar>)
+    setNativeValue(inputEl, formattedDDMMYYYY);
+    dispatchAngularEvent(inputEl, 'input', formattedDDMMYYYY);
+    dispatchAngularEvent(inputEl, 'change', formattedDDMMYYYY);
+
+    // 2. Click calendar icon or input if present to test for datepicker overlay
+    const calWrapper = inputEl.closest('p-calendar, .ui-calendar, .mat-form-field, [class*="datepicker"]') || inputEl.parentElement;
+    const triggerBtn = calWrapper?.querySelector('button, .ui-datepicker-trigger, .p-datepicker-trigger, .mat-datepicker-toggle');
+    if (triggerBtn) {
+      triggerBtn.click();
+    } else {
+      inputEl.click();
+    }
+
+    await sleep(250);
+
+    // 3. If calendar popup appeared and we have a targetDay, click the day in calendar
+    const calPanel = document.querySelector('.p-datepicker:not([style*="display: none"]), .ui-datepicker:not([style*="display: none"]), .mat-datepicker-content');
+    if (calPanel && targetDay) {
+      const dayCells = Array.from(calPanel.querySelectorAll('td:not(.p-disabled):not(.ui-state-disabled) span, td:not(.p-disabled):not(.ui-state-disabled) a, button.mat-calendar-body-cell'));
+      const matchingCell = dayCells.find(cell => (cell.textContent || '').trim() === String(targetDay));
+      if (matchingCell) {
+        matchingCell.click();
+        await sleep(150);
+      }
+    }
+
+    dispatchAngularEvent(inputEl, 'change');
+    inputEl.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+
+    return {
+      success: true,
+      actionType: 'pick_date',
+      targetElementId: targetId,
+      message: `Set date to "${formattedDDMMYYYY}" on "${targetId}"`
+    };
+  }
+
+  /**
+   * Interacts with custom dropdown components (PrimeNG p-dropdown, Angular Material mat-select, ng-select).
+   */
+  async function executeSelectCustom(targetId, optionValue) {
+    let el = findElement(targetId);
+    if (!el) {
+      return { success: false, actionType: 'select_custom', targetElementId: targetId, message: `Custom dropdown not found: "${targetId}"` };
+    }
+
+    const valStr = String(optionValue || '').trim().toLowerCase();
+
+    // If native SELECT, delegate to selectOptionInElement
+    if (el.tagName === 'SELECT' || el.querySelector?.('select')) {
+      const sel = el.tagName === 'SELECT' ? el : el.querySelector('select');
+      return selectOptionInElement(sel, optionValue, targetId);
+    }
+
+    // Scroll and click trigger
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const trigger = el.querySelector('.p-dropdown-trigger, .ui-dropdown-trigger, .mat-select-trigger, [role="button"]') || el;
+    trigger.click();
+
+    // Wait for dropdown panel
+    const panel = await waitForElement(() => {
+      const panels = document.querySelectorAll('.p-dropdown-panel, .ui-dropdown-panel, .mat-select-panel, [role="listbox"]');
+      for (const p of panels) {
+        const style = window.getComputedStyle(p);
+        if (style.display !== 'none' && style.visibility !== 'hidden') return p;
+      }
+      return null;
+    }, 1500, 50);
+
+    if (panel) {
+      const items = Array.from(panel.querySelectorAll('li, .p-dropdown-item, .ui-dropdown-item, mat-option, [role="option"]'));
+      let matchedItem = items.find(it => {
+        const t = (it.textContent || '').trim().toLowerCase();
+        return t === valStr || t.includes(valStr) || valStr.includes(t);
+      });
+      if (!matchedItem && items.length > 0) {
+        matchedItem = items[0];
+      }
+
+      if (matchedItem) {
+        matchedItem.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        matchedItem.click();
+        await sleep(150);
+        return {
+          success: true,
+          actionType: 'select_custom',
+          targetElementId: targetId,
+          message: `Selected custom option "${matchedItem.textContent.trim()}" on "${targetId}"`
+        };
+      }
+    }
+
+    return {
+      success: true,
+      actionType: 'select_custom',
+      targetElementId: targetId,
+      message: `Clicked dropdown trigger on "${targetId}"`
+    };
+  }
+
+  /**
+   * Batch fills multiple form fields locally (From, To, Date, Class).
+   * Ensures private details never touch any remote reasoning model.
+   */
+  async function executeFillForm(fields) {
+    if (!fields || (typeof fields !== 'object' && !Array.isArray(fields))) {
+      return { success: false, actionType: 'fill_form', message: 'No fields provided in fill_form' };
+    }
+
+    const fieldEntries = Array.isArray(fields)
+      ? fields
+      : Object.entries(fields).map(([k, v]) => ({ name: k, value: v }));
+
+    const results = [];
+    for (const f of fieldEntries) {
+      const val = f.value;
+      if (!val) continue;
+
+      const targetIdentifier = f.targetElementId || f.id || f.name || f.label;
+      const widgetType = f.widgetType || (
+        /from|to|station|origin|dest/i.test(targetIdentifier) ? 'autocomplete' :
+        /date|journey|day|cal/i.test(targetIdentifier) ? 'datepicker' :
+        /class|quota/i.test(targetIdentifier) ? 'dropdown' : 'type'
+      );
+
+      let subResult;
+      if (widgetType === 'autocomplete') {
+        subResult = await executeTypeAndSelect(targetIdentifier, val);
+      } else if (widgetType === 'datepicker') {
+        subResult = await executePickDate(targetIdentifier, val);
+      } else if (widgetType === 'dropdown') {
+        subResult = await executeSelectCustom(targetIdentifier, val);
+      } else {
+        const el = findElement(targetIdentifier);
+        if (el) {
+          const inp = resolveInputTarget(el);
+          inp.focus();
+          setNativeValue(inp, val);
+          dispatchAngularEvent(inp, 'input', val);
+          dispatchAngularEvent(inp, 'change', val);
+          subResult = { success: true, message: `Filled ${targetIdentifier} with ${val}` };
+        } else {
+          subResult = { success: false, message: `Could not find element for ${targetIdentifier}` };
+        }
+      }
+      results.push({ field: targetIdentifier, result: subResult });
+      await sleep(200);
+    }
+
+    return {
+      success: results.some(r => r.result?.success),
+      actionType: 'fill_form',
+      message: `Filled ${results.length} fields: ` + results.map(r => `${r.field}: ${r.result?.success ? 'OK' : 'FAIL'}`).join(', '),
+      details: results
+    };
   }
 
   /**
@@ -474,6 +909,27 @@
       return selectOptionInElement(selectEl, value, targetId);
     }
 
+    // Safety Circuit-Breaker: Prevent clicking "Search Trains" if From/To stations are empty on IRCTC
+    const isSearchTrainsBtn = (el.textContent && /search\s*trains|find\s*trains/i.test(el.textContent)) ||
+      el.classList?.contains('search_btn') || el.classList?.contains('train_Search') ||
+      (el.type === 'submit' && (window.location.hostname.includes('irctc.co.in') || document.querySelector('p-autocomplete')));
+    if (isSearchTrainsBtn) {
+      const fromInp = document.querySelector('p-autocomplete[formcontrolname*="origin" i] input, p-autocomplete[id*="origin" i] input, input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
+      const toInp = document.querySelector('p-autocomplete[formcontrolname*="destination" i] input, p-autocomplete[id*="destination" i] input, input[placeholder*="to" i], input[aria-label*="to" i], #destination input');
+      const fromEmpty = !fromInp || !fromInp.value || fromInp.value.trim() === '';
+      const toEmpty = !toInp || !toInp.value || toInp.value.trim() === '';
+      if (fromEmpty || toEmpty) {
+        console.warn('[Privamon ActionExecutor] Blocked premature click on Search Trains button: From/To are empty!');
+        return {
+          success: false,
+          actionType: 'click',
+          targetElementId: targetId,
+          needsClarification: true,
+          message: 'Cannot click Search Trains: Please enter From and To stations first.'
+        };
+      }
+    }
+
     // We can't await in a synchronous IIFE return, so we use a synchronous click
     el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
@@ -651,8 +1107,8 @@
         nativeTextareaValueSetter.call(targetNode, cleanValue);
       }
 
-      targetNode.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-      targetNode.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+      dispatchAngularEvent(targetNode, 'input', cleanValue);
+      dispatchAngularEvent(targetNode, 'change', cleanValue);
     }
 
     // Auto-submit detection for Search inputs (YouTube, Google, GitHub, etc.)
@@ -898,6 +1354,23 @@
       targetElementId: null,
       message: value || 'The agent needs clarification before proceeding.'
     };
+  }
+
+  if (actionType === 'type_and_select') {
+    return await executeTypeAndSelect(targetId, value);
+  }
+
+  if (actionType === 'pick_date') {
+    return await executePickDate(targetId, value);
+  }
+
+  if (actionType === 'select_custom') {
+    return await executeSelectCustom(targetId, value);
+  }
+
+  if (actionType === 'fill_form') {
+    const fields = action.fields || (value ? (typeof value === 'object' ? value : JSON.parse(value)) : null);
+    return await executeFillForm(fields);
   }
 
   return {

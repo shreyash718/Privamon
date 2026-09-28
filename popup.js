@@ -99,6 +99,17 @@ const imgBadgeOverlay       = document.getElementById('imgBadgeOverlay');
 const badgeTotalItems       = document.getElementById('badgeTotalItems');
 const detectionsList        = document.getElementById('detectionsList');
 
+// ── Interactive Local Ask-User Form References ──
+const askUserCard         = document.getElementById('askUserCard');
+const askUserTitle        = document.getElementById('askUserTitle');
+const askUserQuestion     = document.getElementById('askUserQuestion');
+const askUserForm         = document.getElementById('askUserForm');
+const cancelAskUserBtn    = document.getElementById('cancelAskUserBtn');
+const submitAskUserBtn    = document.getElementById('submitAskUserBtn');
+
+let currentAskUserRequestId = null;
+let lastSubmittedTask = '';
+
 // ── Local State ──
 let isBusy = false;
 let isAutopilotEnabled = true;
@@ -379,6 +390,157 @@ function setupEventListeners() {
   if (expandRedactedBtn) {
     expandRedactedBtn.addEventListener('click', openRedactedInLightbox);
   }
+
+  // ── Interactive Local Ask-User Form Rendering ──
+  function renderAskUserForm(promptData) {
+    if (!askUserCard || !askUserForm) return;
+
+    currentAskUserRequestId = promptData.requestId || 'req_' + Date.now();
+    if (askUserTitle) {
+      askUserTitle.textContent = promptData.title || 'Details Needed';
+    }
+    if (askUserQuestion) {
+      askUserQuestion.textContent = promptData.question || 'Please provide details needed to complete this task:';
+    }
+
+    askUserForm.innerHTML = '';
+    const fields = promptData.fields || [];
+
+    fields.forEach((field, idx) => {
+      const group = document.createElement('div');
+      group.className = 'ask-user-field-group';
+      if (field.fullWidth || field.type === 'textarea') {
+        group.classList.add('full-width');
+      }
+
+      const label = document.createElement('label');
+      label.className = 'ask-user-field-label';
+      label.textContent = field.label || field.name;
+
+      let input;
+      if (field.type === 'select' && Array.isArray(field.options)) {
+        input = document.createElement('select');
+        input.className = 'ask-user-field-select';
+        input.name = field.name || `field_${idx}`;
+        field.options.forEach(opt => {
+          const optEl = document.createElement('option');
+          const val = typeof opt === 'object' ? opt.value : opt;
+          const txt = typeof opt === 'object' ? opt.text : opt;
+          optEl.value = val;
+          optEl.textContent = txt;
+          if (field.value === val) optEl.selected = true;
+          input.appendChild(optEl);
+        });
+      } else {
+        input = document.createElement('input');
+        input.type = field.type || 'text';
+        input.className = 'ask-user-field-input';
+        input.name = field.name || `field_${idx}`;
+        input.placeholder = field.placeholder || '';
+        if (field.value) input.value = field.value;
+        if (field.type === 'date' && !input.value) {
+          const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+          input.value = tomorrow.toISOString().split('T')[0];
+        }
+      }
+
+      if (field.widgetType) {
+        input.dataset.widgetType = field.widgetType;
+      }
+
+      group.appendChild(label);
+      group.appendChild(input);
+      askUserForm.appendChild(group);
+    });
+
+    askUserCard.classList.remove('hidden');
+
+    const firstInput = askUserForm.querySelector('input, select, textarea');
+    if (firstInput) {
+      setTimeout(() => firstInput.focus(), 100);
+    }
+
+    askUserCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function hideAskUserForm() {
+    if (!askUserCard) return;
+    askUserCard.classList.add('hidden');
+    currentAskUserRequestId = null;
+    if (askUserForm) askUserForm.innerHTML = '';
+  }
+
+  // Interactive Local Ask-User Form Listeners
+  if (cancelAskUserBtn) {
+    cancelAskUserBtn.addEventListener('click', () => {
+      if (currentAskUserRequestId && isExtensionContext) {
+        chrome.runtime.sendMessage({
+          action: 'submitUserData',
+          requestId: currentAskUserRequestId,
+          cancelled: true
+        });
+      }
+      hideAskUserForm();
+    });
+  }
+
+  if (askUserForm) {
+    askUserForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (!currentAskUserRequestId) return;
+
+      const formData = new FormData(askUserForm);
+      const data = {};
+      const fieldsArray = [];
+
+      for (const [key, val] of formData.entries()) {
+        const trimmed = String(val).trim();
+        data[key] = trimmed;
+        const inputEl = askUserForm.querySelector(`[name="${key}"]`);
+        fieldsArray.push({
+          name: key,
+          value: trimmed,
+          widgetType: inputEl?.dataset?.widgetType || null
+        });
+      }
+
+      console.log('[Popup] Submitting local user data for requestId:', currentAskUserRequestId, data);
+
+      if (isExtensionContext) {
+        if (currentAskUserRequestId.startsWith('turn_')) {
+          const originalTask = lastSubmittedTask || 'Continue task with travel details';
+          updateProgressUI('Filling details locally on page...', 'executing');
+          chrome.runtime.sendMessage({
+            action: 'executeAction',
+            payload: {
+              type: 'fill_form',
+              fields: fieldsArray.length > 0 ? fieldsArray : data
+            }
+          }).then(() => {
+            if (isAutopilotEnabled) {
+              setTimeout(() => {
+                chrome.runtime.sendMessage({
+                  action: 'executeActionLoop',
+                  task: originalTask,
+                  serverUrl: currentServerUrl,
+                  maxSteps: 8
+                });
+              }, 600);
+            }
+          }).catch(err => console.warn('[Popup] Fill form error:', err));
+        } else {
+          chrome.runtime.sendMessage({
+            action: 'submitUserData',
+            requestId: currentAskUserRequestId,
+            data: fieldsArray.length > 0 ? fieldsArray : data
+          });
+        }
+      }
+
+      hideAskUserForm();
+      updateProgressUI('Filling details locally into tab...', 'executing');
+    });
+  }
   if (redactionImageFrame) {
     redactionImageFrame.addEventListener('click', openRedactedInLightbox);
   }
@@ -460,6 +622,10 @@ function setupEventListeners() {
         }
       });
     }
+    // Ask User Clarification Form Prompt
+    if (message.type === 'askUserPrompt') {
+      renderAskUserForm(message);
+    }
     // Action execution feedback
     if (message.type === 'actionExecuted' && message.result) {
       const r = message.result;
@@ -470,6 +636,7 @@ function setupEventListeners() {
       activeProgressCard.classList.remove('hidden');
       updateProgressUI(message.message || 'Auto-pilot running...', 'autopilot');
       if (message.status === 'done' || message.status === 'paused' || message.status === 'error') {
+        hideAskUserForm();
         isAutopilotRunning = false;
         isBusy = false;
         syncStopLoopButtons(false);
@@ -777,6 +944,7 @@ async function clearHistory() {
 async function submitChatQuery(query) {
   if (isBusy || !query) return;
   isBusy = true;
+  lastSubmittedTask = query;
 
   // UI state
   taskInput.value = '';
@@ -915,6 +1083,37 @@ async function submitChatQuery(query) {
           return; // Don't finish the submit flow — auto-pilot takes over
         }
       }
+
+      // If agent needs clarification / details, display interactive local form immediately
+      if (turn.action && turn.action.type === 'ask_user') {
+        let fields = [];
+        let question = turn.reasoning || 'Please provide details needed to complete this task:';
+        if (turn.action.value) {
+          try {
+            const parsed = JSON.parse(turn.action.value);
+            if (parsed.fields && Array.isArray(parsed.fields)) {
+              fields = parsed.fields;
+              question = parsed.question || question;
+            }
+          } catch (e) {
+            question = turn.action.value;
+          }
+        }
+        if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || '')) {
+          fields = [
+            { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
+            { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
+            { name: 'date', label: 'Journey Date', type: 'date' },
+            { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+          ];
+        }
+        renderAskUserForm({
+          requestId: 'turn_' + turn.id,
+          question,
+          fields,
+          task: turn.task
+        });
+      }
     }
   } catch (err) {
     console.error('Chat error:', err);
@@ -986,6 +1185,24 @@ function updateProgressUI(statusText, stageId) {
 
   if (progressSub) progressSub.textContent = subText;
   if (redactionProgressSub) redactionProgressSub.textContent = subText;
+}
+
+function getActionPillButtonHtml(act, idx, turn) {
+  if (act.actionType === 'done') {
+    return '<span class="action-done-pill">✓ Task Complete</span>';
+  }
+  if (act.actionType === 'ask_user') {
+    return `<button class="btn-provide-details" data-turn-id="${turn.id}" title="Provide details securely on this device">
+      <span>🔒 Provide Details</span>
+    </button>`;
+  }
+  if (turn.outcome) {
+    return '<span class="action-executed-pill">✓ Executed</span>';
+  }
+  return `<button class="btn-execute-action" data-action-idx="${idx}" title="Execute this action on the page">
+    <span class="exec-icon">▶</span>
+    <span class="exec-label">Execute</span>
+  </button>`;
 }
 
 // ── Turn Card Builder (Matches Hand-Drawn Wireframe) ──
@@ -1141,16 +1358,7 @@ function createTurnCard(turn, isError = false) {
             <div class="action-pill" data-action-idx="${idx}">
               <span class="action-type ${escapeHtml(act.actionType)}">${escapeHtml(act.actionType)}</span>
               <span class="action-target">${escapeHtml(act.target)}</span>
-              ${act.actionType === 'done' ? `
-                <span class="action-done-pill">✓ Task Complete</span>
-              ` : (turn.outcome ? `
-                <span class="action-executed-pill">✓ Executed</span>
-              ` : `
-                <button class="btn-execute-action" data-action-idx="${idx}" title="Execute this action on the page">
-                  <span class="exec-icon">▶</span>
-                  <span class="exec-label">Execute</span>
-                </button>
-              `)}
+              ${getActionPillButtonHtml(act, idx, turn)}
             </div>
           `).join('')}
         </div>
@@ -1199,7 +1407,39 @@ function createTurnCard(turn, isError = false) {
     });
   }
 
-  // Execute action button listeners
+  // Provide Details button listeners for ask_user actions
+  const detailBtns = responseCard.querySelectorAll('.btn-provide-details');
+  detailBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      let fields = [];
+      let question = turn.reasoning || 'Please provide details needed to complete this task:';
+      if (turn.action?.value) {
+        try {
+          const parsed = JSON.parse(turn.action.value);
+          if (parsed.fields && Array.isArray(parsed.fields)) {
+            fields = parsed.fields;
+            question = parsed.question || question;
+          }
+        } catch (e) {
+          question = turn.action.value;
+        }
+      }
+      if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || '')) {
+        fields = [
+          { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
+          { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
+          { name: 'date', label: 'Journey Date', type: 'date' },
+          { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+        ];
+      }
+      renderAskUserForm({
+        requestId: 'turn_' + turn.id,
+        question,
+        fields,
+        task: turn.task
+      });
+    });
+  });
   const execBtns = responseCard.querySelectorAll('.btn-execute-action');
   execBtns.forEach((btn) => {
     btn.addEventListener('click', async () => {

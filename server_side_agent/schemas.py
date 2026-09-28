@@ -1,7 +1,10 @@
 from pydantic import BaseModel, Field
 from typing import Optional, Literal, Union, Any
 
-ActionType = Literal["click", "type", "scroll", "select", "wait", "ask_user", "done"]
+ActionType = Literal[
+    "click", "type", "scroll", "select", "wait", "ask_user", "done",
+    "type_and_select", "pick_date", "select_custom", "fill_form"
+]
 ScrollDirection = Literal["up", "down"]
 
 class RedactedRegion(BaseModel):
@@ -13,6 +16,7 @@ class ActionPayload(BaseModel):
     targetElementId: Optional[str] = None
     value: Optional[str] = None
     scrollDirection: Optional[ScrollDirection] = None
+    fields: Optional[Any] = None
 
 # Backward-compatibility alias
 Action = ActionPayload

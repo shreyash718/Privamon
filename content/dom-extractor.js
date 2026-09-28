@@ -63,6 +63,27 @@
     'ifsc', 'swift'
   ];
 
+  // Angular / PrimeNG / Material / Bootstrap composite widget selectors
+  // These wrap real <input> elements inside custom components
+  const COMPOSITE_WIDGET_SELECTORS = [
+    'p-autocomplete', 'p-calendar', 'p-dropdown', 'p-inputmask', 'p-multiselect',
+    'mat-form-field', 'mat-select', 'mat-datepicker-toggle', 'mat-autocomplete',
+    'ng-select', 'ngb-datepicker', 'ngb-typeahead',
+    '[bsdatepicker]', '[bstypeahead]', '[nzautocomplete]',
+    '.ui-autocomplete', '.ui-calendar', '.ui-dropdown',
+    '.p-autocomplete', '.p-calendar', '.p-dropdown',
+    '[class*="autocomplete-wrapper"]', '[class*="datepicker-wrapper"]',
+    '[role="combobox"]:not(input):not(textarea)', '[role="listbox"]'
+  ];
+
+  // Widget type detection patterns
+  const WIDGET_PATTERNS = {
+    autocomplete: /autocomplete|typeahead|autosuggest|auto-suggest|station-input|city-input|suggest/i,
+    datepicker: /calendar|datepicker|date-picker|date-input|daterange|date-select|p-calendar/i,
+    dropdown: /p-dropdown|mat-select|ng-select|custom-dropdown|p-multiselect/i,
+    timepicker: /timepicker|time-picker|time-input|time-select/i
+  };
+
   // Container tags that act as structural layout wrappers
   const CONTAINER_TAGS = new Set([
     'DIV', 'HEADER', 'FOOTER', 'MAIN', 'SECTION', 'ARTICLE', 'ASIDE', 'NAV',
@@ -325,6 +346,44 @@
     if (dt) return dt.textContent.trim().slice(0, 100);
 
     return el.getAttribute('aria-label') || el.getAttribute('title') || '';
+  }
+
+  /**
+   * Detect the widget type of a composite UI component (Angular/PrimeNG/Material).
+   * Returns null if the element is not a composite widget.
+   */
+  function detectCompositeWidgetType(el) {
+    if (!el) return null;
+    const tagName = el.tagName?.toLowerCase() || '';
+    const className = String(el.className || '').toLowerCase();
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const combined = `${tagName} ${className} ${el.id || ''}`;
+
+    for (const [type, pattern] of Object.entries(WIDGET_PATTERNS)) {
+      if (pattern.test(combined)) return type;
+    }
+
+    // PrimeNG tag-based detection
+    if (tagName.startsWith('p-')) {
+      if (tagName === 'p-autocomplete') return 'autocomplete';
+      if (tagName === 'p-calendar') return 'datepicker';
+      if (tagName === 'p-dropdown' || tagName === 'p-multiselect') return 'dropdown';
+    }
+    // Angular Material tag-based detection
+    if (tagName.startsWith('mat-')) {
+      if (tagName === 'mat-select') return 'dropdown';
+      if (tagName === 'mat-datepicker-toggle') return 'datepicker';
+    }
+    // ng-select
+    if (tagName === 'ng-select') return 'dropdown';
+    // ngb (ng-bootstrap)
+    if (tagName === 'ngb-datepicker' || el.hasAttribute('ngbDatepicker')) return 'datepicker';
+    if (tagName === 'ngb-typeahead' || el.hasAttribute('ngbTypeahead')) return 'autocomplete';
+
+    // Role-based detection for combobox wrappers (not the input itself)
+    if (role === 'combobox' && tagName !== 'input' && tagName !== 'textarea') return 'autocomplete';
+
+    return null;
   }
 
   /**
@@ -700,9 +759,118 @@
     return entry;
   }
 
+  /**
+   * Extract composite widgets (Angular/PrimeNG/Material) that may wrap real inputs
+   * inside custom elements not covered by the standard TreeWalker.
+   * Finds the inner <input> and enriches it with widgetType metadata.
+   */
+  function extractCompositeWidgets() {
+    const selectorStr = COMPOSITE_WIDGET_SELECTORS.join(', ');
+    let wrappers;
+    try {
+      wrappers = document.querySelectorAll(selectorStr);
+    } catch (e) {
+      return; // Invalid selector on this page
+    }
+
+    for (const wrapper of wrappers) {
+      if (elementCount >= MAX_ELEMENTS) break;
+      if (!isVisible(wrapper)) continue;
+
+      const wrapperRect = wrapper.getBoundingClientRect();
+      if (!intersectsViewport(wrapperRect)) continue;
+
+      const widgetType = detectCompositeWidgetType(wrapper);
+      if (!widgetType) continue;
+
+      // Find inner input element — the real editable target
+      const innerInput = wrapper.querySelector('input:not([type="hidden"]), textarea, [contenteditable="true"]');
+      if (!innerInput) continue;
+
+      // Check if already extracted by the main walker; if so, enrich the existing entry
+      let entry = null;
+      const existingId = innerInput.getAttribute('data-privamon-id');
+      if (existingId) {
+        entry = elements.find(e => e.id === existingId) || null;
+      }
+
+      if (!entry) {
+        const inputRect = innerInput.getBoundingClientRect();
+        if (!intersectsViewport(inputRect)) continue;
+
+        // Build the entry for the inner input, using the wrapper's label context
+        entry = buildElementEntry(innerInput, inputRect);
+        if (!entry) continue;
+        elements.push(entry);
+        elementCount++;
+      }
+
+      // Enrich with composite widget metadata
+      entry.widgetType = widgetType;
+
+      // Pull label from wrapper if the inner input doesn't have one
+      if (!entry.label) {
+        const wrapperLabel = wrapper.getAttribute('aria-label')
+          || wrapper.getAttribute('placeholder')
+          || wrapper.querySelector('label, .p-label, .mat-label, .p-float-label label')?.textContent?.trim()
+          || findContextLabel(wrapper);
+        if (wrapperLabel) entry.label = wrapperLabel;
+      }
+
+      // Pull placeholder from wrapper's inner input or attributes
+      if (!entry.placeholder) {
+        const ph = innerInput.getAttribute('placeholder')
+          || wrapper.getAttribute('placeholder')
+          || wrapper.getAttribute('data-placeholder');
+        if (ph) entry.placeholder = ph;
+      }
+
+      // For autocomplete widgets, extract any visible suggestion items (inside wrapper or in document portal)
+      if (widgetType === 'autocomplete') {
+        const suggestPanel = wrapper.querySelector('.p-autocomplete-panel, .ui-autocomplete-panel, .mat-autocomplete-panel, [role="listbox"], .suggestions, .dropdown-menu')
+          || document.querySelector('.p-autocomplete-panel:not([style*="display: none"]), .ui-autocomplete-panel:not([style*="display: none"]), .mat-autocomplete-panel');
+        if (suggestPanel) {
+          const suggestions = Array.from(suggestPanel.querySelectorAll('li, .p-autocomplete-item, mat-option, [role="option"]'))
+            .slice(0, 10)
+            .map(item => (item.textContent || '').trim())
+            .filter(Boolean);
+          if (suggestions.length > 0) {
+            entry.suggestions = suggestions;
+          }
+        }
+      }
+
+      // For dropdown widgets, extract options (inside wrapper or in document portal)
+      if (widgetType === 'dropdown') {
+        const optionPanel = wrapper.querySelector('.p-dropdown-panel, .ng-dropdown-panel, .mat-select-panel, [role="listbox"]')
+          || document.querySelector('.p-dropdown-panel:not([style*="display: none"]), .mat-select-panel, .ng-dropdown-panel');
+        if (optionPanel) {
+          const options = Array.from(optionPanel.querySelectorAll('li, .p-dropdown-item, mat-option, ng-option, [role="option"]'))
+            .slice(0, 20)
+            .map((item, idx) => ({
+              index: idx,
+              value: item.getAttribute('data-value') || item.getAttribute('value') || (item.textContent || '').trim(),
+              text: (item.textContent || '').trim()
+            }))
+            .filter(o => o.text.length > 0);
+          if (options.length > 0) {
+            entry.options = options;
+            entry.inputType = 'custom-select';
+          }
+        }
+      }
+
+      // For datepicker widgets, mark the input as a date field
+      if (widgetType === 'datepicker') {
+        entry.inputType = entry.inputType || 'date';
+      }
+    }
+  }
+
   // ── Execute ──
   const startTime = performance.now();
   extractElements();
+  extractCompositeWidgets(); // Phase 2: extract Angular/PrimeNG/Material composite widgets
   const extractionTimeMs = Math.round(performance.now() - startTime);
 
   return {
@@ -712,6 +880,7 @@
     stats: {
       totalExtracted: elements.length,
       pixelRegionCount: pixelRegions.length,
+      compositeWidgetCount: elements.filter(e => e.widgetType).length,
       extractionTimeMs,
     },
   };

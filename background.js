@@ -282,6 +282,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  // Submit user clarification / form data back to active auto-pilot loop (locally)
+  if (message.action === 'submitUserData') {
+    const { requestId, data, cancelled } = message;
+    const pending = pendingUserInputs.get(requestId);
+    if (pending) {
+      pending.resolve({ data, cancelled });
+      sendResponse({ success: true });
+    } else {
+      sendResponse({ success: false, message: 'No pending input request' });
+    }
+    return true;
+  }
+
   // Get active redaction test state (for popup UI sync on reopen)
   if (message.action === 'getRedactionState') {
     chrome.storage.local.get(['privamon_redaction_state'], (res) => {
@@ -603,6 +616,140 @@ async function handlePipelineResult(message) {
 }
 
 /**
+ * Circuit-breaker to prevent clicking "Search Trains" or search buttons
+ * when origin/destination stations on travel booking pages (like IRCTC) are empty.
+ */
+function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl) {
+  if (!action) return null;
+
+  const url = tabUrl || '';
+  const isIrctcUrl = url.includes('irctc.co.in');
+  const isTravelTask = /\b(book|ticket|train|irctc|journey|flight|bus|reservation|seat)\b/i.test(task || '');
+
+  let fromElement = null;
+  let toElement = null;
+  let dateElement = null;
+  let searchElement = null;
+
+  if (Array.isArray(domElements)) {
+    for (const el of domElements) {
+      const elId = String(el.elementId || el.id || '');
+      const text = String(el.text || '').toLowerCase();
+      const label = String(el.label || '').toLowerCase();
+      const ph = String(el.placeholder || el.attributes?.placeholder || '').toLowerCase();
+      const tag = String(el.tag || '').toLowerCase();
+      const widget = String(el.widgetType || '').toLowerCase();
+
+      // Check if this matches the target element
+      if (action.targetElementId && (elId === action.targetElementId || elId.includes(action.targetElementId))) {
+        if (text.includes('search') || label.includes('search') || ph.includes('search') || tag === 'button') {
+          searchElement = el;
+        }
+      }
+
+      // From / Origin element
+      if (!fromElement) {
+        if ((label.includes('from') || ph.includes('from') || elId.toLowerCase().includes('origin')) &&
+            !label.includes('to') && !ph.includes('to')) {
+          fromElement = el;
+        } else if (widget === 'autocomplete' && !toElement) {
+          fromElement = el;
+        }
+      }
+
+      // To / Destination element
+      if (!toElement) {
+        if ((label.includes('to') || ph.includes('to') || elId.toLowerCase().includes('destination')) &&
+            !label.includes('from') && !ph.includes('from')) {
+          toElement = el;
+        } else if (widget === 'autocomplete' && fromElement && el !== fromElement) {
+          toElement = el;
+        }
+      }
+
+      // Date element
+      if (!dateElement) {
+        if (label.includes('date') || ph.includes('date') || widget === 'datepicker') {
+          dateElement = el;
+        }
+      }
+    }
+  }
+
+  const isTravelContext = isIrctcUrl || isTravelTask || fromElement !== null || toElement !== null;
+  const reasonText = String(reasoning || '').toLowerCase();
+  const isSearchClick = action.type === 'click' && (
+    reasonText.includes('search train') ||
+    reasonText.includes('search trains') ||
+    reasonText.includes('proceed with booking') ||
+    reasonText.includes('find train') ||
+    (searchElement !== null)
+  );
+
+  if (isTravelContext && (isSearchClick || (action.type === 'done' && (fromElement || toElement)))) {
+    const fromEmpty = !fromElement || !fromElement.value || fromElement.value.trim() === '';
+    const toEmpty = !toElement || !toElement.value || toElement.value.trim() === '';
+
+    if (fromEmpty || toEmpty) {
+      console.warn('[Background] Travel Circuit-Breaker: Blocked premature search click because From/To are empty!');
+      const taskStr = task || '';
+      const fromMatch = taskStr.match(/\bfrom\s+([A-Za-z0-9\s/]+?)(?:\s+to|\s+on|\s+date|$)/i);
+      const toMatch = taskStr.match(/\bto\s+([A-Za-z0-9\s/]+?)(?:\s+from|\s+on|\s+date|$)/i);
+
+      if (fromEmpty && fromMatch && fromElement) {
+        return {
+          action: {
+            type: 'type_and_select',
+            targetElementId: fromElement.elementId || 'from',
+            value: fromMatch[1].trim(),
+            scrollDirection: null
+          },
+          reasoning: `Entering origin station "${fromMatch[1].trim()}" into From field before searching.`,
+          assumptions: ['Origin station must be filled before searching trains.'],
+          needsClarification: false
+        };
+      }
+
+      if (toEmpty && toMatch && toElement) {
+        return {
+          action: {
+            type: 'type_and_select',
+            targetElementId: toElement.elementId || 'to',
+            value: toMatch[1].trim(),
+            scrollDirection: null
+          },
+          reasoning: `Entering destination station "${toMatch[1].trim()}" into To field before searching.`,
+          assumptions: ['Destination station must be filled before searching trains.'],
+          needsClarification: false
+        };
+      }
+
+      return {
+        action: {
+          type: 'ask_user',
+          targetElementId: null,
+          value: JSON.stringify({
+            question: 'Please provide your journey details before searching trains:',
+            fields: [
+              { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
+              { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
+              { name: 'date', label: 'Journey Date', type: 'date' },
+              { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+            ]
+          }),
+          scrollDirection: null
+        },
+        reasoning: 'Origin and destination stations must be entered before clicking Search Trains.',
+        assumptions: ['IRCTC requires From and To stations before searching trains.'],
+        needsClarification: true
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Conversational agent query flow:
  * 1. Capture screenshot of the active tab.
  * 2. Extract DOM elements.
@@ -732,6 +879,17 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
       pageUrl: tab.url || '',
       pageTitle: tab.title || 'Web Page'
     };
+
+    // Circuit breaker: Intercept premature search clicks when From/To are empty on IRCTC/travel pages
+    const travelIntercept = checkMissingTravelDetails(turn.action, turn.reasoning, queryText, domData?.elements, tab?.url);
+    if (travelIntercept) {
+      console.log('[Background] Circuit-breaker intercepted premature travel search in single turn:', travelIntercept);
+      turn.action = travelIntercept.action;
+      turn.actions = [travelIntercept.action];
+      if (travelIntercept.reasoning) turn.reasoning = travelIntercept.reasoning;
+      if (travelIntercept.assumptions) turn.assumptions = travelIntercept.assumptions;
+      if (travelIntercept.needsClarification !== undefined) turn.needsClarification = travelIntercept.needsClarification;
+    }
 
     // Step 6: Append to persistent chat history in chrome.storage.local
     try {
@@ -1371,6 +1529,40 @@ async function handleExecuteAction(actionPayload) {
     return { success: true, actionType: 'wait', targetElementId: null, message: 'Waited 1.5 seconds.' };
   }
 
+  // Prevent manual execution of Search click when travel inputs are empty
+  if (actionPayload.type === 'click') {
+    if (tab && tab.url && tab.url.includes('irctc.co.in')) {
+      try {
+        const checkResult = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: (targetId) => {
+            const el = document.getElementById(targetId) ||
+                       document.querySelector(`[data-privamon-id="${targetId}"]`) ||
+                       document.querySelector('button.search_btn, button.train_Search, [type="submit"]');
+            const isSearch = el && (/search/i.test(el.textContent || '') || /train_search|search_btn/i.test(el.className || ''));
+            if (!isSearch) return { blocked: false };
+
+            const fromInp = document.querySelector('p-autocomplete[formcontrolname*="origin" i] input, p-autocomplete[id*="origin" i] input, input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
+            const toInp = document.querySelector('p-autocomplete[formcontrolname*="destination" i] input, p-autocomplete[id*="destination" i] input, input[placeholder*="to" i], input[aria-label*="to" i], #destination input');
+            const fromEmpty = !fromInp || !fromInp.value || fromInp.value.trim() === '';
+            const toEmpty = !toInp || !toInp.value || toInp.value.trim() === '';
+            return { blocked: fromEmpty || toEmpty };
+          },
+          args: [actionPayload.targetElementId || '']
+        });
+        if (checkResult[0]?.result?.blocked) {
+          console.warn('[Background] Blocked manual execution of click Search: From/To are empty!');
+          return {
+            success: false,
+            actionType: 'click',
+            targetElementId: actionPayload.targetElementId,
+            message: 'Cannot click Search Trains: From and To stations must be entered first.'
+          };
+        }
+      } catch (e) {}
+    }
+  }
+
   console.log(`[Background] Executing action: ${actionPayload.type} on ${actionPayload.targetElementId || 'page'}`);
 
   // Inject the action payload as a global, then execute the action executor script
@@ -1406,11 +1598,33 @@ async function handleExecuteAction(actionPayload) {
 
 let isActionLoopRunning = false;
 let isLoopCancelled = false;
+const pendingUserInputs = new Map();
+
+function waitForUserInput(requestId, timeoutMs = 180000) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      pendingUserInputs.delete(requestId);
+      resolve({ cancelled: true, reason: 'timeout' });
+    }, timeoutMs);
+
+    pendingUserInputs.set(requestId, {
+      resolve: (data) => {
+        clearTimeout(timer);
+        pendingUserInputs.delete(requestId);
+        resolve(data);
+      }
+    });
+  });
+}
 
 function stopActionLoop() {
   console.log('[Background] Stopping action loop on user request.');
   isLoopCancelled = true;
   isActionLoopRunning = false;
+  for (const [reqId, pending] of pendingUserInputs.entries()) {
+    pending.resolve({ cancelled: true, reason: 'stopped' });
+  }
+  pendingUserInputs.clear();
   updateLoopState({
     isRunning: false,
     status: 'paused',
@@ -1582,9 +1796,89 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
       }
 
       if (action.type === 'ask_user' || turn.needsClarification) {
-        steps.push({ step: step + 1, action, result: 'Needs clarification', stopped: 'clarification' });
-        forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Agent paused: clarification needed' });
-        break;
+        let question = 'Please provide details needed to complete this task:';
+        let fields = [];
+
+        // Check if action.value is structured JSON
+        if (action.value) {
+          try {
+            const parsed = JSON.parse(action.value);
+            if (parsed.fields && Array.isArray(parsed.fields)) {
+              fields = parsed.fields;
+              question = parsed.question || question;
+            } else if (typeof parsed === 'object') {
+              question = parsed.question || action.value;
+            }
+          } catch (e) {
+            question = action.value;
+          }
+        }
+
+        // If no fields were provided in value, but the task relates to booking or IRCTC, auto-generate standard travel fields!
+        if (fields.length === 0 && /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(task || '')) {
+          fields = [
+            { name: 'from', label: 'From Station', type: 'text', placeholder: 'e.g. NDLS / New Delhi' },
+            { name: 'to', label: 'To Station', type: 'text', placeholder: 'e.g. BCT / Mumbai Central' },
+            { name: 'date', label: 'Journey Date', type: 'date' },
+            { name: 'class', label: 'Class', type: 'select', options: ['All Classes', 'Sleeper (SL)', 'AC 3 Tier (3A)', 'AC 2 Tier (2A)', 'AC First Class (1A)', 'Second Sitting (2S)'] }
+          ];
+        }
+
+        const requestId = 'req_' + Date.now();
+        console.log(`[Background] Pausing auto-pilot loop for user clarification (${requestId}):`, question, fields);
+
+        forwardToPopup({
+          type: 'askUserPrompt',
+          requestId,
+          question,
+          fields,
+          task
+        });
+
+        forwardToPopup({
+          type: 'autopilotProgress',
+          step: step + 1,
+          maxSteps,
+          status: 'clarification',
+          message: `Agent needs details: "${question.length > 60 ? question.slice(0, 60) + '...' : question}"`
+        });
+
+        // Wait for user to submit data in popup (or cancel)
+        const userResponse = await waitForUserInput(requestId, 180000); // 3 minute timeout
+
+        if (!userResponse || userResponse.cancelled || !userResponse.data) {
+          steps.push({ step: step + 1, action, result: 'Clarification cancelled by user', stopped: 'cancelled' });
+          forwardToPopup({ type: 'autopilotProgress', step: step + 1, maxSteps, status: 'paused', message: 'Clarification cancelled.' });
+          break;
+        }
+
+        console.log('[Background] Received user response data locally. Executing local form fill...');
+        forwardToPopup({
+          type: 'autopilotProgress',
+          step: step + 1,
+          maxSteps,
+          status: 'executing',
+          message: 'Filling fields locally on page (private data remains on device)...'
+        });
+
+        // Execute local form fill using fill_form action
+        const fillAction = {
+          type: 'fill_form',
+          fields: userResponse.data
+        };
+        const fillResult = await handleExecuteAction(fillAction);
+        console.log('[Background] Local fill_form result:', fillResult);
+
+        steps.push({
+          step: step + 1,
+          action: fillAction,
+          execResult: fillResult,
+          message: 'User details filled locally on device.'
+        });
+
+        // Settle page and continue the loop!
+        await new Promise(r => setTimeout(r, 1200));
+        continue;
       }
 
       if (typeof confidence === 'number' && confidence < 0.45) {
