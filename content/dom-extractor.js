@@ -390,6 +390,9 @@
             alt: entry.alt || '',
             bbox: entry.bbox,
             area: entry.bbox.width * entry.bbox.height,
+            isAvatar: entry.isAvatar || false,
+            avatarConfidence: entry.avatarConfidence || 0,
+            avatarReason: entry.avatarReason || ''
           });
         }
       }
@@ -409,6 +412,82 @@
     let isPixel = PIXEL_TAGS.has(tag);
     if (!isPixel && (role === 'img' || (el.style && el.style.backgroundImage && el.style.backgroundImage.includes('url(')))) {
       isPixel = true;
+    }
+
+    // Avatar and Profile Picture Detection
+    const elClass = String(el.className || '').toLowerCase();
+    const elId = String(el.id || '').toLowerCase();
+    const elAlt = String(el.getAttribute?.('alt') || '').toLowerCase();
+    const elTitle = String(el.getAttribute?.('title') || '').toLowerCase();
+    const elAria = String(el.getAttribute?.('aria-label') || '').toLowerCase();
+    const elSrc = String(el.src || el.getAttribute?.('src') || '').toLowerCase();
+    const elHref = String(el.href || el.getAttribute?.('href') || '').toLowerCase();
+    const parent = el.parentElement;
+    const parentClass = String(parent?.className || '').toLowerCase();
+    const parentId = String(parent?.id || '').toLowerCase();
+    const parentAria = String(parent?.getAttribute?.('aria-label') || '').toLowerCase();
+    const parentTitle = String(parent?.getAttribute?.('title') || '').toLowerCase();
+    const parentHref = String(parent?.href || parent?.getAttribute?.('href') || '').toLowerCase();
+    const grandparent = parent?.parentElement;
+    const gpClass = String(grandparent?.className || '').toLowerCase();
+    const gpId = String(grandparent?.id || '').toLowerCase();
+    const gpAria = String(grandparent?.getAttribute?.('aria-label') || '').toLowerCase();
+
+    const combinedMeta = `${elClass} ${elId} ${elAlt} ${elTitle} ${elAria} ${elSrc} ${elHref} ${parentClass} ${parentId} ${parentAria} ${parentTitle} ${parentHref} ${gpClass} ${gpId} ${gpAria}`;
+
+    const AVATAR_KW_REGEX = /\b(avatar|profile[-_]?(pic|img|photo|image|thumb|icon|badge|btn|view)|user[-_]?(pic|img|photo|icon|avatar|image|badge|btn|profile|thumb)|account[-_]?(img|circle|icon|photo|avatar|btn)|headshot|portrait|gravatar|member[-_]?(photo|img|pic)|author[-_]?(img|pic)|my[-_]?profile|user[-_]?detail|user[-_]?info|user[-_]?name|logged[-_]?in[-_]?user)\b/i;
+
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+    const aspectRatio = width / (height || 1);
+    const isRoughlySquare = (aspectRatio >= 0.60 && aspectRatio <= 1.65);
+    const isAvatarSize = (width >= 16 && width <= 200 && height >= 16 && height <= 200);
+
+    // Position check: in header, nav, or top-right/top-bar area
+    const isInTopBar = (rect.top - offsetTop) <= 160;
+    const isTopRightCorner = isInTopBar && ((rect.left - offsetLeft) > (viewportInfo.width * 0.50));
+    const isInHeaderOrNav = Boolean(el.closest && el.closest('header, nav, [role="banner"], [role="navigation"], .header, .navbar, .top-bar, .user-menu, .profile-menu, .user-profile, .user-info, .account-menu, #header, #navbar, .nav-right, .header-right, .user-avatar, .profile-avatar'));
+
+    // Check background image on potential avatar containers
+    if (!isPixel && isAvatarSize && isRoughlySquare && (AVATAR_KW_REGEX.test(combinedMeta) || isInHeaderOrNav || isTopRightCorner)) {
+      try {
+        const compStyle = window.getComputedStyle(el);
+        if (compStyle && compStyle.backgroundImage && compStyle.backgroundImage.includes('url(')) {
+          isPixel = true;
+        }
+      } catch (e) {}
+    }
+
+    let isAvatar = false;
+    let avatarConfidence = 0.0;
+    let avatarReason = '';
+
+    if (isPixel || tag === 'IMG' || tag === 'SVG' || isAvatarSize) {
+      if (AVATAR_KW_REGEX.test(combinedMeta) && isAvatarSize) {
+        isAvatar = true;
+        avatarConfidence = 0.98;
+        avatarReason = 'avatar_keywords';
+        isPixel = true;
+      } else if (isRoughlySquare && isAvatarSize && (isTopRightCorner || isInHeaderOrNav)) {
+        let isCircular = el.classList?.contains('rounded-circle') || el.classList?.contains('circle') || el.classList?.contains('img-circle') || parent?.classList?.contains('rounded-circle') || parent?.classList?.contains('circle') || parent?.classList?.contains('img-circle');
+        if (!isCircular) {
+          try {
+            const comp = window.getComputedStyle(el);
+            const br = comp?.borderRadius;
+            if (br && (br.includes('50%') || parseFloat(br) >= (width * 0.35))) {
+              isCircular = true;
+            }
+          } catch (e) {}
+        }
+        const hasUserKw = /\b(user|profile|account|member|me|login|auth|logged)\b/i.test(combinedMeta);
+
+        if (isCircular || hasUserKw || (tag === 'IMG' && isTopRightCorner)) {
+          isAvatar = true;
+          avatarConfidence = isCircular ? 0.98 : (hasUserKw ? 0.96 : 0.92);
+          avatarReason = isCircular ? 'circular_header_avatar' : (hasUserKw ? 'header_user_avatar' : 'top_corner_profile_image');
+          isPixel = true;
+        }
+      }
     }
 
     // Stamp unique, stable identifier on the live DOM element for precision execution
@@ -448,6 +527,9 @@
         height: Math.round(rect.height),
       },
       isPixelContent: isPixel,
+      isAvatar: isAvatar,
+      avatarConfidence: avatarConfidence,
+      avatarReason: avatarReason,
       isSidebar: isSidebar,
       isSearchResult: isSearchResult,
       isPlaylist: isPlaylist,
@@ -456,7 +538,7 @@
     // Check if this is a layout container holding child block elements.
     // Inputs, buttons, and contenteditable elements must never be suppressed as containers.
     let isContainer = isStructuralContainer(el);
-    if (isInput || tag === 'BUTTON' || role === 'button') {
+    if (isInput || tag === 'BUTTON' || role === 'button' || isAvatar) {
       isContainer = false;
     }
     entry.isContainer = isContainer;

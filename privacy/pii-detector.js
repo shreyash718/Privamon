@@ -719,6 +719,25 @@ Privamon.PIIDetector = (() => {
     const labelText = element.labelText || element.label || '';
     const contextStr = [name, id, className, labelText].filter(Boolean).join(' ');
 
+    // ── 0. User Profile Pictures & Corner Avatars ──
+    if (element.isAvatar) {
+      const candidateBbox = mapper ? mapper.mapBbox(element.bbox) : element.bbox;
+      candidates.push(toCandidate({
+        type: 'face',
+        source: 'dom_avatar',
+        text: '[PROFILE_PICTURE]',
+        originalValue: '',
+        bbox: candidateBbox,
+        boxes: [candidateBbox],
+        tokens: [],
+        confidence: element.avatarConfidence || 0.96,
+        decision: 'REDACT',
+        elementId: elementId || id || null,
+        reason: element.avatarReason || 'profile_picture_avatar',
+        coordinateSpace: mapper ? 'screenshot' : 'viewport'
+      }));
+    }
+
     // ── 1. Form Inputs & Textareas ──
     if (upperTag === 'INPUT' || upperTag === 'TEXTAREA' || upperTag === 'SELECT') {
       let matchedType = null;

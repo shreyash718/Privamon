@@ -60,6 +60,7 @@ Privamon.FaceDetector = (() => {
    */
   function shouldProcess(region) {
     if (!region || !region.bbox) return false;
+    if (region.isAvatar) return true;
     if (region.bbox.width < MIN_FACE_REGION_SIZE || region.bbox.height < MIN_FACE_REGION_SIZE) {
       return false;
     }
@@ -397,9 +398,12 @@ Privamon.FaceDetector = (() => {
     const sess = await initialize();
     if (!sess) return [];
 
-    for (const region of eligibleRegions.slice(0, 4)) {
+    // Prioritize avatar regions first
+    eligibleRegions.sort((a, b) => (b.isAvatar ? 1 : 0) - (a.isAvatar ? 1 : 0));
+
+    for (const region of eligibleRegions.slice(0, 10)) {
       // Yield to event loop so extension popup / side panel stays responsive
-      await new Promise(r => setTimeout(r, 80));
+      await new Promise(r => setTimeout(r, 15));
       try {
         const screenshotBbox = mapper ? mapper.mapBbox(region.bbox) : region.bbox;
         const cropDataUrl = await Privamon.Redactor.extractRegion(screenshotDataUrl, screenshotBbox);

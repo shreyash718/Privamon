@@ -83,16 +83,22 @@ Privamon.SanitizePipeline = (() => {
     const allPixelRegions = domData.pixelRegions || [];
     const ocrRegions = Privamon.OCREngine.selectRegionsForOCR(allPixelRegions, domData.viewportInfo);
 
-    // Prioritize largest candidate regions for closeup face analysis, cap at top 3
-    const candidateVision = Privamon.FaceDetector
+    // Prioritize avatar regions first, followed by largest candidate regions for closeup face analysis
+    const eligibleVision = Privamon.FaceDetector
       ? allPixelRegions.filter(Privamon.FaceDetector.shouldProcess)
       : [];
-    candidateVision.sort((a, b) => {
+
+    const avatarRegions = eligibleVision.filter(r => r.isAvatar);
+    const nonAvatarRegions = eligibleVision.filter(r => !r.isAvatar);
+
+    nonAvatarRegions.sort((a, b) => {
       const areaA = (a.bbox?.width || 0) * (a.bbox?.height || 0);
       const areaB = (b.bbox?.width || 0) * (b.bbox?.height || 0);
       return areaB - areaA;
     });
-    const visionRegions = candidateVision.slice(0, 3);
+
+    // Avatars ALWAYS go first so small corner profile pictures are never crowded out
+    const visionRegions = [...avatarRegions, ...nonAvatarRegions].slice(0, 10);
 
     timings.pixelIdentification = Math.round(performance.now() - tPixelStart);
     progress('pixelId', 'done', `OCR: ${ocrRegions.length}, Vision: ${visionRegions.length}`);
@@ -454,6 +460,36 @@ Privamon.SanitizePipeline = (() => {
               coordinateSpace: 'screenshot'
             }));
           }
+        }
+      }
+
+      // Safety Net: Guarantee solid-fill redaction for user avatars / profile pictures
+      for (const region of allPixelRegions) {
+        if (!region.isAvatar || !region.bbox) continue;
+        const rBbox = mapper.mapBbox(region.bbox);
+        if (!rBbox || rBbox.width < 10 || rBbox.height < 10) continue;
+
+        const alreadyCovered = [...domCandidates, ...visionCandidates].some(c => {
+          if (!c.bbox || c.decision === 'KEEP') return false;
+          const cx = rBbox.x + rBbox.width / 2;
+          const cy = rBbox.y + rBbox.height / 2;
+          return cx >= (c.bbox.x - 5) && cx <= (c.bbox.x + c.bbox.width + 5) &&
+                 cy >= (c.bbox.y - 5) && cy <= (c.bbox.y + c.bbox.height + 5);
+        });
+
+        if (!alreadyCovered) {
+          console.log(`[Pipeline] 🛡️ Shielding user profile avatar region ${region.regionId || 'avatar'}`);
+          visionCandidates.push(Privamon.PIIDetector.toCandidate({
+            type: 'face',
+            source: 'avatar_shield',
+            text: '[User Profile Picture - Shielded]',
+            bbox: rBbox,
+            boxes: [rBbox],
+            confidence: region.avatarConfidence || 0.98,
+            decision: 'REDACT',
+            reason: region.avatarReason || 'profile_picture_shield',
+            coordinateSpace: 'screenshot'
+          }));
         }
       }
     }
