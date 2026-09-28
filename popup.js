@@ -123,16 +123,19 @@ function renderAskUserForm(promptData) {
   if (promptData.task) {
     lastSubmittedTask = promptData.task;
   }
+  const taskToCheck = promptData.task || lastSubmittedTask || '';
+  const isLogin = /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(taskToCheck) ||
+                  /credentials|login/i.test(promptData.title || '');
+
   if (askUserTitle) {
-    askUserTitle.textContent = promptData.title || 'Action Needed on Page';
+    askUserTitle.textContent = promptData.title || (isLogin ? 'Please Fill Correct Credentials' : 'Action Needed on Page');
   }
   if (askUserQuestion) {
-    askUserQuestion.textContent = promptData.question || 'Please fill in the required details directly on the page before proceeding:';
+    askUserQuestion.textContent = promptData.question || (isLogin ? 'Please fill in your correct credentials directly on the page. After filling, click Proceed:' : 'Please fill in the required details directly on the page before proceeding:');
   }
 
   let fields = promptData.fields || [];
   if (!Array.isArray(fields) || fields.length === 0) {
-    const taskToCheck = promptData.task || lastSubmittedTask || '';
     if (/\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(taskToCheck)) {
       fields = [
         { name: 'from', label: 'From Station', description: 'Enter departure station (e.g. New Delhi / NDLS)' },
@@ -140,10 +143,22 @@ function renderAskUserForm(promptData) {
         { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
         { name: 'class', label: 'Class / Quota', description: 'Choose your coach class' }
       ];
+    } else if (isLogin) {
+      fields = [
+        { name: 'username', label: 'UserName', description: 'Enter your username, roll number, or email' },
+        { name: 'password', label: 'Password', description: 'Enter your password' }
+      ];
     } else {
       fields = [
         { name: 'details', label: 'Required Info', description: 'Fill the required fields directly on the page' }
       ];
+    }
+  }
+
+  if (submitAskUserBtn) {
+    const span = submitAskUserBtn.querySelector('span');
+    if (span) {
+      span.textContent = isLogin ? '▶ Proceed to Login ➔' : (/\b(book|ticket|train|irctc)\b/i.test(taskToCheck) ? '▶ Proceed with Search ➔' : '▶ Proceed ➔');
     }
   }
 
@@ -509,25 +524,56 @@ function setupEventListeners() {
       const reqId = currentAskUserRequestId;
       hideAskUserForm();
 
+      const isLogin = /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(lastSubmittedTask || '') ||
+                      (currentGuidanceFields && currentGuidanceFields.some(f => /user|pass/i.test(f.name || f.label || '')));
+
+      if (isLogin) {
+        // Direct login execution: user filled credentials on page, click Sign in immediately!
+        if (activeProgressCard) activeProgressCard.classList.remove('hidden');
+        updateProgressUI('Credentials filled. Directly clicking Sign in to log in...', 'executing');
+        isBusy = true;
+        taskInput.disabled = true;
+        sendBtn.disabled = true;
+
+        if (reqId && !reqId.startsWith('turn_') && isExtensionContext) {
+          chrome.runtime.sendMessage({
+            action: 'submitUserData',
+            requestId: reqId,
+            data: { filledOnPage: true, fields: currentGuidanceFields }
+          }).catch(() => {});
+        } else if (isExtensionContext) {
+          chrome.runtime.sendMessage({
+            action: 'continueAfterGuidance',
+            task: lastSubmittedTask || 'Login with entered credentials'
+          }).catch(() => {});
+        } else {
+          submitChatQuery('Login with entered credentials');
+        }
+        return;
+      }
+
       if (reqId && !reqId.startsWith('turn_') && isExtensionContext) {
         // Autopilot loop is waiting for user confirmation
+        if (activeProgressCard) activeProgressCard.classList.remove('hidden');
         chrome.runtime.sendMessage({
           action: 'submitUserData',
           requestId: reqId,
           data: { filledOnPage: true, fields: currentGuidanceFields }
-        });
+        }).catch(() => {});
         updateProgressUI('Continuing task with filled details...', 'executing');
       } else {
         // User confirmed details are filled on page.
         // Directly trigger continuation which clicks Search Trains and proceeds!
+        if (activeProgressCard) activeProgressCard.classList.remove('hidden');
         updateProgressUI('Details filled on page. Proceeding with search...', 'executing');
+        const proceedTask = lastSubmittedTask || 'Search trains with entered details';
         if (isExtensionContext) {
           chrome.runtime.sendMessage({
             action: 'continueAfterGuidance',
-            task: lastSubmittedTask || 'Search trains with entered details'
-          });
+            task: proceedTask
+          }).catch(() => {});
         } else {
-          submitChatQuery('Search trains with entered details');
+          submitChatQuery(proceedTask);
         }
       }
     });
@@ -586,7 +632,7 @@ function setupEventListeners() {
       isBusy = true;
     }
     if (message.type === 'pipelineComplete') {
-      if (message.result && message.result.turn && isBusy) {
+      if (message.result && message.result.turn) {
         const turn = message.result.turn;
         const existing = document.getElementById(turn.id);
         if (!existing) {
@@ -596,7 +642,7 @@ function setupEventListeners() {
           scrollToBottom();
         }
         isBusy = false;
-        activeProgressCard.classList.add('hidden');
+        if (activeProgressCard) activeProgressCard.classList.add('hidden');
         taskInput.disabled = false;
         sendBtn.disabled = false;
         taskInput.focus();
@@ -615,12 +661,43 @@ function setupEventListeners() {
     }
     // Ask User Clarification Form Prompt
     if (message.type === 'askUserPrompt') {
-      renderAskUserForm(message);
+      try {
+        renderAskUserForm(message);
+      } catch (e) {
+        console.warn('[Popup] Could not render guidance form:', e.message);
+      }
     }
     // Action execution feedback
     if (message.type === 'actionExecuted' && message.result) {
       const r = message.result;
       console.log(`[Popup] Action executed: ${r.actionType} -> ${r.success ? 'OK' : 'FAIL'}: ${r.message}`);
+    }
+    // Pipeline error handling
+    if (message.type === 'pipelineError') {
+      console.warn('[Popup] Pipeline error received:', message.error);
+      isBusy = false;
+      isAutopilotRunning = false;
+      taskInput.disabled = false;
+      sendBtn.disabled = false;
+      activeProgressCard.classList.add('hidden');
+      if (redactionProgressCard) redactionProgressCard.classList.add('hidden');
+      syncStopLoopButtons(false);
+
+      const errorTurn = {
+        id: 'err_' + Date.now(),
+        timestamp: Date.now(),
+        task: lastSubmittedTask || 'Page analysis',
+        screenshotUrl: null,
+        redactionsCount: 0,
+        thinking: '',
+        actions: [],
+        isReloadNeeded: true,
+        message: `Pipeline Error: ${message.error || 'Failed to capture or analyze screen'}.\n\nPlease ensure your target tab is active, or click the ⟳ reload button in the header and try again.`
+      };
+      const errEl = createTurnCard(errorTurn, true);
+      chatTimeline.appendChild(errEl);
+      scrollToBottom();
+      taskInput.focus();
     }
     // Auto-pilot progress
     if (message.type === 'autopilotProgress') {
@@ -635,6 +712,22 @@ function setupEventListeners() {
           setTimeout(() => { activeProgressCard.classList.add('hidden'); }, 2500);
         } else {
           activeProgressCard.classList.add('hidden');
+        }
+        if (message.status === 'error') {
+          const errorTurn = {
+            id: 'err_' + Date.now(),
+            timestamp: Date.now(),
+            task: lastSubmittedTask || 'Auto-pilot task',
+            screenshotUrl: null,
+            redactionsCount: 0,
+            thinking: '',
+            actions: [],
+            isReloadNeeded: true,
+            message: message.message || 'Auto-pilot encountered an error. Please click the ⟳ reload button and try again.'
+          };
+          const errEl = createTurnCard(errorTurn, true);
+          chatTimeline.appendChild(errEl);
+          scrollToBottom();
         }
         taskInput.disabled = false;
         sendBtn.disabled = false;
@@ -822,7 +915,10 @@ async function syncRedactionProgress() {
   try {
     const res = await chrome.storage.local.get(['privamon_redaction_state']);
     const state = res.privamon_redaction_state;
-    if (state && state.isRunning) {
+    // Check if state is stale (> 35s since timestamp)
+    const isStale = state && state.isRunning && state.timestamp && (Date.now() - state.timestamp > 35000);
+
+    if (state && state.isRunning && !isStale) {
       isBusy = true;
       if (runRedactionTestBtn) runRedactionTestBtn.disabled = true;
       if (heroStartTestBtn) heroStartTestBtn.disabled = true;
@@ -830,10 +926,17 @@ async function syncRedactionProgress() {
       if (redactionEmptyState) redactionEmptyState.classList.add('hidden');
       if (redactionProgressHeadline) redactionProgressHeadline.textContent = state.statusText || 'Redacting on-device...';
       if (redactionProgressSub) redactionProgressSub.textContent = 'Processing in background (Zero Server)...';
-    } else if (state && !state.isRunning) {
+    } else {
+      if (isStale) {
+        console.warn('[Popup] Clearing stale redaction running state from storage');
+        chrome.storage.local.set({
+          privamon_redaction_state: { isRunning: false, stageId: 'complete', status: 'idle', statusText: 'Ready', timestamp: Date.now() }
+        }).catch(() => {});
+      }
+      isBusy = false;
       if (runRedactionTestBtn) runRedactionTestBtn.disabled = false;
       if (heroStartTestBtn) heroStartTestBtn.disabled = false;
-      if (redactionProgressCard && !isBusy) redactionProgressCard.classList.add('hidden');
+      if (redactionProgressCard) redactionProgressCard.classList.add('hidden');
     }
   } catch (e) {
     console.warn('[Popup] Failed to sync redaction progress:', e);
@@ -944,6 +1047,33 @@ async function submitChatQuery(query) {
   progressSub.textContent = 'Step 1: Inspecting screen & executing action...';
   emptyState.classList.add('hidden');
   scrollToBottom();
+
+  // Safety timeout: reset UI if pipeline is stuck for 60s (e.g. worker invalidated after reload)
+  const uiTimeoutId = setTimeout(() => {
+    if (isBusy) {
+      console.warn('[Popup] Pipeline UI timeout: resetting stuck state after 60s');
+      isBusy = false;
+      isAutopilotRunning = false;
+      taskInput.disabled = false;
+      sendBtn.disabled = false;
+      activeProgressCard.classList.add('hidden');
+      syncStopLoopButtons(false);
+      const errorTurn = {
+        id: 'timeout_' + Date.now(),
+        timestamp: Date.now(),
+        task: query,
+        screenshotUrl: null,
+        redactionsCount: 0,
+        thinking: '',
+        actions: [],
+        isReloadNeeded: true,
+        message: 'Pipeline timed out. The extension may need to be reloaded. Click the reload button in the header or go to chrome://extensions and reload Privamon, then try again.'
+      };
+      const errEl = createTurnCard(errorTurn, true);
+      chatTimeline.appendChild(errEl);
+      scrollToBottom();
+    }
+  }, 60000);
 
   if (isExtensionContext && isAutopilotEnabled) {
     isAutopilotRunning = true;
@@ -1101,13 +1231,17 @@ async function submitChatQuery(query) {
             { name: 'class', label: 'Class / Quota', description: 'Select your desired coach class' }
           ];
         }
-        renderAskUserForm({
-          requestId: 'turn_' + turn.id,
-          title,
-          question,
-          fields,
-          task: turn.task
-        });
+        try {
+          renderAskUserForm({
+            requestId: 'turn_' + turn.id,
+            title,
+            question,
+            fields,
+            task: turn.task
+          });
+        } catch (e) {
+          console.warn('[Popup] Could not render guidance form in chat flow:', e.message);
+        }
       }
     }
   } catch (err) {
@@ -1153,6 +1287,7 @@ async function submitChatQuery(query) {
     chatTimeline.appendChild(errEl);
     scrollToBottom();
   } finally {
+    clearTimeout(uiTimeoutId);
     isBusy = false;
     taskInput.disabled = false;
     sendBtn.disabled = false;
@@ -1187,9 +1322,24 @@ function getActionPillButtonHtml(act, idx, turn) {
     return '<span class="action-done-pill">✓ Task Complete</span>';
   }
   if (act.actionType === 'ask_user' || (act.actionType === 'wait' && turn.needsClarification) || turn.needsClarification) {
-    return `<button class="btn-provide-details" data-turn-id="${turn.id}" title="View required fields and guidance on page">
-      <span>👉 View Guidance</span>
-    </button>`;
+    const isTravel = /\b(book|ticket|train|irctc|journey|flight|bus|reservation)\b/i.test(turn.task || lastSubmittedTask || '');
+    const isLogin = /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(turn.task || lastSubmittedTask || '') ||
+                    (turn.guidance?.title && /credentials|login/i.test(turn.guidance.title));
+    return `
+      <button class="btn-provide-details" data-turn-id="${turn.id}" title="View required fields and guidance on page">
+        <span>👉 View Guidance</span>
+      </button>
+      ${isTravel ? `
+        <button class="btn-continue-search" data-turn-id="${turn.id}" title="Details already filled? Click Search Trains directly on page">
+          <span>🔍 Click Search Trains</span>
+        </button>
+      ` : ''}
+      ${isLogin ? `
+        <button class="btn-continue-login" data-turn-id="${turn.id}" title="Credentials filled? Click Sign in to log in">
+          <span>🔑 Proceed to Login</span>
+        </button>
+      ` : ''}
+    `;
   }
   if (turn.outcome) {
     return '<span class="action-executed-pill">✓ Executed</span>';
@@ -1433,13 +1583,17 @@ function createTurnCard(turn, isError = false) {
           { name: 'class', label: 'Class / Quota', description: 'Select your desired coach class' }
         ];
       }
-      renderAskUserForm({
-        requestId: 'turn_' + turn.id,
-        title,
-        question,
-        fields,
-        task: turn.task
-      });
+      try {
+        renderAskUserForm({
+          requestId: 'turn_' + turn.id,
+          title,
+          question,
+          fields,
+          task: turn.task
+        });
+      } catch (e) {
+        console.warn('[Popup] Could not render guidance form in card:', e.message);
+      }
       // Also highlight fields directly on tab
       if (isExtensionContext) {
         chrome.runtime.sendMessage({
@@ -1449,6 +1603,46 @@ function createTurnCard(turn, isError = false) {
       }
     });
   });
+
+  // Direct Search Trains button listener for travel cards
+  const searchDirectBtns = responseCard.querySelectorAll('.btn-continue-search');
+  searchDirectBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      btn.innerHTML = '<span>⏳ Searching...</span>';
+      if (activeProgressCard) activeProgressCard.classList.remove('hidden');
+      updateProgressUI('Clicking Search Trains on page...', 'executing');
+      if (isExtensionContext) {
+        chrome.runtime.sendMessage({
+          action: 'continueAfterGuidance',
+          task: lastSubmittedTask || 'Search trains with entered details'
+        }).catch(() => {});
+      } else {
+        submitChatQuery('Search trains with entered details');
+      }
+    });
+  });
+
+  // Direct Proceed to Login button listener for auth cards
+  const loginDirectBtns = responseCard.querySelectorAll('.btn-continue-login');
+  loginDirectBtns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      btn.innerHTML = '<span>⏳ Logging in...</span>';
+      if (activeProgressCard) activeProgressCard.classList.remove('hidden');
+      updateProgressUI('Proceeding to login with filled credentials...', 'executing');
+      isBusy = true;
+      taskInput.disabled = true;
+      sendBtn.disabled = true;
+      if (isExtensionContext) {
+        chrome.runtime.sendMessage({
+          action: 'continueAfterGuidance',
+          task: lastSubmittedTask || 'Login with entered credentials'
+        }).catch(() => {});
+      } else {
+        submitChatQuery('Login with entered credentials');
+      }
+    });
+  });
+
   const execBtns = responseCard.querySelectorAll('.btn-execute-action');
   execBtns.forEach((btn) => {
     btn.addEventListener('click', async () => {

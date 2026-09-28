@@ -168,6 +168,8 @@ def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: i
         text = f" text=\"{text_val}\"" if text_val else ""
         
         attrs = el.get("attributes") or {}
+        dom_id = el.get("id") or attrs.get("id")
+        id_str = f" id=\"{dom_id}\"" if dom_id else ""
         placeholder = attrs.get("placeholder") or el.get("placeholder")
         if placeholder:
             ph_val = str(placeholder)
@@ -190,7 +192,7 @@ def format_dom_for_prompt(sanitized_dom: Union[list, str, None], max_elements: i
             opt_labels = [f"{o.get('text', '')}" if isinstance(o, dict) else str(o) for o in options[:8]]
             opt_str = f" options=[{', '.join(opt_labels)}]"
 
-        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{inp_type}{role}{label}{ph}{val}{href}{opt_str}>{text}</{tag}>")
+        lines.append(f"- elementId: \"{el_id}\"{pos} | <{tag}{id_str}{inp_type}{role}{label}{ph}{val}{href}{opt_str}>{text}</{tag}>")
 
     return "\n".join(lines)
 
@@ -327,6 +329,36 @@ SPECIAL GUIDANCE FOR IRCTC & COMPLEX TRAVEL/FORM WORKFLOWS:
   3. DATE PICKERS: When filling date fields (e.g. Journey Date on IRCTC which uses p-calendar), use action type "pick_date" (or "type") with the formatted date (e.g. "DD/MM/YYYY" or "YYYY-MM-DD") in "value".
   4. CLASS / QUOTA SELECTION: When selecting class or quota (which use PrimeNG p-dropdown), use action type "select_custom" (or "select") with the class name in "value".
   5. SUBMIT SEARCH: ONLY once From, To, and Date fields are filled, emit action type "click" targeting the "Search" / "Find Trains" / "Search Trains" button.
+
+SPECIAL GUIDANCE FOR LOGIN & CREDENTIAL FORMS: (e.g. University/Student portals like YMCA UST, Company portals, Web apps)
+- When the user asks to "login", "sign in", "access portal", or log into an account:
+  1. PRIVACY & SECURITY FIRST:
+     - You NEVER possess the user's private passwords or credentials. NEVER guess, invent, or type fake passwords.
+  2. LOGIN ATTEMPT / MISSING CREDENTIALS / FAILED LOGIN HANDLING (CRITICAL RULE):
+     - If the user says "login" (or clicks on login), and login does not happen (e.g. username/password fields are still empty, an error appeared, or the page remains on the login screen after clicking login/sign-in):
+       * DO NOT repeatedly click "Sign in" or "Login" without credentials!
+       * DO NOT return "done" while still on the login page!
+       * Instead, emit action type "ask_user" (or "wait") with needsClarification: true instructing the user to fill their correct credentials directly on the page and then click Proceed:
+       Example:
+       {{
+         "reasoning": "Please fill in your correct credentials directly on the page. After filling, click Proceed.",
+         "confidence": 0.95,
+         "action": {{
+           "type": "ask_user",
+           "targetElementId": null,
+           "value": "{{\"title\": \"Please Fill Correct Credentials\", \"question\": \"Please fill in your correct credentials directly on the page. After filling, click Proceed:\", \"fields\": [{{\"name\": \"username\", \"label\": \"UserName / ID\", \"description\": \"Enter your username, roll number, or email\"}}, {{\"name\": \"password\", \"label\": \"Password\", \"description\": \"Enter your password\"}}]}}",
+           "scrollDirection": null
+         }},
+         "assumptions": ["user must enter their credentials directly on the login form before proceeding"],
+         "needsClarification": true
+       }}
+       This causes Privamon to show the user where to fill correct credentials by highlighting the UserName and Password fields directly on the page.
+  3. PROCEEDING TO LOGIN:
+     - When the user has filled their credentials on the page (or clicks Proceed):
+       * Emit action type "click" targeting the "Sign in" or "Login" button (e.g. elementId with text "Sign in", "Login", or type="submit").
+       * In reasoning, state: "Credentials entered. Clicking Sign in to proceed to login."
+  4. VERIFYING LOGIN COMPLETION:
+     - Only return action type "done" when the user has successfully authenticated and navigated to their student dashboard, home feed, or portal interior (i.e. login form is no longer present).
 
 REQUIRED OUTPUT CONTRACT:
 You must return ONLY a single valid JSON object strictly matching this schema with NO markdown code block wrapper or extra prose:
@@ -1793,6 +1825,169 @@ def _normalize_travel_booking_action(
             resp.confidence = max(resp.confidence, 0.95)
             print("[*] Converted premature search click to on-page guidance for user.")
 
+def is_login_task(task: str, sanitized_dom: Union[list, str, None] = None) -> bool:
+    """Checks if the user prompt or DOM relates to login, sign in, or authentication."""
+    clean_task = clean_task_text(task).lower()
+    if re.search(r'\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials|account)\b', clean_task):
+        return True
+    if isinstance(sanitized_dom, list):
+        has_pass = False
+        has_user = False
+        for el in sanitized_dom:
+            inp_type = str(el.get("inputType") or "").lower()
+            auth_role = str(el.get("authRole") or "").lower()
+            txt = f"{el.get('text', '')} {el.get('label', '')} {el.get('placeholder', '')} {el.get('elementId', '')} {el.get('id', '')}".lower()
+            if inp_type == "password" or auth_role == "password_input" or "password" in txt:
+                has_pass = True
+            if auth_role == "username_input" or any(k in txt for k in ["username", "user name", "userid", "user_id", "roll no", "rollno", "email"]):
+                has_user = True
+        if has_pass and has_user:
+            return True
+    return False
+
+def find_login_elements(sanitized_dom: Union[list, str, None]) -> dict:
+    """Extracts username input, password input, and login/sign-in button from sanitized DOM."""
+    result = {
+        "username_input": None,
+        "password_input": None,
+        "login_button": None
+    }
+    if not isinstance(sanitized_dom, list):
+        return result
+
+    for el in sanitized_dom:
+        tag = (el.get("tag") or "").lower()
+        lbl = str(el.get("label") or "").lower()
+        ph = str(el.get("placeholder") or "").lower()
+        txt = str(el.get("text") or "").lower()
+        eid = str(el.get("elementId") or el.get("id") or "").lower()
+        inp_type = str(el.get("inputType") or "").lower()
+        role = str(el.get("role") or "").lower()
+        combined = f"{tag} {lbl} {ph} {txt} {eid} {inp_type}"
+
+        # Password input
+        if not result["password_input"]:
+            if inp_type == "password" or "password" in eid or "password" in ph or "password" in lbl:
+                result["password_input"] = el
+
+        # Username input
+        if not result["username_input"]:
+            if (inp_type in ("text", "email", "") or tag == "input") and inp_type != "password":
+                if any(k in combined for k in ["username", "user name", "userid", "user_id", "roll", "email"]):
+                    result["username_input"] = el
+
+        # Login / Sign in button
+        if not result["login_button"]:
+            if tag in ("button", "a", "input") or role == "button":
+                if any(k in txt for k in ["sign in", "signin", "login", "log in", "submit"]) or \
+                   any(k in eid for k in ["signin", "sign_in", "login", "log_in", "btnsubmit"]):
+                    result["login_button"] = el
+
+    # Fallback: if username_input not found, first text input in form before password
+    if not result["username_input"] and result["password_input"]:
+        for el in sanitized_dom:
+            tag = (el.get("tag") or "").lower()
+            inp_type = str(el.get("inputType") or "").lower()
+            if tag == "input" and inp_type != "password" and el != result["password_input"]:
+                result["username_input"] = el
+                break
+
+    return result
+
+def _normalize_login_action(
+    resp: InterpretResponse,
+    task: str,
+    sanitized_dom: Union[list, str, None],
+    prior_actions: list = None
+) -> None:
+    """
+    Enforces secure login behavior:
+    If credentials are not filled, or if login did not happen after a login attempt,
+    prompts user with ask_user: "Please fill in your correct credentials directly on the page. After filling, click Proceed."
+    When credentials are filled, auto-converts to clicking "Sign in" / "Login".
+    """
+    if not resp or not resp.action:
+        return
+
+    if not is_login_task(task, sanitized_dom):
+        return
+
+    elements = find_login_elements(sanitized_dom)
+    user_el = elements.get("username_input")
+    pass_el = elements.get("password_input")
+    login_btn = elements.get("login_button")
+
+    user_val = (user_el.get("value") or "").strip() if user_el else ""
+    pass_val = (pass_el.get("value") or "").strip() if pass_el else ""
+
+    has_prior_user_fill = False
+    has_prior_pass_fill = False
+    has_prior_login_click = False
+
+    if prior_actions:
+        for act in prior_actions:
+            act_str = str(act).lower()
+            if "fill_form" in act_str or "filled" in act_str:
+                has_prior_user_fill = True
+                has_prior_pass_fill = True
+            if "type" in act_str:
+                if user_el and (user_el.get("elementId") or "").lower() in act_str:
+                    has_prior_user_fill = True
+                if pass_el and (pass_el.get("elementId") or "").lower() in act_str:
+                    has_prior_pass_fill = True
+            if "click" in act_str:
+                if (login_btn and (login_btn.get("elementId") or "").lower() in act_str) or any(k in act_str for k in ["sign in", "login", "signin"]):
+                    has_prior_login_click = True
+
+    is_user_empty = not user_val and not has_prior_user_fill
+    is_pass_empty = not pass_val and not has_prior_pass_fill
+
+    login_btn_id = (login_btn.get("elementId") or login_btn.get("id")) if login_btn else None
+    is_clicking_login = (
+        resp.action.type == "click" and (
+            (login_btn_id and resp.action.targetElementId == login_btn_id)
+            or re.search(r'\b(sign\s*in|login|log\s*in|submit\s+credentials|authenticate)\b', resp.reasoning or '', re.I)
+            or re.search(r'\b(sign\s*in|login|log\s*in|primary\s+action\s+to\s+proceed)\b', str(resp.assumptions or ''), re.I)
+        )
+    )
+
+    # Case 1: Credentials ARE filled on the page -> Proceed to click Sign in / Login!
+    if not is_user_empty and not is_pass_empty:
+        if login_btn and (resp.action.type in ("wait", "ask_user") or resp.needsClarification or resp.action.type == "done"):
+            print("[*] Credentials are filled on page! Auto-converting to Sign in / Login click.")
+            resp.action.type = "click"
+            resp.action.targetElementId = login_btn.get("elementId") or login_btn.get("id") or "login_btn"
+            resp.action.value = None
+            resp.reasoning = "Credentials entered. Clicking Sign in to proceed to login."
+            resp.assumptions = ["Credentials have been entered on the login form."]
+            resp.needsClarification = False
+            resp.confidence = max(resp.confidence, 0.98)
+            return
+
+    # Case 2: Credentials are EMPTY, or prior login click occurred but login did NOT happen:
+    # (User clicked login, but still on login form or credentials empty)
+    if is_user_empty or is_pass_empty or has_prior_login_click:
+        # If model tries to click login without credentials, or emits done while on login page:
+        if is_clicking_login or resp.action.type == "done" or (has_prior_login_click and resp.action.type == "click"):
+            print("[*] Circuit-breaker: Blocked premature login click or done because credentials are empty or login did not succeed!")
+            resp.action.type = "wait"
+            resp.action.targetElementId = None
+            ask_payload = {
+                "title": "Please Fill Correct Credentials",
+                "question": "Please fill in your correct credentials directly on the page. After filling, click Proceed:",
+                "fields": [
+                    {"name": "username", "label": "UserName", "description": "Enter your username, roll number, or email"},
+                    {"name": "password", "label": "Password", "description": "Enter your password"}
+                ]
+            }
+            resp.action.value = json.dumps(ask_payload)
+            resp.action.scrollDirection = None
+            resp.needsClarification = True
+            resp.reasoning = "Please fill in your correct credentials directly on the page. After filling, click Proceed."
+            resp.assumptions = ["User must enter correct credentials on the login form before proceeding."]
+            resp.confidence = max(resp.confidence, 0.95)
+            print("[*] Prompted user to fill correct credentials and click proceed.")
+
 def _normalize_action(
     resp: InterpretResponse,
     task: str,
@@ -1800,10 +1995,13 @@ def _normalize_action(
     prior_actions: list = None
 ) -> InterpretResponse:
     """
-    Normalizes and fixes model actions for search, chat/messaging, travel booking, contact selection, and clicks with text values.
+    Normalizes and fixes model actions for search, chat/messaging, travel booking, login/auth, contact selection, and clicks with text values.
     """
     if not resp or not resp.action:
         return resp
+
+    # 0. Normalize login & authentication tasks (circuit-breaker for login)
+    _normalize_login_action(resp, task, sanitized_dom, prior_actions=prior_actions)
 
     # 1. Normalize travel booking & IRCTC tasks (circuit-breaker for premature search)
     _normalize_travel_booking_action(resp, task, sanitized_dom, prior_actions=prior_actions)

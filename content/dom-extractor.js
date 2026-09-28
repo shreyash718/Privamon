@@ -563,7 +563,7 @@
     const isSearchResult = isYouTube && !isSidebar && Boolean(
       el.closest && el.closest('ytd-video-renderer, ytd-playlist-renderer, ytd-radio-renderer, yt-lockup-view-model, ytd-item-section-renderer, #contents')
     );
-    const rawLink = el.href || el.getAttribute?.('href') || el.closest?.('a')?.href;
+    const rawLink = el.href || el.getAttribute?.('href') || el.closest?.('a')?.href || el.querySelector?.('a[href]')?.href || el.querySelector?.('a[href]')?.getAttribute?.('href');
     const isPlaylist = isYouTube && Boolean(
       (el.closest && el.closest('ytd-playlist-renderer, ytd-radio-renderer')) ||
       /playlist\?list=|\/course/i.test(rawLink || '')
@@ -574,7 +574,9 @@
       el.id === 'video-title' ||
       (tag === 'A' && el.querySelector?.('#video-title'))
     );
-    const useStableId = isYtTitle;
+    // For standard login credentials fields, preserve stable DOM id if present (e.g. UserName, Password)
+    const isAuthField = (el.id && /^(?:username|password|user_id|userid|login|signin|btnsubmit)$/i.test(el.id));
+    const useStableId = isYtTitle || isAuthField;
 
     const entry = {
       elementId: useStableId ? (el.id || 'video-title') : privamonId,
@@ -667,6 +669,26 @@
 
     if (label) entry.label = label;
 
+    // Travel Search Button detection
+    const elBtnText = (el.textContent || el.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+    const elBtnCls = String(el.className || '').toLowerCase();
+    if (tag === 'BUTTON' || role === 'button' || el.type === 'submit') {
+      if (elBtnText.includes('search train') || elBtnText.includes('find train') || elBtnCls.includes('search_btn') || elBtnCls.includes('train_search') || elBtnText === 'search') {
+        entry.travelRole = 'search_button';
+        if (!entry.label) entry.label = 'Search Trains Button';
+      }
+    }
+
+    // Login / Sign in Button detection
+    if (tag === 'BUTTON' || role === 'button' || el.type === 'submit' || (tag === 'A' && (elBtnCls.includes('btn') || el.getAttribute('role') === 'button'))) {
+      if (elBtnText === 'sign in' || elBtnText === 'login' || elBtnText === 'log in' ||
+          elBtnText.includes('sign in') || elBtnText.includes('login') || elBtnText.includes('log in') ||
+          (el.id && /login|signin/i.test(el.id))) {
+        entry.authRole = 'login_button';
+        if (!entry.label) entry.label = 'Sign in Button';
+      }
+    }
+
     // Input-specific attributes (disqualify voice recording buttons from inputs)
     if (isInput && !isAudioRecord) {
       let inputType = 'text';
@@ -714,6 +736,14 @@
       if (autocomplete) {
         entry.autocomplete = autocomplete;
         entry.isSensitiveAutocomplete = SENSITIVE_AUTOCOMPLETE.has(autocomplete);
+      }
+
+      // Tag authentication input roles (username, email, roll number vs password)
+      const rawTextForAuth = `${name || ''} ${el.id || ''} ${placeholder || ''} ${entry.label || ''}`.toLowerCase();
+      if (inputType === 'password' || /pass(word)?|pwd/i.test(rawTextForAuth)) {
+        entry.authRole = 'password_input';
+      } else if (/user(name)?|email|roll(no)?|login/i.test(rawTextForAuth)) {
+        entry.authRole = 'username_input';
       }
 
       // Capture the current value (will be sanitized later if PII)
@@ -791,7 +821,7 @@
       let entry = null;
       const existingId = innerInput.getAttribute('data-privamon-id');
       if (existingId) {
-        entry = elements.find(e => e.id === existingId) || null;
+        entry = elements.find(e => e.elementId === existingId || e.id === existingId) || null;
       }
 
       if (!entry) {
@@ -807,6 +837,32 @@
 
       // Enrich with composite widget metadata
       entry.widgetType = widgetType;
+
+      // Extract formcontrolname from wrapper or inner input
+      const fcn = (wrapper.getAttribute('formcontrolname') || innerInput.getAttribute('formcontrolname') || '').toLowerCase();
+      if (fcn) {
+        entry.formControlName = fcn;
+        if (!entry.name) entry.name = fcn;
+        if (fcn === 'journeyfrom' || fcn.includes('from') || fcn.includes('origin')) {
+          entry.travelRole = 'origin';
+        } else if (fcn === 'journeyto' || fcn.includes('to') || fcn.includes('destination')) {
+          entry.travelRole = 'destination';
+        }
+      }
+
+      // Check aria-label for station hints
+      const aria = (innerInput.getAttribute('aria-label') || wrapper.getAttribute('aria-label') || '').toLowerCase();
+      if (aria.includes('from') && !aria.includes('to')) {
+        entry.travelRole = entry.travelRole || 'origin';
+      } else if (aria.includes('to') && !aria.includes('from')) {
+        entry.travelRole = entry.travelRole || 'destination';
+      }
+
+      // Capture live value directly from innerInput
+      const liveVal = (innerInput.value || innerInput.getAttribute('value') || '').trim();
+      if (liveVal) {
+        entry.value = liveVal;
+      }
 
       // Pull label from wrapper if the inner input doesn't have one
       if (!entry.label) {

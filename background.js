@@ -27,6 +27,24 @@
 
 let offscreenReady = false;
 
+// Clean up any stale running state left over from previous service worker sessions/reloads
+chrome.storage.local.set({
+  privamon_redaction_state: {
+    isRunning: false,
+    stageId: 'complete',
+    status: 'idle',
+    statusText: 'Ready',
+    timestamp: Date.now()
+  },
+  privamon_loop_state: {
+    isRunning: false,
+    step: 0,
+    maxSteps: 5,
+    status: 'idle',
+    message: ''
+  }
+}).catch(() => {});
+
 /**
  * Pings the offscreen document to check if it is loaded, parsed, and listening.
  */
@@ -130,6 +148,9 @@ let currentLoopState = {
   task: ''
 };
 
+// Tracks the most recently used server URL for continueAfterGuidance
+let currentServerUrl = 'https://privamon.onrender.com';
+
 function updateLoopState(stateUpdate) {
   currentLoopState = { ...currentLoopState, ...stateUpdate };
   chrome.storage.local.set({ privamon_loop_state: currentLoopState }).catch(() => {});
@@ -156,7 +177,8 @@ function forwardToPopup(message) {
         isRunning: true,
         stageId: message.stageId,
         status: message.status,
-        statusText: message.statusText
+        statusText: message.statusText,
+        timestamp: Date.now()
       }
     }).catch(() => {});
   }
@@ -166,7 +188,8 @@ function forwardToPopup(message) {
         isRunning: false,
         stageId: message.stageId || 'complete',
         status: message.type === 'pipelineComplete' ? 'done' : 'error',
-        statusText: message.type === 'pipelineComplete' ? 'Redaction complete' : (message.error || 'Error')
+        statusText: message.type === 'pipelineComplete' ? 'Redaction complete' : (message.error || 'Error'),
+        timestamp: Date.now()
       }
     }).catch(() => {});
   }
@@ -316,26 +339,239 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Directly continue task after user filled guidance fields on page
   if (message.action === 'continueAfterGuidance') {
+    sendResponse({ success: true, message: 'Continuing task after guidance' });
     (async () => {
       try {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!tab || !tab.id) return;
+        const tab = await getOperableTab();
+        if (!tab || !tab.id) {
+          console.warn('[Background] continueAfterGuidance: No operable tab found');
+          forwardToPopup({
+            type: 'autopilotProgress',
+            status: 'error',
+            message: 'Could not find active web tab. Please make sure the IRCTC tab is open.'
+          });
+          return;
+        }
 
-        // Directly click the Search Trains button on page if present!
+        // Bring window and tab into focus
+        if (tab.windowId) await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+
+        // First check if current tab is a login page or IRCTC travel page
+        const isLoginTask = /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(message.task || '');
+        const pageTypeRes = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const passInps = Array.from(document.querySelectorAll('input[type="password"], input[name*="pass" i], input[id*="pass" i]'));
+            const userInps = Array.from(document.querySelectorAll('input[name*="user" i], input[id*="user" i], input[placeholder*="user" i], input[autocomplete*="user" i], input[type="email"], input[name*="roll" i], input[id*="roll" i], input[type="text"]'));
+            const hasSubmitBtn = document.querySelector('#btnSubmit, #btnLogin, button[type="submit"], input[type="submit"]') !== null;
+            const isLogin = passInps.length > 0 || hasSubmitBtn;
+
+            const userFilled = userInps.some(i => (i.value || '').trim().length > 0);
+            const passFilled = passInps.some(i => (i.value || '').trim().length > 0);
+
+            const isTravel = window.location.hostname.includes('irctc.co.in') || Boolean(document.querySelector('p-autocomplete, button.search_btn, button.train_Search'));
+
+            return {
+              isLogin,
+              isTravel,
+              userFilled,
+              passFilled
+            };
+          }
+        });
+
+        const pageInfo = pageTypeRes[0]?.result;
+        const isLoginFlow = (pageInfo?.isLogin && !pageInfo?.isTravel) || isLoginTask;
+
+        // ── Handle Login Page Flow ──
+        if (isLoginFlow) {
+          // Click Sign in / Login button directly and trigger submit
+          const loginClickRes = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              // 1. Dispatch input and change on credentials fields to guarantee form validity
+              const allInputs = Array.from(document.querySelectorAll('input, select, textarea'));
+              for (const inp of allInputs) {
+                if ((inp.value || '').trim().length > 0) {
+                  inp.dispatchEvent(new Event('input', { bubbles: true }));
+                  inp.dispatchEvent(new Event('change', { bubbles: true }));
+                  inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                }
+              }
+
+              // 2. Locate sign in / submit button
+              const passInp = document.querySelector('input[type="password"]');
+              let loginBtn = null;
+              if (passInp && passInp.form) {
+                loginBtn = passInp.form.querySelector('#btnSubmit, #btnLogin, input[type="submit"], button[type="submit"], input[value*="Sign in" i], input[value*="Login" i], button');
+              }
+              if (!loginBtn) {
+                loginBtn = document.querySelector('#btnSubmit, #btnLogin, input[type="submit"], button[type="submit"], input[value*="Sign in" i], input[value*="Login" i]');
+              }
+              if (!loginBtn) {
+                const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, a[role="button"]'));
+                loginBtn = buttons.find(b => {
+                  if (b.getAttribute('data-toggle') === 'tab' || b.getAttribute('role') === 'tab') return false;
+                  const text = (b.textContent || b.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                  return text === 'sign in' || text === 'login' || text === 'log in' ||
+                         text.includes('sign in') || text.includes('login') || text.includes('log in');
+                });
+              }
+
+              if (loginBtn) {
+                loginBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                loginBtn.focus();
+                const rect = loginBtn.getBoundingClientRect();
+                const opts = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
+                loginBtn.dispatchEvent(new MouseEvent('mouseover', opts));
+                loginBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+                loginBtn.dispatchEvent(new MouseEvent('mouseup', opts));
+                loginBtn.dispatchEvent(new MouseEvent('click', opts));
+                if (typeof loginBtn.click === 'function') {
+                  loginBtn.click();
+                }
+
+                // If button is in a form, trigger requestSubmit or form submit
+                if (loginBtn.form) {
+                  try {
+                    if (typeof loginBtn.form.requestSubmit === 'function') {
+                      loginBtn.form.requestSubmit(loginBtn);
+                    } else if (typeof loginBtn.form.submit === 'function') {
+                      loginBtn.form.submit();
+                    }
+                  } catch (e) {}
+                }
+
+                return {
+                  success: true,
+                  text: (loginBtn.textContent || loginBtn.value || '').trim().slice(0, 50),
+                  targetId: loginBtn.id || loginBtn.name || 'btnSubmit'
+                };
+              }
+              return { success: false };
+            }
+          });
+
+          const clickedLogin = loginClickRes[0]?.result?.success;
+          const targetId = loginClickRes[0]?.result?.targetId || 'btnSubmit';
+
+          // Halt any running autopilot loop so no background loop competes
+          isLoopCancelled = true;
+          isActionLoopRunning = false;
+
+          // Directly record executed action in chat history
+          const turn = {
+            id: 'turn_' + Date.now(),
+            task: 'Login with entered credentials',
+            timestamp: Date.now(),
+            reasoning: 'Credentials entered on page. Directly clicked Sign in button to proceed to login.',
+            action: {
+              type: 'click',
+              targetElementId: targetId,
+              value: null,
+              scrollDirection: null
+            },
+            actions: [{
+              type: 'click',
+              targetElementId: targetId,
+              value: null,
+              scrollDirection: null
+            }],
+            outcome: 'clicked_successfully',
+            confidence: 0.99,
+            needsClarification: false
+          };
+
+          try {
+            const histData = await chrome.storage.local.get(['privamon_chat_history']);
+            const history = histData.privamon_chat_history || [];
+            history.push(turn);
+            await chrome.storage.local.set({ privamon_chat_history: history.slice(-30) });
+          } catch (e) {}
+
+          forwardToPopup({
+            type: 'pipelineComplete',
+            result: { turn }
+          });
+
+          forwardToPopup({
+            type: 'autopilotProgress',
+            status: 'done',
+            message: clickedLogin ? '✓ Directly clicked Sign in to log in!' : 'Credentials registered on page. Click Sign in to proceed.'
+          });
+
+          return;
+        }
+
+        // ── Handle Travel / IRCTC Flow ──
+        // First verify that From and To are actually filled before clicking search
+        const verifyRes = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            // IRCTC uses p-autocomplete with formcontrolname for station inputs
+            const fromInputs = [
+              document.querySelector('p-autocomplete[formcontrolname="journeyFrom"] input'),
+              document.querySelector('p-autocomplete[formcontrolname*="from" i] input'),
+              document.querySelector('p-autocomplete[formcontrolname*="origin" i] input'),
+              document.querySelector('#origin input, input[aria-label*="from" i], input[placeholder*="from" i]')
+            ];
+            const toInputs = [
+              document.querySelector('p-autocomplete[formcontrolname="journeyTo"] input'),
+              document.querySelector('p-autocomplete[formcontrolname*="to" i] input'),
+              document.querySelector('p-autocomplete[formcontrolname*="destination" i] input'),
+              document.querySelector('#destination input, input[aria-label*="to" i], input[placeholder*="to" i]')
+            ];
+            // Fallback: get all p-autocomplete inputs ordered by DOM position
+            const allAutos = Array.from(document.querySelectorAll('p-autocomplete input, .ui-autocomplete input'));
+            const fromInp = fromInputs.find(el => el) || allAutos[0];
+            const toInp = toInputs.find(el => el) || allAutos[1];
+            const fromVal = (fromInp?.value || fromInp?.getAttribute('value') || '').trim();
+            const toVal = (toInp?.value || toInp?.getAttribute('value') || '').trim();
+            return { fromFilled: fromVal.length > 0, toFilled: toVal.length > 0, fromVal, toVal };
+          }
+        });
+
+        const verify = verifyRes[0]?.result;
+        if (verify && (!verify.fromFilled || !verify.toFilled)) {
+          console.warn('[Background] continueAfterGuidance: Stations still empty! From:', verify.fromVal, 'To:', verify.toVal);
+          forwardToPopup({
+            type: 'autopilotProgress',
+            status: 'clarification',
+            message: `Stations still empty — please fill From and To stations directly on the IRCTC page first.`
+          });
+          // Re-highlight
+          highlightRequiredFieldsOnTab(tab.id, []).catch(() => {});
+          return;
+        }
+
+        // Click the Search Trains button on page with robust detection
         const searchRes = await chrome.scripting.executeScript({
           target: { tabId: tab.id },
           func: () => {
-            const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
-            const searchBtn = buttons.find(b => {
-              const text = (b.textContent || b.value || '').toLowerCase();
-              const cls = String(b.className || '').toLowerCase();
-              const id = String(b.id || '').toLowerCase();
-              return text.includes('search train') || text.includes('find train') || cls.includes('search_btn') || cls.includes('train_search');
-            });
+            // Strategy 1: IRCTC-specific selectors
+            let searchBtn = document.querySelector('button.search_btn, button.train_Search, button[label="Find Trains"], button[label*="Search" i]');
+            // Strategy 2: Form submit buttons
+            if (!searchBtn) searchBtn = document.querySelector('form button[type="submit"], form input[type="submit"]');
+            // Strategy 3: Text content match
+            if (!searchBtn) {
+              const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn, a.search_btn'));
+              searchBtn = buttons.find(b => {
+                const text = (b.textContent || b.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                const cls = String(b.className || '').toLowerCase();
+                return text.includes('search train') || text.includes('find train') ||
+                       text.includes('search') || cls.includes('search_btn') || cls.includes('train_search');
+              });
+            }
             if (searchBtn) {
               searchBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              const rect = searchBtn.getBoundingClientRect();
+              const opts = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+              searchBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+              searchBtn.dispatchEvent(new MouseEvent('mouseup', opts));
+              searchBtn.dispatchEvent(new MouseEvent('click', opts));
               searchBtn.click();
-              return { success: true, text: searchBtn.textContent?.trim() || 'Search Trains' };
+              return { success: true, text: (searchBtn.textContent || searchBtn.value || '').trim().slice(0, 50) };
             }
             return { success: false };
           }
@@ -344,22 +580,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const clicked = searchRes[0]?.result?.success;
         if (clicked) {
           console.log('[Background] continueAfterGuidance: Successfully clicked Search Trains button on page!');
+
+          // Halt any running autopilot loop
+          isLoopCancelled = true;
+          isActionLoopRunning = false;
+
+          // Directly record executed action in chat history
+          const turn = {
+            id: 'turn_' + Date.now(),
+            task: 'Search trains with entered details',
+            timestamp: Date.now(),
+            reasoning: 'Journey stations entered on page. Directly clicked Search Trains button.',
+            action: { type: 'click', targetElementId: 'search_btn', value: null, scrollDirection: null },
+            actions: [{ type: 'click', targetElementId: 'search_btn', value: null, scrollDirection: null }],
+            outcome: 'clicked_successfully',
+            confidence: 0.99,
+            needsClarification: false
+          };
+          try {
+            const histData = await chrome.storage.local.get(['privamon_chat_history']);
+            const history = histData.privamon_chat_history || [];
+            history.push(turn);
+            await chrome.storage.local.set({ privamon_chat_history: history.slice(-30) });
+          } catch (e) {}
+
           forwardToPopup({
-            type: 'autopilotProgress',
-            status: 'executing',
-            message: 'Clicked Search Trains! Waiting for train results to load...'
+            type: 'pipelineComplete',
+            result: { turn }
           });
 
-          // Wait 2.2s for trains to render, then run agent analysis on results
-          await new Promise(r => setTimeout(r, 2200));
-          await handleChatWithAgent('Inspect train search results on page', currentServerUrl);
+          forwardToPopup({
+            type: 'autopilotProgress',
+            status: 'done',
+            message: '✓ Directly clicked Search Trains with entered station details!'
+          });
           return;
         }
 
-        // If no direct Search Trains button, resume normal chat turn
-        await handleChatWithAgent(message.task || 'Search trains now', currentServerUrl);
+        // If no direct Search Trains button, resume normal chat turn safely
+        console.log('[Background] continueAfterGuidance: No Search button found, resuming normal agent flow.');
+        try {
+          await handleChatWithAgent(message.task || 'Proceed with entered details now', currentServerUrl);
+        } catch (serverErr) {
+          forwardToPopup({
+            type: 'autopilotProgress',
+            status: 'done',
+            message: 'Proceeded with entered details.'
+          });
+        }
       } catch (err) {
         console.error('[Background] continueAfterGuidance error:', err);
+        forwardToPopup({
+          type: 'autopilotProgress',
+          status: 'error',
+          message: `Error continuing: ${err.message}`
+        });
       }
     })();
     return true;
@@ -693,42 +968,108 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (fieldsList) => {
-        // Collect candidate inputs on page
-        const pAutos = Array.from(document.querySelectorAll('p-autocomplete, .ui-autocomplete'));
-        let fromEl = null;
-        let toEl = null;
+        // ── Robust IRCTC field detection using multiple selector strategies ──
+        // IRCTC uses PrimeNG p-autocomplete with Angular formcontrolname attributes:
+        //   - From: <p-autocomplete formcontrolname="journeyFrom">
+        //   - To:   <p-autocomplete formcontrolname="journeyTo">
+        //   - Date: <p-calendar formcontrolname="journeyDate">
+        //   - Quota:<p-dropdown formcontrolname="journeyQuota" or journeyClass>
 
-        if (pAutos.length >= 2) {
-          fromEl = pAutos[0].querySelector('input') || pAutos[0];
-          toEl = pAutos[1].querySelector('input') || pAutos[1];
-        } else {
-          const allInputs = Array.from(document.querySelectorAll('input:not([type="hidden"]), [role="searchbox"], [role="combobox"]'));
-          fromEl = allInputs.find(el => {
-            const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-            const id = (el.id || '').toLowerCase();
-            const name = (el.name || '').toLowerCase();
-            return ph.includes('from') || aria.includes('from') || id.includes('origin') || id.includes('from') || name.includes('origin');
-          });
-
-          toEl = allInputs.find(el => {
-            if (el === fromEl) return false;
-            const ph = (el.placeholder || el.getAttribute('placeholder') || '').toLowerCase();
-            const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-            const id = (el.id || '').toLowerCase();
-            const name = (el.name || '').toLowerCase();
-            return ph.includes('to') || aria.includes('to') || id.includes('destination') || id.includes('dest') || name.includes('destination');
-          });
+        function findFromInput() {
+          // Priority 1: IRCTC-specific formcontrolname
+          let el = document.querySelector('p-autocomplete[formcontrolname="journeyFrom"] input');
+          if (el) return el;
+          el = document.querySelector('p-autocomplete[formcontrolname*="from" i] input');
+          if (el) return el;
+          el = document.querySelector('p-autocomplete[formcontrolname*="origin" i] input');
+          if (el) return el;
+          // Priority 2: ID-based
+          el = document.querySelector('#origin input, #fromStation input, input#origin');
+          if (el) return el;
+          // Priority 3: aria-label / placeholder
+          el = document.querySelector('input[aria-label*="from" i], input[placeholder*="from" i]');
+          if (el) return el;
+          // Priority 4: First p-autocomplete
+          const allAutos = document.querySelectorAll('p-autocomplete input, .ui-autocomplete input');
+          if (allAutos.length >= 1) return allAutos[0];
+          return null;
         }
 
-        // Travel / Journey date
-        const dateEl = document.querySelector('p-calendar input, .ui-calendar input, input[type="date"], input[placeholder*="date" i], input[placeholder*="dd/mm" i], input[aria-label*="date" i]')
-          || document.querySelector('p-calendar');
+        function findToInput() {
+          let el = document.querySelector('p-autocomplete[formcontrolname="journeyTo"] input');
+          if (el) return el;
+          el = document.querySelector('p-autocomplete[formcontrolname*="to" i]:not([formcontrolname*="auto" i]) input');
+          if (el) return el;
+          el = document.querySelector('p-autocomplete[formcontrolname*="destination" i] input');
+          if (el) return el;
+          el = document.querySelector('#destination input, #toStation input, input#destination');
+          if (el) return el;
+          el = document.querySelector('input[aria-label*="going to" i], input[aria-label*="to" i]:not([aria-label*="auto" i]), input[placeholder*="to" i]:not([placeholder*="auto" i])');
+          if (el) return el;
+          const allAutos = document.querySelectorAll('p-autocomplete input, .ui-autocomplete input');
+          if (allAutos.length >= 2) return allAutos[1];
+          return null;
+        }
+
+        function findDateInput() {
+          let el = document.querySelector('p-calendar[formcontrolname*="date" i] input, p-calendar[formcontrolname*="Date" i] input');
+          if (el) return el;
+          el = document.querySelector('p-calendar input, .ui-calendar input');
+          if (el) return el;
+          el = document.querySelector('input[type="date"], input[placeholder*="date" i], input[placeholder*="dd/mm" i], input[aria-label*="date" i]');
+          if (el) return el;
+          // Fallback: p-calendar element itself
+          const pCal = document.querySelector('p-calendar');
+          if (pCal) return pCal;
+          return null;
+        }
+
+        function findClassDropdown() {
+          let el = document.querySelector('p-dropdown[formcontrolname*="class" i], p-dropdown[formcontrolname*="quota" i], p-dropdown[formcontrolname*="Class" i]');
+          if (el) return el;
+          el = document.querySelector('p-dropdown, .ui-dropdown');
+          if (el) return el;
+          el = document.querySelector('select[name*="class" i], select[name*="quota" i]');
+          return el;
+        }
+
+        function findUsernameInput() {
+          let el = document.querySelector('input[name*="user" i], input[id*="user" i], input[placeholder*="user" i], input[autocomplete*="user" i], input[type="email"], input[name*="email" i], input[id*="email" i], input[name*="roll" i], input[id*="roll" i]');
+          if (el) return el;
+          const pass = document.querySelector('input[type="password"]');
+          if (pass && pass.form) {
+            const inps = Array.from(pass.form.querySelectorAll('input:not([type="hidden"]):not([type="password"]):not([type="submit"]):not([type="button"])'));
+            if (inps.length > 0) return inps[0];
+          }
+          return null;
+        }
+
+        function findPasswordInput() {
+          let el = document.querySelector('input[type="password"]');
+          if (el) return el;
+          return document.querySelector('input[name*="pass" i], input[id*="pass" i], input[placeholder*="pass" i]');
+        }
+
+        const fromEl = findFromInput();
+        const toEl = findToInput();
+        const dateEl = findDateInput();
+        const classEl = findClassDropdown();
+        const userEl = findUsernameInput();
+        const passEl = findPasswordInput();
 
         const matchedElements = [];
-        if (fromEl) matchedElements.push({ el: fromEl, label: 'From Station (Origin)' });
-        if (toEl && toEl !== fromEl) matchedElements.push({ el: toEl, label: 'To Station (Destination)' });
-        if (dateEl) matchedElements.push({ el: dateEl, label: 'Journey Date' });
+        const isLoginFocus = (fieldsList && fieldsList.some(f => /user|pass|login|credential/i.test(f.name || f.label || ''))) ||
+                             (Boolean(passEl) && !fromEl && !toEl);
+
+        if (isLoginFocus || (userEl && passEl)) {
+          if (userEl) matchedElements.push({ el: userEl, label: 'UserName' });
+          if (passEl) matchedElements.push({ el: passEl, label: 'Password' });
+        } else {
+          if (fromEl) matchedElements.push({ el: fromEl, label: 'From Station (Origin)' });
+          if (toEl && toEl !== fromEl) matchedElements.push({ el: toEl, label: 'To Station (Destination)' });
+          if (dateEl) matchedElements.push({ el: dateEl, label: 'Journey Date' });
+          if (classEl) matchedElements.push({ el: classEl, label: 'Class / Quota' });
+        }
 
         // If no matches found, fallback to empty inputs
         if (matchedElements.length === 0) {
@@ -739,6 +1080,15 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
         }
 
         if (matchedElements.length === 0) return false;
+
+        // Scroll the primary field into view
+        try {
+          matchedElements[0].el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch (e) {}
+
+        // Remove all prior highlights and badges before applying new ones
+        document.querySelectorAll('.privamon-field-highlight').forEach(el => el.classList.remove('privamon-field-highlight'));
+        document.querySelectorAll('.privamon-guidance-badge').forEach(el => el.remove());
 
         // Ensure keyframe pulse animation and badge styles exist
         if (!document.getElementById('privamon-guidance-style')) {
@@ -758,7 +1108,7 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
             }
             .privamon-guidance-badge {
               position: absolute;
-              top: -26px;
+              top: -28px;
               left: 0;
               background: linear-gradient(135deg, #6366f1, #8b5cf6);
               color: #ffffff;
@@ -777,44 +1127,43 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
           document.head.appendChild(style);
         }
 
-        // Apply highlights
+        // Apply highlights to each matched element
         matchedElements.forEach(({ el, label }) => {
-          const target = (el.tagName === 'P-AUTOCOMPLETE' || el.tagName === 'P-CALENDAR')
-            ? (el.querySelector('input') || el)
-            : el;
-
-          // Remove any existing highlight/badge on target or parent
-          target.classList.remove('privamon-field-highlight');
-          const oldBadge = target.parentElement?.querySelector('.privamon-guidance-badge');
-          if (oldBadge) oldBadge.remove();
+          // Resolve to visible input child if wrapper component
+          let target = el;
+          if (['P-AUTOCOMPLETE', 'P-CALENDAR', 'P-DROPDOWN'].includes(el.tagName)) {
+            target = el.querySelector('input, .p-dropdown-label, .ui-dropdown-label') || el;
+          }
 
           target.classList.add('privamon-field-highlight');
 
-          if (target.parentElement) {
-            const badge = document.createElement('div');
-            badge.className = 'privamon-guidance-badge';
-            badge.textContent = `👉 Fill ${label}`;
-            try {
-              const currentPos = window.getComputedStyle(target.parentElement).position;
-              if (currentPos === 'static') {
-                target.parentElement.style.position = 'relative';
-              }
-              target.parentElement.appendChild(badge);
-            } catch (e) {}
-          }
+          // Create floating badge above the field
+          const badgeAnchor = target.parentElement || target;
+          const badge = document.createElement('div');
+          badge.className = 'privamon-guidance-badge';
+          badge.textContent = `👉 Fill ${label}`;
+          try {
+            const currentPos = window.getComputedStyle(badgeAnchor).position;
+            if (currentPos === 'static') {
+              badgeAnchor.style.position = 'relative';
+            }
+            badgeAnchor.appendChild(badge);
+          } catch (e) {}
 
+          // Auto-remove highlight on user interaction or after 8s
           const removeHighlight = () => {
             target.classList.remove('privamon-field-highlight');
-            const b = target.parentElement?.querySelector('.privamon-guidance-badge');
+            const b = badgeAnchor.querySelector('.privamon-guidance-badge');
             if (b) b.remove();
             target.removeEventListener('input', removeHighlight);
             target.removeEventListener('focus', removeHighlight);
           };
           target.addEventListener('input', removeHighlight, { once: true });
-          setTimeout(removeHighlight, 6000);
+          target.addEventListener('focus', removeHighlight, { once: true });
+          setTimeout(removeHighlight, 8000);
         });
 
-        // Scroll to first empty target or first target
+        // Scroll to first empty target
         const emptyTarget = matchedElements.find(m => {
           const inp = m.el.querySelector ? (m.el.querySelector('input') || m.el) : m.el;
           return !inp.value || inp.value.trim() === '';
@@ -842,12 +1191,19 @@ async function highlightRequiredFieldsOnTab(tabId, guidanceFields = []) {
  * when origin/destination stations on travel booking pages (like IRCTC) are empty,
  * and to automatically trigger Search Trains when origin and destination are filled.
  */
-function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl) {
+function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl, liveStationInfo = null) {
   if (!action) return null;
+  // NEVER block task completion
+  if (action.type === 'done') return null;
 
   const url = tabUrl || '';
   const isIrctcUrl = url.includes('irctc.co.in');
-  const isTravelTask = /\b(book|ticket|train|irctc|journey|flight|bus|reservation|seat)\b/i.test(task || '');
+  const isTravelTask = /\b(book|ticket|train|irctc|journey|reservation|railway)\b/i.test(task || '');
+
+  // CRITICAL: NEVER activate unless on IRCTC or user specifically asked for travel/trains
+  if (!isIrctcUrl && !isTravelTask) {
+    return null;
+  }
 
   let fromElement = null;
   let toElement = null;
@@ -855,30 +1211,22 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
   let searchElement = null;
 
   if (Array.isArray(domElements)) {
-    // 1. Check for autocomplete station inputs:
-    const autocompletes = domElements.filter(el => {
-      const w = String(el.widgetType || '').toLowerCase();
-      const tag = String(el.tag || '').toLowerCase();
-      const ph = String(el.placeholder || el.attributes?.placeholder || '').toLowerCase();
-      return w === 'autocomplete' || tag === 'p-autocomplete' || (tag === 'input' && (ph.startsWith('from') || ph.startsWith('to')));
-    });
-
-    if (autocompletes.length >= 2) {
-      fromElement = autocompletes[0];
-      toElement = autocompletes[1];
-    }
-
+    // 1. Check for explicit origin / destination travel roles or formControlNames
     for (const el of domElements) {
-      const elId = String(el.elementId || el.id || '');
-      const text = String(el.text || '').toLowerCase();
-      const label = String(el.label || '').toLowerCase();
+      const role = String(el.travelRole || '').toLowerCase();
+      const fcn = String(el.formControlName || el.name || '').toLowerCase();
       const ph = String(el.placeholder || el.attributes?.placeholder || '').toLowerCase();
+      const label = String(el.label || '').toLowerCase();
+      const elId = String(el.elementId || el.id || '').toLowerCase();
       const tag = String(el.tag || '').toLowerCase();
+      const text = String(el.text || '').toLowerCase();
       const cls = String(el.className || '').toLowerCase();
+      const aria = String(el.ariaLabel || el.attributes?.['aria-label'] || '').toLowerCase();
 
       // Search button
       if (!searchElement) {
-        if (text.includes('search train') || text.includes('find train') || cls.includes('search_btn') || cls.includes('train_search') ||
+        if (role === 'search_button' || text.includes('search train') || text.includes('find train') ||
+            cls.includes('search_btn') || cls.includes('train_search') ||
             (tag === 'button' && (text.includes('search') || label.includes('search')))) {
           searchElement = el;
         } else if (action.targetElementId && (elId === action.targetElementId || elId.includes(action.targetElementId))) {
@@ -888,16 +1236,21 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
         }
       }
 
-      // From / Origin fallback
+      // From / Origin
       if (!fromElement) {
-        if (ph.startsWith('from') || elId.includes('origin') || (label.startsWith('from') && !label.includes('to'))) {
+        if (role === 'origin' || fcn === 'journeyfrom' || fcn.includes('origin') || fcn.includes('from') ||
+            ph.startsWith('from') || elId.includes('origin') ||
+            ((label.includes('from') || aria.includes('from')) && !label.includes('to'))) {
           fromElement = el;
         }
       }
 
-      // To / Destination fallback
+      // To / Destination
       if (!toElement) {
-        if (el !== fromElement && (ph.startsWith('to') || elId.includes('destination') || elId.includes('dest') || (label.startsWith('to') && !label.includes('from')))) {
+        if (el !== fromElement && (
+            role === 'destination' || fcn === 'journeyto' || fcn.includes('destination') || fcn.includes('to') ||
+            ph.startsWith('to') || elId.includes('destination') || elId.includes('dest') ||
+            ((label.includes('to') || aria.includes('to')) && !label.includes('from')))) {
           toElement = el;
         }
       }
@@ -909,9 +1262,22 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
         }
       }
     }
+
+    // Fallback: autocomplete inputs in DOM order
+    if (!fromElement || !toElement) {
+      const autocompletes = domElements.filter(el => {
+        const w = String(el.widgetType || '').toLowerCase();
+        const tag = String(el.tag || '').toLowerCase();
+        return w === 'autocomplete' || tag === 'p-autocomplete';
+      });
+      if (autocompletes.length >= 2) {
+        if (!fromElement) fromElement = autocompletes[0];
+        if (!toElement) toElement = autocompletes[1];
+      }
+    }
   }
 
-  const isTravelContext = isIrctcUrl || isTravelTask || fromElement !== null || toElement !== null;
+  const isTravelContext = isIrctcUrl || isTravelTask;
   const reasonText = String(reasoning || '').toLowerCase();
   const targetId = String(action.targetElementId || '').toLowerCase();
   const isSearchClick = (action.type === 'click' && (
@@ -920,19 +1286,25 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
     reasonText.includes('proceed with booking') ||
     reasonText.includes('find train') ||
     reasonText.includes('find trains') ||
-    targetId.includes('search') ||
-    (searchElement !== null)
+    (searchElement !== null && (targetId.includes('search') || targetId.includes('train') || targetId === searchElement.elementId))
   ));
 
-  const fromVal = String(fromElement?.value || fromElement?.text || '').trim();
-  const toVal = String(toElement?.value || toElement?.text || '').trim();
-  const fromEmpty = !fromElement || fromVal === '';
-  const toEmpty = !toElement || toVal === '';
+  let fromVal = String(fromElement?.value || fromElement?.attributes?.value || fromElement?.text || '').trim();
+  let toVal = String(toElement?.value || toElement?.attributes?.value || toElement?.text || '').trim();
+
+  // If live verified values from active tab are provided, prefer them
+  if (liveStationInfo) {
+    if (liveStationInfo.fromVal) fromVal = liveStationInfo.fromVal;
+    if (liveStationInfo.toVal) toVal = liveStationInfo.toVal;
+  }
+
+  const fromEmpty = fromVal === '';
+  const toEmpty = toVal === '';
 
   // IF FROM AND TO ARE FILLED:
   if (isTravelContext && !fromEmpty && !toEmpty) {
-    // If the model emitted wait/ask_user or needs clarification, convert to click Search Trains button!
-    if (action.type === 'wait' || action.type === 'ask_user' || reasoning.toLowerCase().includes('fill') || action.type === 'done') {
+    // If the model emitted wait/ask_user with fill, convert to click Search Trains button!
+    if (action.type === 'wait' || action.type === 'ask_user') {
       const sId = (searchElement?.elementId || searchElement?.id || 'button_search');
       console.log(`[Background] Stations are filled (From="${fromVal}", To="${toVal}"). Auto-converting to click Search Trains (${sId})!`);
       return {
@@ -942,7 +1314,7 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
           value: null,
           scrollDirection: null
         },
-        reasoning: `Stations are filled ("${fromVal}" to "${toVal}"). Clicking Search Trains to proceed with booking.`,
+        reasoning: `Stations are filled ("${fromVal}" to "${toVal}"). Clicking Search Trains to view available trains.`,
         assumptions: ['Origin and destination stations are filled on page.'],
         needsClarification: false
       };
@@ -951,7 +1323,7 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
   }
 
   // IF FROM OR TO ARE EMPTY, BLOCK SEARCH:
-  if (isTravelContext && (isSearchClick || (action.type === 'done' && (fromElement || toElement)))) {
+  if (isTravelContext && isSearchClick) {
     if (fromEmpty || toEmpty) {
       console.warn('[Background] Travel Circuit-Breaker: Blocked premature search click because From/To are empty!');
       const taskStr = task || '';
@@ -1013,6 +1385,115 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
   return null;
 }
 
+function checkMissingLoginCredentials(action, reasoning, task, domElements, tabUrl, liveLoginInfo = null) {
+  if (!action) return null;
+  // NEVER block task completion (e.g. user already logged into dashboard)
+  if (action.type === 'done') return null;
+
+  let userElement = null;
+  let passElement = null;
+  let loginElement = null;
+
+  if (Array.isArray(domElements)) {
+    for (const el of domElements) {
+      const authRole = String(el.authRole || '').toLowerCase();
+      const inpType = String(el.inputType || el.type || '').toLowerCase();
+      const ph = String(el.placeholder || el.attributes?.placeholder || '').toLowerCase();
+      const label = String(el.label || '').toLowerCase();
+      const elId = String(el.elementId || el.id || '').toLowerCase();
+      const name = String(el.name || '').toLowerCase();
+      const tag = String(el.tag || '').toLowerCase();
+      const text = String(el.text || '').toLowerCase();
+      const role = String(el.role || '').toLowerCase();
+
+      // Password input
+      if (!passElement) {
+        if (authRole === 'password_input' || inpType === 'password' || elId.includes('password') || ph.includes('password') || name.includes('password')) {
+          passElement = el;
+        }
+      }
+
+      // Username input
+      if (!userElement) {
+        if (authRole === 'username_input' || (inpType !== 'password' && (
+          elId === 'username' || elId === 'userid' || elId.includes('txtuser') ||
+          ph.includes('username') || name === 'username' || name.includes('user') ||
+          elId.includes('roll') || name.includes('roll') || label.includes('username') || label.includes('roll')
+        ))) {
+          userElement = el;
+        }
+      }
+
+      // Login / Sign in submit button (must be a button or submit input, NOT a container div or tab)
+      if (!loginElement) {
+        const isClickable = tag === 'button' || tag === 'input' || (tag === 'a' && el.className?.includes('btn'));
+        const isTab = el.attributes?.['data-toggle'] === 'tab' || role === 'tab';
+        if (isClickable && !isTab && (
+          authRole === 'login_button' ||
+          elId === 'btnsubmit' || elId === 'btnlogin' || elId.includes('btnsubmit') || elId.includes('btnlogin') ||
+          (inpType === 'submit' && (text.includes('sign in') || text.includes('login') || text.includes('submit'))) ||
+          text === 'sign in' || text === 'login' || text === 'log in' ||
+          text.includes('sign in') || text.includes('login') || text.includes('log in')
+        )) {
+          loginElement = el;
+        }
+      }
+    }
+  }
+
+  // If there is NO password input on the current page, this is NOT a login screen (e.g. user is on dashboard)!
+  if (!passElement) {
+    return null;
+  }
+
+  let userVal = String(userElement?.value || userElement?.attributes?.value || '').trim();
+  let passVal = String(passElement?.value || passElement?.attributes?.value || '').trim();
+
+  if (liveLoginInfo) {
+    if (liveLoginInfo.userVal) userVal = liveLoginInfo.userVal;
+    if (liveLoginInfo.passVal) passVal = liveLoginInfo.passVal;
+  }
+
+  const userEmpty = userVal === '';
+  const passEmpty = passVal === '';
+
+  const reasonText = String(reasoning || '').toLowerCase();
+  const targetId = String(action.targetElementId || '').toLowerCase();
+  const isLoginClick = (action.type === 'click' && (
+    reasonText.includes('sign in') || reasonText.includes('login') || reasonText.includes('log in') ||
+    (loginElement && (targetId === loginElement.elementId || targetId === loginElement.id)) ||
+    targetId === 'btnsubmit' || targetId === 'btnlogin'
+  ));
+
+  // IF CREDENTIALS ARE EMPTY: ONLY block premature click on the submit button!
+  if (userEmpty || passEmpty) {
+    if (isLoginClick) {
+      console.warn('[Background] Login Circuit-Breaker: Blocked premature login click because credentials are empty!');
+      return {
+        action: {
+          type: 'wait',
+          targetElementId: null,
+          value: 'Please fill in your correct credentials directly on the page. After filling, click Proceed.',
+          scrollDirection: null
+        },
+        reasoning: 'Please fill in your correct credentials directly on the page. After filling, click Proceed.',
+        assumptions: ['User must enter their credentials on the login form before proceeding.'],
+        needsClarification: true,
+        guidance: {
+          title: 'Please Fill Correct Credentials',
+          question: 'Please fill in your correct credentials directly on the page. After filling, click Proceed:',
+          fields: [
+            { name: 'username', label: 'UserName', description: 'Enter your username, roll number, or email' },
+            { name: 'password', label: 'Password', description: 'Enter your password' }
+          ]
+        }
+      };
+    }
+  }
+
+  return null;
+}
+
 /**
  * Conversational agent query flow:
  * 1. Capture screenshot of the active tab.
@@ -1023,6 +1504,8 @@ function checkMissingTravelDetails(action, reasoning, task, domElements, tabUrl)
  * 6. Return response to popup / side panel.
  */
 async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.com') {
+  // Track server URL for continueAfterGuidance
+  if (serverUrl) currentServerUrl = serverUrl;
   const queryText = (task && task.trim()) ? task.trim() : 'Analyze screen and recommend what to do';
   console.log('[Background] Chat with agent requested. Query:', queryText);
 
@@ -1036,7 +1519,15 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
     const tab = await getOperableTab();
     await waitForTabReady(tab.id, 6000);
 
-    // Step 1: Capture screenshot
+    // Bring tab and window into active focus before capturing screenshot
+    if (tab?.windowId) {
+      await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+    }
+    if (tab?.id) {
+      await chrome.tabs.update(tab.id, { active: true }).catch(() => {});
+    }
+
+    // Step 1: Capture screenshot with 6.5s timeout race
     forwardToPopup({
       type: 'pipelineProgress',
       stageId: 'capture',
@@ -1047,16 +1538,19 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
     let screenshot = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        screenshot = await chrome.tabs.captureVisibleTab(tab?.windowId || null, { format: 'png' });
+        screenshot = await Promise.race([
+          chrome.tabs.captureVisibleTab(tab?.windowId || null, { format: 'png' }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('captureVisibleTab timed out after 6.5s')), 6500))
+        ]);
         if (screenshot) break;
       } catch (capErr) {
         console.warn(`[Background] captureVisibleTab retry ${attempt + 1}:`, capErr.message);
         await new Promise(r => setTimeout(r, 650));
       }
     }
-    if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure page is visible.');
+    if (!screenshot) throw new Error('Failed to capture visible tab screenshot. Ensure page is visible and active.');
 
-    // Step 2: Extract DOM
+    // Step 2: Extract DOM with 7.5s timeout race
     forwardToPopup({
       type: 'pipelineProgress',
       stageId: 'dom',
@@ -1067,10 +1561,13 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
     let domData = null;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const domResults = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
-        });
+        const domResults = await Promise.race([
+          chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            files: ['content/dom-range-mapper.js', 'content/dom-extractor.js'],
+          }),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('DOM extraction timed out after 7.5s')), 7500))
+        ]);
         domData = domResults[0]?.result;
         if (domData) break;
       } catch (scriptErr) {
@@ -1144,10 +1641,43 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
       pageTitle: tab.title || 'Web Page'
     };
 
+    // Check live station values directly on IRCTC tab for 100% accurate detection
+    let liveStationInfo = null;
+    if (tab?.id && tab.url && tab.url.includes('irctc.co.in')) {
+      try {
+        const liveRes = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => {
+            const fromInp = document.querySelector('p-autocomplete[formcontrolname="journeyFrom"] input')
+              || document.querySelector('p-autocomplete[formcontrolname*="from" i] input, p-autocomplete[formcontrolname*="origin" i] input')
+              || (document.querySelectorAll('p-autocomplete input, .ui-autocomplete input')[0])
+              || document.querySelector('input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
+            const toInp = document.querySelector('p-autocomplete[formcontrolname="journeyTo"] input')
+              || document.querySelector('p-autocomplete[formcontrolname*="destination" i] input')
+              || (document.querySelectorAll('p-autocomplete input, .ui-autocomplete input')[1])
+              || document.querySelector('input[placeholder*="to" i]:not([placeholder*="auto" i]), input[aria-label*="to" i]:not([aria-label*="auto" i]), #destination input');
+            const fromVal = (fromInp?.value || fromInp?.getAttribute('value') || '').trim();
+            const toVal = (toInp?.value || toInp?.getAttribute('value') || '').trim();
+
+            const uInp = document.querySelector('input[name*="user" i], input[id*="user" i], input[placeholder*="user" i], input[autocomplete*="user" i], input[type="email"], input[name*="roll" i], input[id*="roll" i]');
+            const pInp = document.querySelector('input[type="password"], input[name*="pass" i], input[id*="pass" i]');
+            const userVal = (uInp?.value || '').trim();
+            const passVal = (pInp?.value || '').trim();
+
+            return {
+              fromVal, toVal, isFilled: fromVal.length > 0 && toVal.length > 0,
+              userVal, passVal
+            };
+          }
+        });
+        liveStationInfo = liveRes[0]?.result;
+      } catch (e) {}
+    }
+
     // Circuit breaker: Intercept premature search clicks when From/To are empty on IRCTC/travel pages
-    const travelIntercept = checkMissingTravelDetails(turn.action, turn.reasoning, queryText, domData?.elements, tab?.url);
+    const travelIntercept = checkMissingTravelDetails(turn.action, turn.reasoning, queryText, domData?.elements, tab?.url, liveStationInfo);
     if (travelIntercept) {
-      console.log('[Background] Circuit-breaker intercepted premature travel search in single turn:', travelIntercept);
+      console.log('[Background] Circuit-breaker intercepted travel search in turn:', travelIntercept);
       turn.action = travelIntercept.action;
       turn.actions = [travelIntercept.action];
       if (travelIntercept.reasoning) turn.reasoning = travelIntercept.reasoning;
@@ -1155,9 +1685,26 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
       if (travelIntercept.needsClarification !== undefined) turn.needsClarification = travelIntercept.needsClarification;
       if (travelIntercept.guidance) turn.guidance = travelIntercept.guidance;
 
-      // Automatically highlight fields on active tab to guide the user visually!
-      if (tab?.id) {
+      // Automatically highlight fields on active tab to guide the user visually if still empty
+      if (tab?.id && turn.needsClarification) {
         highlightRequiredFieldsOnTab(tab.id, travelIntercept.guidance?.fields || []).catch(() => {});
+      }
+    }
+
+    // Circuit breaker: Intercept premature login clicks or failed logins when credentials are empty
+    const loginIntercept = checkMissingLoginCredentials(turn.action, turn.reasoning, queryText, domData?.elements, tab?.url, liveStationInfo);
+    if (loginIntercept) {
+      console.log('[Background] Circuit-breaker intercepted login in turn:', loginIntercept);
+      turn.action = loginIntercept.action;
+      turn.actions = [loginIntercept.action];
+      if (loginIntercept.reasoning) turn.reasoning = loginIntercept.reasoning;
+      if (loginIntercept.assumptions) turn.assumptions = loginIntercept.assumptions;
+      if (loginIntercept.needsClarification !== undefined) turn.needsClarification = loginIntercept.needsClarification;
+      if (loginIntercept.guidance) turn.guidance = loginIntercept.guidance;
+
+      // Automatically highlight credentials fields on active tab to show user where to fill them
+      if (tab?.id && turn.needsClarification) {
+        highlightRequiredFieldsOnTab(tab.id, loginIntercept.guidance?.fields || []).catch(() => {});
       }
     }
 
@@ -1205,8 +1752,24 @@ async function handleChatWithAgent(task, serverUrl = 'https://privamon.onrender.
     });
 
     return { success: true, turn };
+  } catch (err) {
+    console.error('[Background] handleChatWithAgent error:', err);
+    forwardToPopup({
+      type: 'pipelineError',
+      error: err.message || 'Page analysis failed',
+    });
+    throw err;
   } finally {
     clearInterval(keepAliveInterval);
+    chrome.storage.local.set({
+      privamon_redaction_state: {
+        isRunning: false,
+        stageId: 'complete',
+        status: 'done',
+        statusText: 'Pipeline idle',
+        timestamp: Date.now()
+      }
+    }).catch(() => {});
   }
 }
 
@@ -1763,11 +2326,24 @@ async function sendToServerAgent(result, task, serverUrl = 'https://privamon.onr
     conversationState: {}
   };
 
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const fetchTimeout = setTimeout(() => controller.abort(), 45000);
+  let response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } catch (netErr) {
+    if (netErr.name === 'AbortError') {
+      throw new Error(`Server request timed out after 45s (${endpoint}). The model server may be cold-starting or busy.`);
+    }
+    throw netErr;
+  } finally {
+    clearTimeout(fetchTimeout);
+  }
 
   if (!response.ok) {
     const errText = await response.text();
@@ -1812,8 +2388,15 @@ async function handleExecuteAction(actionPayload) {
             const isSearch = el && (/search/i.test(el.textContent || '') || /train_search|search_btn/i.test(el.className || ''));
             if (!isSearch) return { blocked: false };
 
-            const fromInp = document.querySelector('p-autocomplete[formcontrolname*="origin" i] input, p-autocomplete[id*="origin" i] input, input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
-            const toInp = document.querySelector('p-autocomplete[formcontrolname*="destination" i] input, p-autocomplete[id*="destination" i] input, input[placeholder*="to" i], input[aria-label*="to" i], #destination input');
+            // Use IRCTC formcontrolname selectors first
+            const fromInp = document.querySelector('p-autocomplete[formcontrolname="journeyFrom"] input')
+              || document.querySelector('p-autocomplete[formcontrolname*="from" i] input')
+              || (document.querySelectorAll('p-autocomplete input, .ui-autocomplete input')[0])
+              || document.querySelector('input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
+            const toInp = document.querySelector('p-autocomplete[formcontrolname="journeyTo"] input')
+              || document.querySelector('p-autocomplete[formcontrolname*="destination" i] input')
+              || (document.querySelectorAll('p-autocomplete input, .ui-autocomplete input')[1])
+              || document.querySelector('input[placeholder*="to" i]:not([placeholder*="auto" i]), input[aria-label*="to" i]:not([aria-label*="auto" i]), #destination input');
             const fromEmpty = !fromInp || !fromInp.value || fromInp.value.trim() === '';
             const toEmpty = !toInp || !toInp.value || toInp.value.trim() === '';
             return { blocked: fromEmpty || toEmpty };
@@ -1966,8 +2549,33 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
       const isContactMessagingTask = /\b(?:search\s+(?:for\s+)?(?:contact\s+)?|message\s+[A-Za-z0-9_]|send\s+[A-Za-z0-9_]|tell\s+[A-Za-z0-9_]|text\s+[A-Za-z0-9_])\b/i.test(task);
       const isChatTask = /\b(send|message|chat|reply|type|text|draft)\b/i.test(task);
       const isSearchTask = /\b(search|find|look\s*up)\b/i.test(task);
+      const isTravelBookingTask = /\b(book|ticket|train|irctc|journey|flight|bus|reservation|seat)\b/i.test(task);
+      const isLoginTask = /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(task);
 
-      if (isVideoPlayTask) {
+      if (isLoginTask) {
+        const hasPriorLoginClick = steps.some(s => s.action && s.action.type === 'click' && s.execResult?.success);
+        const hasPriorGuidance = steps.some(s => s.action && (s.action.type === 'wait' || s.action.type === 'ask_user'));
+
+        if (hasPriorLoginClick) {
+          stepGuidance = `[STEP GUIDANCE: Sign in was clicked. Inspect the screen: if the user is now logged in to the dashboard/portal (URL changed or dashboard elements visible), return action type "done". If login did NOT happen (the page is still on the login screen, shows an error like "Invalid credentials", or username/password fields are still visible), DO NOT click login repeatedly. Return action type "ask_user" with needsClarification=true: "Please fill in your correct credentials directly on the page. After filling, click Proceed."]`;
+        } else if (hasPriorGuidance) {
+          stepGuidance = `[STEP GUIDANCE: The user was asked to fill their credentials. Inspect the username and password fields: if they are now filled, emit action type "click" targeting the "Sign in" / "Login" button. If still empty, return action type "ask_user" instructing the user: "Please fill in your correct credentials directly on the page. After filling, click Proceed."]`;
+        } else {
+          stepGuidance = `[STEP GUIDANCE: The user requested to login. Inspect the page: if username and password fields are present and empty, NEVER submit empty credentials or guess passwords. Return action type "ask_user" with needsClarification=true: "Please fill in your correct credentials directly on the page. After filling, click Proceed."]`;
+        }
+      } else if (isTravelBookingTask) {
+        // IRCTC / Travel booking step guidance
+        const hasPriorGuidance = steps.some(s => s.action && (s.action.type === 'wait' || s.action.type === 'ask_user') && s.message?.includes('filled'));
+        const hasPriorSearchClick = steps.some(s => s.action && s.action.type === 'click' && s.execResult?.success);
+
+        if (hasPriorSearchClick) {
+          stepGuidance = `[STEP GUIDANCE: Search Trains was clicked. Inspect the screen: if train results are listed, describe the available trains to the user and return action type "done". If an error appeared (e.g. "Please submit correct input"), the stations may not have been filled correctly — emit ask_user to guide the user to re-enter them.]`;
+        } else if (hasPriorGuidance) {
+          stepGuidance = `[STEP GUIDANCE: The user was asked to fill journey details. Inspect the From and To station fields: if they now contain station names, click the "Search Trains" or "Find Trains" button. If they are still empty, remind the user to fill them. NEVER guess station names — let the user fill them directly on the IRCTC page.]`;
+        } else {
+          stepGuidance = `[STEP GUIDANCE: This is a travel booking task on IRCTC. CRITICAL: Do NOT click Search Trains if From or To station fields are empty! If the user has not specified station names in their query, emit ask_user with needsClarification=true to guide them to fill From Station, To Station, and Journey Date directly on the page. NEVER hallucinate station names.]`;
+        }
+      } else if (isVideoPlayTask) {
         stepGuidance = `[STEP GUIDANCE: The previous action (${prevAct?.type || 'action'} ${prevValSnippet}) was executed. Inspect the screen: If you are on search results with video/playlist/course cards, DO NOT return "done" yet — the user's task explicitly requires playing the video or playlist! Target the first public title link or thumbnail in the main search results (look for a#video-title or first card at x >= 240) with action type "click". NEVER click sidebar navigation links (e.g. "Playlists" or "Liked videos" on the left). ONLY return action type "done" when the video watch page (/watch) or playlist player is open and playing.]`;
       } else if (isContactMessagingTask) {
         const hasPriorContactSearch = steps.some(s => s.action && s.action.type === 'type' && (!s.execResult || !s.execResult.message || !s.execResult.message.includes('and sent message')));
@@ -2099,6 +2707,13 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
             { name: 'date', label: 'Journey Date', description: 'Select your travel date' },
             { name: 'class', label: 'Class / Quota', description: 'Choose coach class (e.g. Sleeper or 3A)' }
           ];
+        } else if (fields.length === 0 && /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(task || '')) {
+          title = 'Please Fill Correct Credentials';
+          question = 'Please fill in your correct credentials directly on the page. After filling, click Proceed:';
+          fields = [
+            { name: 'username', label: 'UserName', description: 'Enter your username, roll number, or email' },
+            { name: 'password', label: 'Password', description: 'Enter your password' }
+          ];
         }
 
         const requestId = 'req_' + Date.now();
@@ -2138,7 +2753,203 @@ async function handleActionLoop(initialTask, serverUrl = 'https://privamon.onren
           break;
         }
 
-        console.log('[Background] User confirmed required details were filled on page. Resuming loop...');
+        console.log('[Background] User confirmed required details were filled on page. Executing next step directly...');
+
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        const isLoginTaskOrPage = isLoginTask || /\b(login|log\s*in|sign\s*in|signin|auth|portal|credentials)\b/i.test(task || '');
+
+        if (activeTab && activeTab.id && isLoginTaskOrPage) {
+          forwardToPopup({
+            type: 'autopilotProgress',
+            step: step + 1,
+            maxSteps,
+            status: 'executing',
+            message: 'Credentials filled. Directly clicking Sign in to log in...'
+          });
+
+          const loginClickRes = await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            func: () => {
+              // 1. Dispatch input and change on credentials fields to guarantee form validity
+              const allInputs = Array.from(document.querySelectorAll('input, select, textarea'));
+              for (const inp of allInputs) {
+                if ((inp.value || '').trim().length > 0) {
+                  inp.dispatchEvent(new Event('input', { bubbles: true }));
+                  inp.dispatchEvent(new Event('change', { bubbles: true }));
+                  inp.dispatchEvent(new Event('blur', { bubbles: true }));
+                }
+              }
+
+              // 2. Locate sign in / submit button
+              const passInp = document.querySelector('input[type="password"]');
+              let loginBtn = null;
+              if (passInp && passInp.form) {
+                loginBtn = passInp.form.querySelector('#btnSubmit, #btnLogin, input[type="submit"], button[type="submit"], input[value*="Sign in" i], input[value*="Login" i], button');
+              }
+              if (!loginBtn) {
+                loginBtn = document.querySelector('#btnSubmit, #btnLogin, input[type="submit"], button[type="submit"], input[value*="Sign in" i], input[value*="Login" i]');
+              }
+              if (!loginBtn) {
+                const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, a[role="button"]'));
+                loginBtn = buttons.find(b => {
+                  if (b.getAttribute('data-toggle') === 'tab' || b.getAttribute('role') === 'tab') return false;
+                  const text = (b.textContent || b.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                  return text === 'sign in' || text === 'login' || text === 'log in' ||
+                         text.includes('sign in') || text.includes('login') || text.includes('log in');
+                });
+              }
+
+              if (loginBtn) {
+                loginBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                loginBtn.focus();
+                const rect = loginBtn.getBoundingClientRect();
+                const opts = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
+                loginBtn.dispatchEvent(new MouseEvent('mouseover', opts));
+                loginBtn.dispatchEvent(new MouseEvent('mousedown', opts));
+                loginBtn.dispatchEvent(new MouseEvent('mouseup', opts));
+                loginBtn.dispatchEvent(new MouseEvent('click', opts));
+                if (typeof loginBtn.click === 'function') {
+                  loginBtn.click();
+                }
+
+                // If button is in a form, trigger requestSubmit or form submit
+                if (loginBtn.form) {
+                  try {
+                    if (typeof loginBtn.form.requestSubmit === 'function') {
+                      loginBtn.form.requestSubmit(loginBtn);
+                    } else if (typeof loginBtn.form.submit === 'function') {
+                      loginBtn.form.submit();
+                    }
+                  } catch (e) {}
+                }
+
+                return {
+                  success: true,
+                  text: (loginBtn.textContent || loginBtn.value || '').trim().slice(0, 50),
+                  targetId: loginBtn.id || loginBtn.name || 'btnSubmit'
+                };
+              }
+              return { success: false };
+            }
+          });
+
+          const clickedLogin = loginClickRes && loginClickRes[0]?.result?.success;
+          const targetId = loginClickRes && loginClickRes[0]?.result?.targetId || 'btnSubmit';
+
+          const turn = {
+            id: 'turn_' + Date.now(),
+            task: task || 'Login with entered credentials',
+            timestamp: Date.now(),
+            reasoning: 'Credentials entered on page. Directly clicked Sign in button to log in.',
+            action: { type: 'click', targetElementId: targetId, value: null, scrollDirection: null },
+            actions: [{ type: 'click', targetElementId: targetId, value: null, scrollDirection: null }],
+            outcome: 'clicked_successfully',
+            confidence: 0.99,
+            needsClarification: false
+          };
+
+          try {
+            const histData = await chrome.storage.local.get(['privamon_chat_history']);
+            const history = histData.privamon_chat_history || [];
+            history.push(turn);
+            await chrome.storage.local.set({ privamon_chat_history: history.slice(-30) });
+          } catch (e) {}
+
+          steps.push({
+            step: step + 1,
+            action: { type: 'click', targetElementId: targetId },
+            outcome: 'clicked_successfully',
+            result: 'Clicked Sign in directly on page'
+          });
+
+          forwardToPopup({ type: 'pipelineComplete', result: { turn } });
+          forwardToPopup({
+            type: 'autopilotProgress',
+            step: step + 1,
+            maxSteps,
+            status: 'done',
+            message: clickedLogin ? '✓ Directly clicked Sign in to log in!' : 'Credentials entered on page. Click Sign in to log in.'
+          });
+          break;
+        }
+
+        if (activeTab && activeTab.id && isTravelBookingTask) {
+          forwardToPopup({
+            type: 'autopilotProgress',
+            step: step + 1,
+            maxSteps,
+            status: 'executing',
+            message: 'Journey details filled. Directly clicking Search Trains on page...'
+          });
+
+          const searchClickRes = await chrome.scripting.executeScript({
+            target: { tabId: activeTab.id },
+            func: () => {
+              let searchBtn = document.querySelector('button.search_btn, button.train_Search, button[label="Find Trains"], button[label*="Search" i]');
+              if (!searchBtn) searchBtn = document.querySelector('form button[type="submit"], form input[type="submit"]');
+              if (!searchBtn) {
+                const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn, a.search_btn'));
+                searchBtn = buttons.find(b => {
+                  const text = (b.textContent || b.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                  const cls = String(b.className || '').toLowerCase();
+                  return text.includes('search train') || text.includes('find train') ||
+                         text.includes('search') || cls.includes('search_btn') || cls.includes('train_Search');
+                });
+              }
+              if (searchBtn) {
+                searchBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                searchBtn.focus();
+                searchBtn.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+                searchBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+                searchBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+                searchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                if (typeof searchBtn.click === 'function') searchBtn.click();
+                return { success: true, targetId: searchBtn.id || searchBtn.className || 'search_btn' };
+              }
+              return { success: false };
+            }
+          });
+
+          const clickedSearch = searchClickRes && searchClickRes[0]?.result?.success;
+          const targetId = searchClickRes && searchClickRes[0]?.result?.targetId || 'search_btn';
+
+          const turn = {
+            id: 'turn_' + Date.now(),
+            task: task || 'Search trains with entered details',
+            timestamp: Date.now(),
+            reasoning: 'Station and date entered on page. Directly clicked Search Trains button.',
+            action: { type: 'click', targetElementId: targetId, value: null, scrollDirection: null },
+            actions: [{ type: 'click', targetElementId: targetId, value: null, scrollDirection: null }],
+            outcome: 'clicked_successfully',
+            confidence: 0.99,
+            needsClarification: false
+          };
+
+          try {
+            const histData = await chrome.storage.local.get(['privamon_chat_history']);
+            const history = histData.privamon_chat_history || [];
+            history.push(turn);
+            await chrome.storage.local.set({ privamon_chat_history: history.slice(-30) });
+          } catch (e) {}
+
+          steps.push({
+            step: step + 1,
+            action: { type: 'click', targetElementId: targetId },
+            outcome: 'clicked_successfully',
+            result: 'Clicked Search Trains directly on page'
+          });
+
+          forwardToPopup({ type: 'pipelineComplete', result: { turn } });
+          forwardToPopup({
+            type: 'autopilotProgress',
+            step: step + 1,
+            maxSteps,
+            status: 'done',
+            message: clickedSearch ? '✓ Directly clicked Search Trains with entered station details!' : 'Details registered. Click Search Trains on the page.'
+          });
+          break;
+        }
+
         forwardToPopup({
           type: 'autopilotProgress',
           step: step + 1,

@@ -43,10 +43,25 @@
   function findElement(elementId) {
     if (!elementId) return null;
 
+    const cleanId = elementId.startsWith('#') ? elementId.slice(1) : elementId;
+
     // Strategy 1: Direct DOM id
-    let el = document.getElementById(elementId);
+    let el = document.getElementById(cleanId) || document.getElementById(elementId);
     if (el) {
-      const allWithId = document.querySelectorAll(`#${CSS.escape(elementId)}`);
+      // If matched element is a container div, form, or tab link, and the targetId is login/signin/submit, resolve to the submit button inside
+      if ((cleanId === 'login' || cleanId === 'signin' || cleanId === 'submit') && (/div|section|form|header|main/i.test(el.tagName) || el.getAttribute('data-toggle') === 'tab' || el.getAttribute('role') === 'tab')) {
+        const innerSubmit = el.querySelector('#btnSubmit, #btnLogin, button[type="submit"], input[type="submit"], input[value*="Sign in" i], input[value*="Login" i], button');
+        if (innerSubmit) return innerSubmit;
+      }
+      // If matched element is an LI (e.g. #li119) or navigation container, resolve to the inner link or button
+      if (el.tagName === 'LI' || (/^(nav|ul|ol|header|section|aside)$/i.test(el.tagName) && !/^(a|button|input|select)$/i.test(el.tagName))) {
+        const innerInteractive = el.querySelector('a[href], a, button, input[type="button"], input[type="submit"], [role="menuitem"], [role="link"], [role="button"], [onclick]');
+        if (innerInteractive) {
+          console.log(`[Privamon ActionExecutor] findElement resolved <${el.tagName.toLowerCase()} id="${cleanId}"> to inner clickable <${innerInteractive.tagName.toLowerCase()}>`);
+          return innerInteractive;
+        }
+      }
+      const allWithId = document.querySelectorAll(`#${CSS.escape(cleanId)}`);
       if (allWithId.length > 1) {
         for (const candidate of allWithId) {
           const container = candidate.closest('ytd-video-renderer, ytd-playlist-renderer, ytd-radio-renderer, ytd-rich-item-renderer, ytd-compact-video-renderer, yt-lockup-view-model');
@@ -116,7 +131,13 @@
     // Strategy 4: CSS selector
     try {
       el = document.querySelector(elementId);
-      if (el) return el;
+      if (el) {
+        if (el.tagName === 'LI' || (/^(nav|ul|ol|header|section|aside)$/i.test(el.tagName) && !/^(a|button|input|select)$/i.test(el.tagName))) {
+          const innerInteractive = el.querySelector('a[href], a, button, input[type="button"], input[type="submit"], [role="menuitem"], [role="link"], [role="button"], [onclick]');
+          if (innerInteractive) return innerInteractive;
+        }
+        return el;
+      }
     } catch (e) {
       // Invalid selector — ignore
     }
@@ -165,25 +186,90 @@
 
     // Strategy 9: Semantic Travel / IRCTC field resolution (from, to, date, class)
     const lowerId = elementId.toLowerCase().trim();
-    if (lowerId === 'from' || lowerId === 'origin') {
-      const fromEl = document.querySelector('p-autocomplete input, .ui-autocomplete input, [placeholder*="from" i], [aria-label*="from" i], input#origin, input[name*="origin" i]');
+    if (lowerId === 'from' || lowerId === 'origin' || lowerId === 'journeyfrom') {
+      // IRCTC-specific formcontrolname selectors first
+      let fromEl = document.querySelector('p-autocomplete[formcontrolname="journeyFrom"] input');
+      if (fromEl) return fromEl;
+      fromEl = document.querySelector('p-autocomplete[formcontrolname*="from" i] input, p-autocomplete[formcontrolname*="origin" i] input');
+      if (fromEl) return fromEl;
+      fromEl = document.querySelector('#origin input, input#origin, input[aria-label*="from" i], input[placeholder*="from" i]');
       if (fromEl) return fromEl;
       const allAuto = document.querySelectorAll('p-autocomplete input, .ui-autocomplete input');
       if (allAuto.length >= 1) return allAuto[0];
     }
-    if (lowerId === 'to' || lowerId === 'destination') {
-      const toEl = document.querySelector('[placeholder*="to" i]:not([placeholder*="from" i]), [aria-label*="to" i]:not([aria-label*="from" i]), input#destination, input[name*="destination" i]');
+    if (lowerId === 'to' || lowerId === 'destination' || lowerId === 'journeyto') {
+      let toEl = document.querySelector('p-autocomplete[formcontrolname="journeyTo"] input');
+      if (toEl) return toEl;
+      toEl = document.querySelector('p-autocomplete[formcontrolname*="destination" i] input');
+      if (toEl) return toEl;
+      toEl = document.querySelector('#destination input, input#destination, input[aria-label*="going to" i], input[placeholder*="to" i]:not([placeholder*="auto" i])');
       if (toEl) return toEl;
       const allAuto = document.querySelectorAll('p-autocomplete input, .ui-autocomplete input');
       if (allAuto.length >= 2) return allAuto[1];
     }
-    if (lowerId === 'date' || lowerId === 'journey date' || lowerId === 'journey_date') {
-      const dateEl = document.querySelector('p-calendar input, .ui-calendar input, [placeholder*="dd/mm" i], [placeholder*="date" i], input[type="date"], [aria-label*="date" i]');
+    if (lowerId === 'date' || lowerId === 'journey date' || lowerId === 'journey_date' || lowerId === 'journeydate') {
+      let dateEl = document.querySelector('p-calendar[formcontrolname*="date" i] input, p-calendar[formcontrolname*="Date" i] input');
+      if (dateEl) return dateEl;
+      dateEl = document.querySelector('p-calendar input, .ui-calendar input, [placeholder*="dd/mm" i], [placeholder*="date" i], input[type="date"], [aria-label*="date" i]');
       if (dateEl) return dateEl;
     }
-    if (lowerId === 'class' || lowerId === 'quota') {
-      const classEl = document.querySelector('p-dropdown, .ui-dropdown, [placeholder*="classes" i], [aria-label*="class" i], select[name*="class" i]');
+    if (lowerId === 'class' || lowerId === 'quota' || lowerId === 'journeyclass' || lowerId === 'journeyquota') {
+      let classEl = document.querySelector('p-dropdown[formcontrolname*="class" i], p-dropdown[formcontrolname*="quota" i], p-dropdown[formcontrolname*="Class" i]');
       if (classEl) return classEl;
+      classEl = document.querySelector('p-dropdown, .ui-dropdown, [placeholder*="classes" i], [aria-label*="class" i], select[name*="class" i]');
+      if (classEl) return classEl;
+    }
+    if (lowerId === 'search' || lowerId === 'search trains' || lowerId === 'search_trains' ||
+        lowerId === 'button_search' || lowerId === 'search_btn' || lowerId === 'train_search' ||
+        lowerId === 'find trains' || lowerId === 'find_trains') {
+      let searchBtn = document.querySelector('button.search_btn, button.train_Search, button[label="Find Trains"], button[label*="Search" i]');
+      if (!searchBtn) searchBtn = document.querySelector('form button[type="submit"], form input[type="submit"]');
+      if (!searchBtn) {
+        const buttons = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn, a.search_btn'));
+        searchBtn = buttons.find(b => {
+          const text = (b.textContent || b.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          const cls = String(b.className || '').toLowerCase();
+          return text.includes('search train') || text.includes('find train') ||
+                 text.includes('search') || cls.includes('search_btn') || cls.includes('train_search');
+        });
+      }
+      if (searchBtn) return searchBtn;
+    }
+    if (lowerId === 'username' || lowerId === 'user' || lowerId === 'login_user' || lowerId === 'userid' || lowerId === 'rollno' || lowerId === 'email') {
+      let userEl = document.querySelector('input[name*="user" i], input[id*="user" i], input[placeholder*="user" i], input[autocomplete*="user" i], input[type="email"], input[name*="email" i], input[id*="email" i], input[name*="roll" i], input[id*="roll" i]');
+      if (userEl) return userEl;
+      const pass = document.querySelector('input[type="password"]');
+      if (pass && pass.form) {
+        const textInps = Array.from(pass.form.querySelectorAll('input[type="text"], input:not([type])'));
+        if (textInps.length > 0) return textInps[0];
+      }
+      return document.querySelector('input[type="text"]');
+    }
+    if (lowerId === 'password' || lowerId === 'pass' || lowerId === 'pwd' || lowerId === 'login_password') {
+      let passEl = document.querySelector('input[type="password"]');
+      if (passEl) return passEl;
+      passEl = document.querySelector('input[name*="pass" i], input[id*="pass" i], input[placeholder*="pass" i]');
+      if (passEl) return passEl;
+    }
+    if (lowerId === 'login' || lowerId === 'signin' || lowerId === 'sign in' || lowerId === 'log in' ||
+        lowerId === 'submit' || lowerId === 'login_btn' || lowerId === 'btn_login' || lowerId === 'button_login') {
+      const passInp = document.querySelector('input[type="password"]');
+      let loginBtn = null;
+      if (passInp && passInp.form) {
+        loginBtn = passInp.form.querySelector('#btnSubmit, #btnLogin, input[type="submit"], button[type="submit"], input[value*="Sign in" i], input[value*="Login" i], button');
+      }
+      if (!loginBtn) {
+        loginBtn = document.querySelector('#btnSubmit, #btnLogin, button[type="submit"], input[type="submit"], input[value*="Sign in" i], input[value*="Login" i], .btn-login');
+      }
+      if (!loginBtn) {
+        const btns = Array.from(document.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, a[role="button"]'));
+        loginBtn = btns.find(b => {
+          if (b.getAttribute('data-toggle') === 'tab' || b.getAttribute('role') === 'tab') return false;
+          const text = (b.textContent || b.value || '').toLowerCase().replace(/\s+/g, ' ').trim();
+          return text === 'sign in' || text === 'login' || text === 'log in' || text.includes('sign in') || text.includes('login') || text.includes('log in');
+        });
+      }
+      if (loginBtn) return loginBtn;
     }
 
     return null;
@@ -875,7 +961,10 @@
       try {
         const oc = el.getAttribute('onchange');
         if (oc && (oc.includes('__doPostBack') || oc.includes('submit'))) {
-          window.eval?.(oc);
+          const sc = document.createElement('script');
+          sc.textContent = oc;
+          (document.head || document.documentElement).appendChild(sc);
+          sc.remove();
         }
       } catch (e) {}
     }
@@ -893,7 +982,7 @@
   // ── Execute the action ──
 
   if (actionType === 'click') {
-    const el = findElement(targetId);
+    let el = findElement(targetId);
     if (!el) {
       return {
         success: false,
@@ -901,6 +990,28 @@
         targetElementId: targetId,
         message: `Element not found: "${targetId}". It may have changed since the last screenshot.`
       };
+    }
+
+    // Container and List Item resolution:
+    // If element is a non-leaf container (LI, DIV, NAV, UL, OL, TD, TH, SECTION, FORM, HEADER, MAIN, P, SPAN, etc.)
+    // and is not itself an interactive tag (A, BUTTON, INPUT, SELECT, TEXTAREA):
+    const isDirectInteractive = /^(a|button|input|select|textarea)$/i.test(el.tagName);
+    if (!isDirectInteractive) {
+      // Priority 1: Submit/Login button if it's an auth/submit form or container
+      const submitBtn = el.querySelector?.('#btnSubmit, #btnLogin, button[type="submit"], input[type="submit"], input[value*="Sign in" i], input[value*="Login" i]');
+      // Priority 2: Child interactive element (anchor with href, button, role=link/menuitem/button, or element with onclick)
+      const innerActionable = submitBtn || el.querySelector?.('a[href], a, button, input[type="button"], [role="menuitem"], [role="link"], [role="button"], [role="tab"], [onclick]');
+      if (innerActionable) {
+        console.log(`[Privamon ActionExecutor] Resolved container <${el.tagName.toLowerCase()} id="${el.id}"> to inner actionable <${innerActionable.tagName.toLowerCase()} id="${innerActionable.id}">`);
+        el = innerActionable;
+      } else {
+        // Priority 3: If this element is inside an interactive container (e.g. <span> or <i> inside <a>)
+        const interactiveAncestor = el.closest?.('a[href], a, button, [role="button"], [role="link"], [role="menuitem"], [role="tab"]');
+        if (interactiveAncestor) {
+          console.log(`[Privamon ActionExecutor] Resolved element <${el.tagName.toLowerCase()}> to closest interactive ancestor <${interactiveAncestor.tagName.toLowerCase()}>`);
+          el = interactiveAncestor;
+        }
+      }
     }
 
     // If clicked element is a <select> and a value is provided, route directly to option selection
@@ -914,9 +1025,15 @@
       el.classList?.contains('search_btn') || el.classList?.contains('train_Search') ||
       (el.type === 'submit' && (window.location.hostname.includes('irctc.co.in') || document.querySelector('p-autocomplete')));
     if (isSearchTrainsBtn) {
-      const pAutos = Array.from(document.querySelectorAll('p-autocomplete input, .ui-autocomplete input'));
-      const fromInp = pAutos[0] || document.querySelector('input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
-      const toInp = pAutos[1] || document.querySelector('input[placeholder*="to" i], input[aria-label*="to" i], #destination input');
+      // Use IRCTC formcontrolname-based selectors first, then fallback to generic p-autocomplete
+      const fromInp = document.querySelector('p-autocomplete[formcontrolname="journeyFrom"] input')
+        || document.querySelector('p-autocomplete[formcontrolname*="from" i] input, p-autocomplete[formcontrolname*="origin" i] input')
+        || (document.querySelectorAll('p-autocomplete input, .ui-autocomplete input')[0])
+        || document.querySelector('input[placeholder*="from" i], input[aria-label*="from" i], #origin input');
+      const toInp = document.querySelector('p-autocomplete[formcontrolname="journeyTo"] input')
+        || document.querySelector('p-autocomplete[formcontrolname*="destination" i] input')
+        || (document.querySelectorAll('p-autocomplete input, .ui-autocomplete input')[1])
+        || document.querySelector('input[placeholder*="to" i]:not([placeholder*="auto" i]), input[aria-label*="to" i]:not([aria-label*="auto" i]), #destination input');
       const fromEmpty = !fromInp || !fromInp.value || fromInp.value.trim() === '';
       const toEmpty = !toInp || !toInp.value || toInp.value.trim() === '';
       if (fromEmpty || toEmpty) {
@@ -950,6 +1067,71 @@
     // Native .click() invocation for anchor or button elements
     if (typeof el.click === 'function') {
       el.click();
+    }
+
+    // For form submit buttons, trigger form submission if click didn't navigate
+    if (el.form && (el.type === 'submit' || /btnsubmit|login|signin/i.test(el.id || el.name || ''))) {
+      try {
+        if (typeof el.form.requestSubmit === 'function') {
+          el.form.requestSubmit(el);
+        } else if (typeof el.form.submit === 'function') {
+          el.form.submit();
+        }
+      } catch (e) {}
+    }
+
+    // Anchor & Link Navigation Resolution & Fallback (e.g. YMCA Result, AdminLTE menu items, ASP.NET links)
+    const anchorEl = el.tagName === 'A' ? el : el.closest?.('a');
+    if (anchorEl) {
+      if (anchorEl !== el && typeof anchorEl.click === 'function') {
+        try { anchorEl.click(); } catch (e) {}
+      }
+
+      const rawHref = anchorEl.getAttribute('href') || anchorEl.href;
+      if (rawHref) {
+        if (rawHref.startsWith('javascript:')) {
+          const jsCode = rawHref.replace(/^javascript:\s*/i, '');
+          try {
+            const sc = document.createElement('script');
+            sc.textContent = jsCode;
+            (document.head || document.documentElement).appendChild(sc);
+            sc.remove();
+            console.log('[Privamon ActionExecutor] Executed javascript: href in page context:', jsCode);
+          } catch (e) {
+            console.warn('[Privamon ActionExecutor] Failed to execute javascript: href:', e);
+          }
+        } else if (rawHref !== '#' && !rawHref.startsWith('#')) {
+          let destUrl = '';
+          try {
+            destUrl = new URL(rawHref, window.location.href).href;
+          } catch (e) {
+            destUrl = anchorEl.href || rawHref;
+          }
+
+          if (destUrl && !window.location.hostname.includes('youtube.com')) {
+            setTimeout(() => {
+              const currentPath = window.location.pathname.toLowerCase();
+              const destPath = (new URL(destUrl, window.location.href)).pathname.toLowerCase();
+              if (window.location.href !== destUrl && currentPath !== destPath) {
+                console.log('[Privamon ActionExecutor] Executing anchor navigation fallback to:', destUrl);
+                window.location.href = destUrl;
+              }
+            }, 350);
+          }
+        }
+      }
+    }
+
+    // Onclick attribute execution fallback (for ASP.NET WebForms postbacks and page functions)
+    const onclickAttr = el.getAttribute?.('onclick') || anchorEl?.getAttribute?.('onclick');
+    if (onclickAttr && (onclickAttr.includes('__doPostBack') || onclickAttr.includes('location') || onclickAttr.includes('submit') || onclickAttr.includes('open'))) {
+      try {
+        const sc = document.createElement('script');
+        sc.textContent = onclickAttr;
+        (document.head || document.documentElement).appendChild(sc);
+        sc.remove();
+        console.log('[Privamon ActionExecutor] Injected onclick handler in page context:', onclickAttr);
+      } catch (e) {}
     }
 
     // YouTube SPA Video / Playlist / Course click fallback: robust resolution of playable links
