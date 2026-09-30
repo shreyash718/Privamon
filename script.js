@@ -197,10 +197,28 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ── 5. Smooth Anchor Scrolling ──
+  const videoZoomStage = document.getElementById('videoZoomStage');
+  const zoomVideoWrapper = document.getElementById('zoomVideoWrapper');
+  const demoHeader = document.getElementById('demoHeader');
+  const demoSection = document.getElementById('demo');
+
+  // State tracker: ensures one-time anti-overshoot entrance snap from top
+  let hasSnappedEntrance = false;
+  let wasAboveDemo = true;
+  let isLatching = false;
+
   document.querySelectorAll('a[href^="#"]').forEach(anchor => {
     anchor.addEventListener('click', function (e) {
       const targetId = this.getAttribute('href');
       if (targetId === '#') return;
+      if (targetId === '#demo' && videoZoomStage) {
+        e.preventDefault();
+        hasSnappedEntrance = true;
+        wasAboveDemo = false;
+        isLatching = false;
+        videoZoomStage.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        return;
+      }
       const targetEl = document.querySelector(targetId);
       if (targetEl) {
         e.preventDefault();
@@ -210,31 +228,16 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── 6. Symmetrical Scroll-Driven Cinema Zoom for Video Demo ──
-  const videoZoomStage = document.getElementById('videoZoomStage');
-  const zoomVideoWrapper = document.getElementById('zoomVideoWrapper');
-  const demoHeader = document.getElementById('demoHeader');
-
   if (videoZoomStage && zoomVideoWrapper) {
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     let ticking = false;
-    let snapTimeout = null;
-    let isAutoSnapping = false;
-
-    // Instantly cancel any auto-snap when the user actively scrolls, swipes, or presses keys
-    const cancelAutoSnap = () => {
-      if (snapTimeout) clearTimeout(snapTimeout);
-      isAutoSnapping = false;
-    };
-
-    window.addEventListener('wheel', cancelAutoSnap, { passive: true });
-    window.addEventListener('touchstart', cancelAutoSnap, { passive: true });
-    window.addEventListener('keydown', cancelAutoSnap, { passive: true });
 
     const updateSymmetricalZoom = () => {
       if (prefersReducedMotion) return;
 
       const stageRect = videoZoomStage.getBoundingClientRect();
       const viewportH = window.innerHeight;
+      const currentScrollY = window.scrollY;
 
       // Vertical center of the video stage and vertical center of viewport
       const stageCenterY = stageRect.top + stageRect.height / 2;
@@ -314,24 +317,6 @@ document.addEventListener('DOMContentLoaded', () => {
         demoHeader.style.transform = `translate3d(0, ${headerShift.toFixed(1)}px, 0)`;
         demoHeader.style.opacity = headerOpacity.toFixed(2);
       }
-
-      // Stronger magnetic snap assist:
-      // When the user slows down and pauses near the fullscreen zone (within ±150px),
-      // gently guide the scroll to the exact center.
-      // If the user continues scrolling down, it immediately yields with zero resistance.
-      if (snapTimeout) clearTimeout(snapTimeout);
-      snapTimeout = setTimeout(() => {
-        if (!isAutoSnapping && distFromCenter <= 150 && distFromCenter > 10) {
-          isAutoSnapping = true;
-          window.scrollBy({
-            top: signedDist,
-            behavior: 'smooth'
-          });
-          setTimeout(() => {
-            isAutoSnapping = false;
-          }, 350);
-        }
-      }, 95);
     };
 
     const onScroll = () => {

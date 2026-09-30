@@ -60,6 +60,7 @@
 
 html {
   scroll-behavior: smooth;
+  scroll-snap-type: y proximity;
   font-size: 16px;
 }
 
@@ -452,6 +453,8 @@ code {
   position: relative;
   margin: 110px 0 120px; /* Expansive clearance ensuring full cinema scale never collides with text or bottom spacer */
   padding: 20px 0;
+  scroll-snap-align: center;
+  scroll-snap-stop: always;
 }
 
 .video-wrapper {
