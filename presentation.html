@@ -1,0 +1,1867 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Privamon — Technical Pipeline</title>
+  <meta name="description" content="Privamon's 10-step privacy-preserving browser agent pipeline visualization">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* ═══════════════════════════════════════════
+       ROOT & DESIGN TOKENS
+    ═══════════════════════════════════════════ */
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: rgba(17, 24, 39, 0.85);
+      --border-card: rgba(99, 102, 241, 0.2);
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #6366f1;
+      --accent-cyan: #22d3ee;
+      --accent-orange: #f59e0b;
+      --accent-emerald: #10b981;
+      --accent-rose: #f43f5e;
+      --accent-violet: #8b5cf6;
+      --gradient-brand: linear-gradient(135deg, #6366f1, #22d3ee);
+      --gradient-warm: linear-gradient(135deg, #f59e0b, #f43f5e);
+      --gradient-server: linear-gradient(135deg, #f59e0b 0%, #ea580c 100%);
+      --shadow-glow: 0 0 40px rgba(99, 102, 241, 0.15);
+      --shadow-card: 0 8px 32px rgba(0, 0, 0, 0.4);
+      --radius-lg: 20px;
+      --radius-md: 12px;
+      --radius-sm: 8px;
+      --font-primary: 'Inter', system-ui, -apple-system, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+    }
+
+    /* ═══════════════════════════════════════════
+       GLOBAL RESET
+    ═══════════════════════════════════════════ */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html { font-size: 16px; scroll-behavior: smooth; }
+    body {
+      font-family: var(--font-primary);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      overflow: hidden;
+      height: 100vh;
+      width: 100vw;
+      position: relative;
+    }
+
+    /* ═══════════════════════════════════════════
+       ANIMATED BG
+    ═══════════════════════════════════════════ */
+    #bg-canvas {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      z-index: 0;
+      pointer-events: none;
+    }
+    .bg-gradient-orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(100px);
+      opacity: 0.15;
+      z-index: 0;
+      pointer-events: none;
+      animation: orbFloat 20s ease-in-out infinite;
+    }
+    .bg-gradient-orb.orb-1 {
+      width: 500px; height: 500px;
+      background: var(--accent-blue);
+      top: -100px; left: -100px;
+    }
+    .bg-gradient-orb.orb-2 {
+      width: 400px; height: 400px;
+      background: var(--accent-cyan);
+      bottom: -80px; right: -80px;
+      animation-delay: -7s;
+    }
+    .bg-gradient-orb.orb-3 {
+      width: 350px; height: 350px;
+      background: var(--accent-violet);
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      animation-delay: -14s;
+    }
+    @keyframes orbFloat {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      33% { transform: translate(30px, -40px) scale(1.05); }
+      66% { transform: translate(-20px, 30px) scale(0.95); }
+    }
+
+    /* ═══════════════════════════════════════════
+       HEADER
+    ═══════════════════════════════════════════ */
+    .header {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 100;
+      padding: 16px 32px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: rgba(10, 14, 26, 0.8);
+      backdrop-filter: blur(20px);
+      border-bottom: 1px solid rgba(99, 102, 241, 0.1);
+    }
+    .header-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .header-logo {
+      width: 36px; height: 36px;
+      background: var(--gradient-brand);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      font-weight: 800;
+      color: white;
+      box-shadow: 0 0 20px rgba(99, 102, 241, 0.3);
+    }
+    .header-title {
+      font-size: 18px;
+      font-weight: 700;
+      background: var(--gradient-brand);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    .header-subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+      letter-spacing: 2px;
+      text-transform: uppercase;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .sih-badge {
+      padding: 6px 14px;
+      border-radius: 20px;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: var(--accent-orange);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1.5px;
+      text-transform: uppercase;
+    }
+    .step-counter {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+    .step-counter .current {
+      color: var(--accent-cyan);
+      font-weight: 700;
+      font-size: 18px;
+    }
+
+    /* ═══════════════════════════════════════════
+       PROGRESS BAR
+    ═══════════════════════════════════════════ */
+    .progress-track {
+      position: fixed;
+      top: 68px; left: 0; right: 0;
+      height: 3px;
+      background: rgba(99, 102, 241, 0.1);
+      z-index: 100;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--gradient-brand);
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 0 12px rgba(99, 102, 241, 0.5);
+      width: 0%;
+    }
+
+    /* ═══════════════════════════════════════════
+       MINI PIPELINE MAP
+    ═══════════════════════════════════════════ */
+    .pipeline-map {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 10px 20px;
+      background: rgba(17, 24, 39, 0.9);
+      backdrop-filter: blur(20px);
+      border-radius: 40px;
+      border: 1px solid rgba(99, 102, 241, 0.15);
+    }
+    .map-dot {
+      width: 28px; height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      background: rgba(100, 116, 139, 0.1);
+      border: 2px solid rgba(100, 116, 139, 0.2);
+      transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+      cursor: pointer;
+      position: relative;
+    }
+    .map-dot.active {
+      background: var(--accent-blue);
+      color: white;
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 16px rgba(99, 102, 241, 0.5);
+      transform: scale(1.2);
+    }
+    .map-dot.done {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--accent-emerald);
+      border-color: var(--accent-emerald);
+    }
+    .map-dot.server {
+      border-color: rgba(245, 158, 11, 0.3);
+    }
+    .map-dot.server.active {
+      background: var(--accent-orange);
+      border-color: var(--accent-orange);
+      box-shadow: 0 0 16px rgba(245, 158, 11, 0.5);
+    }
+    .map-dot.server.done {
+      background: rgba(245, 158, 11, 0.15);
+      color: var(--accent-orange);
+      border-color: var(--accent-orange);
+    }
+    .map-connector {
+      width: 12px;
+      height: 2px;
+      background: rgba(100, 116, 139, 0.2);
+      transition: background 0.4s ease;
+    }
+    .map-connector.done {
+      background: var(--accent-emerald);
+    }
+    .map-connector.trust-boundary {
+      width: 20px;
+      height: 2px;
+      background: repeating-linear-gradient(
+        90deg,
+        var(--accent-orange) 0,
+        var(--accent-orange) 4px,
+        transparent 4px,
+        transparent 8px
+      );
+      position: relative;
+    }
+    .map-connector.trust-boundary::after {
+      content: '🔒';
+      position: absolute;
+      top: -10px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 8px;
+    }
+
+    /* ═══════════════════════════════════════════
+       MAIN STAGE AREA
+    ═══════════════════════════════════════════ */
+    .stage-container {
+      position: fixed;
+      top: 80px;
+      bottom: 80px;
+      left: 0; right: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 10;
+      padding: 20px;
+    }
+
+    .slide {
+      position: absolute;
+      width: 92%;
+      max-width: 1200px;
+      height: calc(100vh - 180px);
+      display: grid;
+      grid-template-columns: 1fr 1.2fr;
+      gap: 30px;
+      align-items: center;
+      opacity: 0;
+      transform: translateX(80px) scale(0.95);
+      transition: all 0.7s cubic-bezier(0.4, 0, 0.2, 1);
+      pointer-events: none;
+    }
+    .slide.active {
+      opacity: 1;
+      transform: translateX(0) scale(1);
+      pointer-events: auto;
+    }
+    .slide.exiting {
+      opacity: 0;
+      transform: translateX(-80px) scale(0.95);
+    }
+
+    /* ── Left Panel: Step Info ── */
+    .step-info {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+    .step-zone-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 5px 14px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      width: fit-content;
+    }
+    .step-zone-badge.browser {
+      background: rgba(34, 211, 238, 0.1);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(34, 211, 238, 0.2);
+    }
+    .step-zone-badge.server {
+      background: rgba(245, 158, 11, 0.1);
+      color: var(--accent-orange);
+      border: 1px solid rgba(245, 158, 11, 0.2);
+    }
+    .step-zone-badge .zone-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      animation: zonePulse 2s ease-in-out infinite;
+    }
+    .step-zone-badge.browser .zone-dot { background: var(--accent-cyan); }
+    .step-zone-badge.server .zone-dot { background: var(--accent-orange); }
+    @keyframes zonePulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(0.6); }
+    }
+
+    .step-number {
+      font-size: 80px;
+      font-weight: 900;
+      line-height: 1;
+      background: var(--gradient-brand);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      opacity: 0.3;
+      position: absolute;
+      top: -10px;
+      right: 20px;
+    }
+    .slide[data-zone="server"] .step-number {
+      background: var(--gradient-warm);
+      -webkit-background-clip: text;
+      background-clip: text;
+    }
+
+    .step-header {
+      position: relative;
+    }
+    .step-icon {
+      font-size: 38px;
+      margin-bottom: 8px;
+    }
+    .step-title {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -0.5px;
+      line-height: 1.1;
+    }
+    .step-subtitle {
+      font-size: 16px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+      font-weight: 400;
+    }
+
+    .step-description {
+      font-size: 15px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+      max-width: 440px;
+    }
+
+    .tech-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .tech-chip {
+      padding: 5px 12px;
+      border-radius: 6px;
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px solid rgba(99, 102, 241, 0.15);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--accent-cyan);
+      font-weight: 500;
+    }
+    .slide[data-zone="server"] .tech-chip {
+      background: rgba(245, 158, 11, 0.08);
+      border-color: rgba(245, 158, 11, 0.15);
+      color: var(--accent-orange);
+    }
+
+    /* ── Right Panel: Demo Box ── */
+    .demo-box {
+      background: var(--bg-card);
+      border: 1px solid var(--border-card);
+      border-radius: var(--radius-lg);
+      padding: 24px;
+      box-shadow: var(--shadow-card);
+      backdrop-filter: blur(12px);
+      position: relative;
+      overflow: hidden;
+      min-height: 360px;
+      display: flex;
+      flex-direction: column;
+    }
+    .slide[data-zone="server"] .demo-box {
+      border-color: rgba(245, 158, 11, 0.2);
+    }
+    .demo-box::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent-blue), transparent);
+    }
+    .slide[data-zone="server"] .demo-box::before {
+      background: linear-gradient(90deg, transparent, var(--accent-orange), transparent);
+    }
+    .demo-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+    .demo-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+    }
+    .demo-dot:nth-child(1) { background: #ef4444; }
+    .demo-dot:nth-child(2) { background: #f59e0b; }
+    .demo-dot:nth-child(3) { background: #10b981; }
+    .demo-title {
+      margin-left: 10px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .demo-content {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* ── Demo: Code Lines ── */
+    .code-line {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.6;
+      color: var(--text-secondary);
+      opacity: 0;
+      transform: translateY(10px);
+      animation: codeFadeIn 0.4s ease forwards;
+    }
+    .code-line .keyword { color: var(--accent-violet); }
+    .code-line .func { color: var(--accent-cyan); }
+    .code-line .string { color: var(--accent-emerald); }
+    .code-line .comment { color: var(--text-muted); font-style: italic; }
+    .code-line .number { color: var(--accent-orange); }
+    .code-line .highlight { color: var(--accent-rose); font-weight: 600; }
+    .code-line .type { color: #c084fc; }
+    @keyframes codeFadeIn {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ── Demo: Visual Elements ── */
+    .demo-visual {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .demo-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      opacity: 0;
+      animation: rowSlideIn 0.5s ease forwards;
+    }
+    @keyframes rowSlideIn {
+      to { opacity: 1; }
+    }
+    .demo-label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      width: 80px;
+      flex-shrink: 0;
+    }
+    .demo-value {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      background: rgba(99, 102, 241, 0.06);
+      border: 1px solid rgba(99, 102, 241, 0.1);
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    /* ── Redacted Effect ── */
+    .redacted {
+      background: #000;
+      color: #000;
+      border-radius: 3px;
+      padding: 0 4px;
+      position: relative;
+      user-select: none;
+    }
+    .redacted::after {
+      content: 'REDACTED';
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 8px;
+      color: rgba(244, 63, 94, 0.6);
+      letter-spacing: 2px;
+      font-weight: 700;
+    }
+
+    /* ── Arrow Animation ── */
+    .arrow-flow {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 8px 0;
+    }
+    .arrow-segment {
+      height: 2px;
+      background: var(--gradient-brand);
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    .arrow-segment::after {
+      content: '';
+      position: absolute;
+      top: -2px; bottom: -2px;
+      left: -100%;
+      width: 30px;
+      background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+      animation: arrowPulse 1.5s ease-in-out infinite;
+    }
+    @keyframes arrowPulse {
+      to { left: 200%; }
+    }
+    .arrow-icon {
+      color: var(--accent-cyan);
+      font-size: 16px;
+      animation: arrowBounce 1s ease-in-out infinite;
+    }
+    @keyframes arrowBounce {
+      0%, 100% { transform: translateX(0); }
+      50% { transform: translateX(4px); }
+    }
+
+    /* ── Face Detection Visual ── */
+    .face-demo {
+      position: relative;
+      width: 100%;
+      height: 140px;
+      background: linear-gradient(135deg, rgba(99,102,241,0.05), rgba(34,211,238,0.05));
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(99,102,241,0.1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 30px;
+      overflow: hidden;
+    }
+    .face-placeholder {
+      width: 60px; height: 70px;
+      border-radius: 50% 50% 45% 45%;
+      background: linear-gradient(180deg, rgba(245,158,11,0.15), rgba(245,158,11,0.05));
+      border: 2px dashed rgba(245,158,11,0.3);
+      position: relative;
+    }
+    .face-box {
+      position: absolute;
+      top: -6px; left: -6px;
+      right: -6px; bottom: -6px;
+      border: 2px solid var(--accent-rose);
+      border-radius: 4px;
+      animation: faceBoxPulse 2s ease-in-out infinite;
+    }
+    @keyframes faceBoxPulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .face-label {
+      position: absolute;
+      top: -16px; left: -6px;
+      background: var(--accent-rose);
+      color: white;
+      font-size: 8px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 3px;
+      letter-spacing: 0.5px;
+    }
+    .face-conf {
+      position: absolute;
+      bottom: -18px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--accent-emerald);
+    }
+
+    /* ── Scanning Animation ── */
+    .scan-line {
+      position: absolute;
+      left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
+      animation: scanDown 2.5s ease-in-out infinite;
+    }
+    @keyframes scanDown {
+      0% { top: 0; opacity: 0; }
+      10% { opacity: 1; }
+      90% { opacity: 1; }
+      100% { top: 100%; opacity: 0; }
+    }
+
+    /* ── Pulsing Grid ── */
+    .grid-visual {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 3px;
+    }
+    .grid-cell {
+      height: 24px;
+      border-radius: 3px;
+      background: rgba(99,102,241,0.06);
+      border: 1px solid rgba(99,102,241,0.08);
+      transition: all 0.3s ease;
+    }
+    .grid-cell.pii {
+      background: rgba(244,63,94,0.2);
+      border-color: var(--accent-rose);
+      animation: cellPulse 1.5s ease-in-out infinite;
+    }
+    .grid-cell.safe {
+      background: rgba(16,185,129,0.1);
+      border-color: rgba(16,185,129,0.2);
+    }
+    @keyframes cellPulse {
+      0%, 100% { transform: scale(1); }
+      50% { transform: scale(1.08); }
+    }
+
+    /* ═══════════════════════════════════════════
+       NAVIGATION BUTTON
+    ═══════════════════════════════════════════ */
+    .nav-btn {
+      position: fixed;
+      top: 50%;
+      transform: translateY(-50%);
+      z-index: 100;
+      width: 52px; height: 52px;
+      border-radius: 50%;
+      border: 1px solid rgba(99, 102, 241, 0.2);
+      background: rgba(17, 24, 39, 0.9);
+      backdrop-filter: blur(12px);
+      color: var(--text-primary);
+      font-size: 20px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 4px 24px rgba(0,0,0,0.3);
+    }
+    .nav-btn:hover {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 30px rgba(99, 102, 241, 0.4);
+      transform: translateY(-50%) scale(1.1);
+    }
+    .nav-btn:active {
+      transform: translateY(-50%) scale(0.95);
+    }
+    .nav-btn.prev { left: 20px; }
+    .nav-btn.next { right: 20px; }
+    .nav-btn:disabled {
+      opacity: 0.2;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+    .nav-btn .btn-arrow {
+      transition: transform 0.2s ease;
+    }
+    .nav-btn:hover .btn-arrow {
+      transform: translateX(2px);
+    }
+    .nav-btn.prev:hover .btn-arrow {
+      transform: translateX(-2px);
+    }
+
+    /* ═══════════════════════════════════════════
+       KEYBOARD HINT
+    ═══════════════════════════════════════════ */
+    .keyboard-hint {
+      position: fixed;
+      bottom: 70px;
+      right: 30px;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+      opacity: 0.5;
+    }
+    .kbd {
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: rgba(100,116,139,0.1);
+      border: 1px solid rgba(100,116,139,0.2);
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+
+    /* ═══════════════════════════════════════════
+       INTRO SLIDE SPECIAL
+    ═══════════════════════════════════════════ */
+    .slide.intro-slide {
+      grid-template-columns: 1fr;
+      text-align: center;
+      justify-items: center;
+    }
+    .intro-slide .step-info {
+      align-items: center;
+    }
+    .intro-shield {
+      font-size: 72px;
+      animation: shieldFloat 3s ease-in-out infinite;
+    }
+    @keyframes shieldFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+    .intro-title {
+      font-size: 52px;
+      font-weight: 900;
+      background: var(--gradient-brand);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      letter-spacing: -1px;
+    }
+    .intro-desc {
+      font-size: 18px;
+      color: var(--text-secondary);
+      max-width: 600px;
+      line-height: 1.7;
+    }
+    .intro-tags {
+      display: flex;
+      gap: 12px;
+      margin-top: 8px;
+    }
+    .intro-tag {
+      padding: 8px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .intro-tag.ondevice {
+      background: rgba(34,211,238,0.1);
+      border: 1px solid rgba(34,211,238,0.2);
+      color: var(--accent-cyan);
+    }
+    .intro-tag.realtime {
+      background: rgba(16,185,129,0.1);
+      border: 1px solid rgba(16,185,129,0.2);
+      color: var(--accent-emerald);
+    }
+    .intro-tag.ai {
+      background: rgba(139,92,246,0.1);
+      border: 1px solid rgba(139,92,246,0.2);
+      color: var(--accent-violet);
+    }
+    .intro-start-hint {
+      margin-top: 16px;
+      font-size: 14px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      animation: hintPulse 2s ease-in-out infinite;
+    }
+    @keyframes hintPulse {
+      0%, 100% { opacity: 0.5; }
+      50% { opacity: 1; }
+    }
+
+    /* ═══════════════════════════════════════════
+       TRUST BOUNDARY SLIDE
+    ═══════════════════════════════════════════ */
+    .trust-boundary-visual {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      padding: 20px 0;
+    }
+    .trust-zone {
+      padding: 16px 24px;
+      border-radius: var(--radius-md);
+      text-align: center;
+    }
+    .trust-zone.browser-zone {
+      background: rgba(34,211,238,0.05);
+      border: 1px solid rgba(34,211,238,0.15);
+    }
+    .trust-zone.server-zone {
+      background: rgba(245,158,11,0.05);
+      border: 1px solid rgba(245,158,11,0.15);
+    }
+    .trust-zone .zone-icon { font-size: 28px; margin-bottom: 4px; }
+    .trust-zone .zone-name { font-size: 12px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase; }
+    .trust-boundary-wall {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+    }
+    .trust-boundary-wall .wall-line {
+      width: 3px;
+      height: 40px;
+      background: repeating-linear-gradient(
+        180deg,
+        var(--accent-orange) 0,
+        var(--accent-orange) 6px,
+        transparent 6px,
+        transparent 12px
+      );
+    }
+    .trust-boundary-wall .wall-label {
+      font-size: 9px;
+      color: var(--accent-orange);
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      writing-mode: vertical-rl;
+      text-orientation: mixed;
+    }
+
+    /* ═══════════════════════════════════════════
+       STATUS BADGE IN DEMO
+    ═══════════════════════════════════════════ */
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+    .status-badge.pass {
+      background: rgba(16,185,129,0.1);
+      color: var(--accent-emerald);
+      border: 1px solid rgba(16,185,129,0.2);
+    }
+    .status-badge.processing {
+      background: rgba(99,102,241,0.1);
+      color: var(--accent-blue);
+      border: 1px solid rgba(99,102,241,0.2);
+    }
+    .status-badge.warn {
+      background: rgba(245,158,11,0.1);
+      color: var(--accent-orange);
+      border: 1px solid rgba(245,158,11,0.2);
+    }
+
+    /* ═══════════════════════════════════════════
+       RESPONSIVE
+    ═══════════════════════════════════════════ */
+    @media (max-width: 900px) {
+      .slide {
+        grid-template-columns: 1fr;
+        overflow-y: auto;
+      }
+      .step-number { display: none; }
+      .step-title { font-size: 28px; }
+    }
+
+    /* ═══════════════════════════════════════════
+       TYPING ANIMATION FOR DEMO
+    ═══════════════════════════════════════════ */
+    .typing-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 14px;
+      background: var(--accent-cyan);
+      margin-left: 2px;
+      animation: blink 1s step-end infinite;
+      vertical-align: middle;
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* ═══════════════════════════════════════════
+       LOOP INDICATOR
+    ═══════════════════════════════════════════ */
+    .loop-visual {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px;
+      border-radius: var(--radius-md);
+      background: rgba(16,185,129,0.05);
+      border: 1px dashed rgba(16,185,129,0.2);
+    }
+    .loop-arrow {
+      font-size: 20px;
+      animation: loopSpin 2s linear infinite;
+    }
+    @keyframes loopSpin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Animated BG Orbs -->
+  <div class="bg-gradient-orb orb-1"></div>
+  <div class="bg-gradient-orb orb-2"></div>
+  <div class="bg-gradient-orb orb-3"></div>
+  <canvas id="bg-canvas"></canvas>
+
+  <!-- Header -->
+  <header class="header" id="header">
+    <div class="header-brand">
+      <div class="header-logo">P</div>
+      <div>
+        <div class="header-title">Privamon</div>
+        <div class="header-subtitle">Technical Pipeline</div>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="sih-badge">SIH 2026</div>
+      <div class="step-counter">
+        Step <span class="current" id="stepCurrent">0</span><span style="color:var(--text-muted)"> / 10</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Progress Bar -->
+  <div class="progress-track">
+    <div class="progress-fill" id="progressFill"></div>
+  </div>
+
+  <!-- Navigation -->
+  <button class="nav-btn prev" id="btnPrev" disabled aria-label="Previous step">
+    <span class="btn-arrow">‹</span>
+  </button>
+  <button class="nav-btn next" id="btnNext" aria-label="Next step">
+    <span class="btn-arrow">›</span>
+  </button>
+
+  <!-- Main Stage -->
+  <div class="stage-container" id="stageContainer">
+
+    <!-- SLIDE 0: INTRO -->
+    <div class="slide intro-slide active" id="slide-0" data-zone="intro">
+      <div class="step-info">
+        <div class="intro-shield">🛡️</div>
+        <div class="intro-title">Privamon Pipeline</div>
+        <div class="intro-desc">
+          A <strong>10-step on-device visual redaction pipeline</strong> that protects your privacy before AI agents see your screen. Zero PII leaves your browser.
+        </div>
+        <div class="intro-tags">
+          <span class="intro-tag ondevice">🖥️ On-Device</span>
+          <span class="intro-tag realtime">⚡ Real-Time</span>
+          <span class="intro-tag ai">🧠 AI-Powered</span>
+        </div>
+        <div class="intro-start-hint">
+          Press <span class="kbd">→</span> or click <span class="kbd">›</span> to begin &nbsp;▶
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 1: CAPTURE -->
+    <div class="slide" id="slide-1" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">01</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">📸</div>
+          <div class="step-title">Capture</div>
+          <div class="step-subtitle">Screen + DOM Map</div>
+        </div>
+        <div class="step-description">
+          Captures a pixel-perfect screenshot of the active tab using <code>chrome.tabs.captureVisibleTab</code> and simultaneously walks the DOM tree to extract element metadata, bounding boxes, and semantic labels.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">chrome.tabs API</span>
+          <span class="tech-chip">DOM TreeWalker</span>
+          <span class="tech-chip">MV3 Service Worker</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">capture.js</span>
+        </div>
+        <div class="demo-content" id="demo-1"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 2: SANDBOX -->
+    <div class="slide" id="slide-2" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">02</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">📦</div>
+          <div class="step-title">Sandbox</div>
+          <div class="step-subtitle">Offscreen Document</div>
+        </div>
+        <div class="step-description">
+          All heavy ML inference runs inside a Chrome Offscreen Document — an invisible headless page that has full Canvas and WASM access without blocking the user's active tab at 60 FPS.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Offscreen API</span>
+          <span class="tech-chip">Canvas 2D</span>
+          <span class="tech-chip">WASM SIMD</span>
+          <span class="tech-chip">WebGPU</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">offscreen-sandbox.js</span>
+        </div>
+        <div class="demo-content" id="demo-2"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 3: DETECT -->
+    <div class="slide" id="slide-3" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">03</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">🔍</div>
+          <div class="step-title">Detect</div>
+          <div class="step-subtitle">OCR + Face Model</div>
+        </div>
+        <div class="step-description">
+          Runs <strong>Tesseract.js</strong> (English + Hindi OCR) and <strong>UltraFace ONNX</strong> face detection in parallel. Tesseract extracts all visible text; UltraFace locates human faces with bounding boxes.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Tesseract.js</span>
+          <span class="tech-chip">UltraFace ONNX</span>
+          <span class="tech-chip">ONNX Runtime Web</span>
+          <span class="tech-chip">eng + hin</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">detect-engine.js</span>
+        </div>
+        <div class="demo-content" id="demo-3"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 4: TEXT -->
+    <div class="slide" id="slide-4" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">04</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">📝</div>
+          <div class="step-title">Text</div>
+          <div class="step-subtitle">Text, Checksums, NER</div>
+        </div>
+        <div class="step-description">
+          Applies regex patterns, mathematical checksums (<strong>Verhoeff</strong> for Aadhaar, <strong>Luhn</strong> for credit cards), and a quantized <strong>bert-base-NER</strong> model to classify every text fragment as PII or safe.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Verhoeff Algorithm</span>
+          <span class="tech-chip">Luhn Checksum</span>
+          <span class="tech-chip">bert-base-NER</span>
+          <span class="tech-chip">Regex Heuristics</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">pii-detector.js</span>
+        </div>
+        <div class="demo-content" id="demo-4"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 5: FUSE -->
+    <div class="slide" id="slide-5" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">05</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">🔗</div>
+          <div class="step-title">Fuse</div>
+          <div class="step-subtitle">UI Rules + 3rd Decision</div>
+        </div>
+        <div class="step-description">
+          A <strong>spatial grid IoU merge</strong> combines overlapping detections from DOM, OCR, vision, and NER. Each candidate is scored across tiers: <code>REDACT</code> / <code>REVIEW</code> / <code>KEEP</code>, with thresholds tuned from user-correction feedback.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Spatial Grid</span>
+          <span class="tech-chip">IoU Merge</span>
+          <span class="tech-chip">REDACT / REVIEW / KEEP</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">fusion-engine.js</span>
+        </div>
+        <div class="demo-content" id="demo-5"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 6: REDACT -->
+    <div class="slide" id="slide-6" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">06</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">⬛</div>
+          <div class="step-title">Redact</div>
+          <div class="step-subtitle">Solid Black Fill</div>
+        </div>
+        <div class="step-description">
+          Renders opaque <code>#000000</code> rectangles directly onto a fresh Canvas 2D surface over every confirmed detection bounding box. <strong>No reversible blurs or translucent masks</strong> — solid pixel overwrite only.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Canvas 2D fillRect</span>
+          <span class="tech-chip">#000000 Opaque</span>
+          <span class="tech-chip">Pixel Overwrite</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">canvas-redactor.js</span>
+        </div>
+        <div class="demo-content" id="demo-6"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 7: SANITIZE -->
+    <div class="slide" id="slide-7" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">07</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">🧹</div>
+          <div class="step-title">Sanitize</div>
+          <div class="step-subtitle">REDACTED Tokens</div>
+        </div>
+        <div class="step-description">
+          Walks the extracted DOM tree and replaces every detected PII value with a safe placeholder token like <code>[REDACTED]</code>. This tokenized DOM is what gets sent to the server — never the raw text.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">DOM Tokenization</span>
+          <span class="tech-chip">[REDACTED] Tokens</span>
+          <span class="tech-chip">dom-tok-N IDs</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">sanitize-dom.js</span>
+        </div>
+        <div class="demo-content" id="demo-7"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 8: AUDIT -->
+    <div class="slide" id="slide-8" data-zone="browser">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">08</span>
+          <span class="step-zone-badge browser"><span class="zone-dot"></span> On-Device</span>
+          <div class="step-icon">✅</div>
+          <div class="step-title">Audit</div>
+          <div class="step-subtitle">Pixel Audit, Eye-Ready</div>
+        </div>
+        <div class="step-description">
+          Runs a post-redaction pixel-level verification pass. For each bounding box, it checks that pixels are truly <code>#000000</code>. If any leak is found, it expands the box by 25% and re-redacts in a retry loop.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Pixel Inspection</span>
+          <span class="tech-chip">25% Expansion Retry</span>
+          <span class="tech-chip">Opacity Audit</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">audit-verifier.js</span>
+        </div>
+        <div class="demo-content" id="demo-8"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE TB: TRUST BOUNDARY (transition) -->
+    <div class="slide intro-slide" id="slide-tb" data-zone="boundary">
+      <div class="step-info">
+        <div class="trust-boundary-visual">
+          <div class="trust-zone browser-zone">
+            <div class="zone-icon">🖥️</div>
+            <div class="zone-name" style="color:var(--accent-cyan);">Browser</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Steps 1–8 complete</div>
+          </div>
+          <div class="trust-boundary-wall">
+            <div class="wall-line"></div>
+            <div class="wall-label">TRUST BOUNDARY</div>
+            <div class="wall-line"></div>
+          </div>
+          <div class="trust-zone server-zone">
+            <div class="zone-icon">☁️</div>
+            <div class="zone-name" style="color:var(--accent-orange);">Server</div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">Redacted view only</div>
+          </div>
+        </div>
+        <div style="font-size:28px;font-weight:800;margin-top:8px;">Crossing the Trust Boundary</div>
+        <div class="intro-desc" style="font-size:15px;">
+          Only the <strong>redacted screenshot</strong> and <strong>sanitized DOM tokens</strong> leave the browser. The server <em>never</em> sees raw PII — only safe, blacked-out representations.
+        </div>
+        <div style="display:flex;gap:12px;margin-top:8px;">
+          <span class="status-badge pass">🔒 Zero raw PII transmitted</span>
+          <span class="status-badge processing">📸 Redacted image only</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 9: INTERPRET -->
+    <div class="slide" id="slide-9" data-zone="server">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">09</span>
+          <span class="step-zone-badge server"><span class="zone-dot"></span> Server</span>
+          <div class="step-icon">🧠</div>
+          <div class="step-title">Interpret</div>
+          <div class="step-subtitle">Redacted View → Action Plan</div>
+        </div>
+        <div class="step-description">
+          A <strong>Vision-Language Model</strong> (Qwen3-VL-8B-Instruct) interprets the redacted screenshot + sanitized DOM to understand the page and plan the next user action. It only ever sees blacked-out data — pluggable to swap in stronger models.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Qwen3-VL-8B</span>
+          <span class="tech-chip">OpenRouter API</span>
+          <span class="tech-chip">Pluggable VLM</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">vlm-interpret.js</span>
+        </div>
+        <div class="demo-content" id="demo-9"></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 10: PLAN -->
+    <div class="slide" id="slide-10" data-zone="server">
+      <div class="step-info">
+        <div class="step-header">
+          <span class="step-number">10</span>
+          <span class="step-zone-badge server"><span class="zone-dot"></span> Server</span>
+          <div class="step-icon">⚙️</div>
+          <div class="step-title">Plan</div>
+          <div class="step-subtitle">Return Action + Element Token</div>
+        </div>
+        <div class="step-description">
+          The VLM returns a structured action (click, type, scroll) with a DOM element token. The browser <strong>validates</strong> the token locally, executes the action, then <strong>re-captures</strong> — completing the privacy-safe agentic loop.
+        </div>
+        <div class="tech-chips">
+          <span class="tech-chip">Action Executor</span>
+          <span class="tech-chip">Token Validation</span>
+          <span class="tech-chip">Agentic Loop</span>
+        </div>
+      </div>
+      <div class="demo-box">
+        <div class="demo-header">
+          <span class="demo-dot"></span><span class="demo-dot"></span><span class="demo-dot"></span>
+          <span class="demo-title">action-planner.js</span>
+        </div>
+        <div class="demo-content" id="demo-10"></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Pipeline Map (bottom bar) -->
+  <div class="pipeline-map" id="pipelineMap">
+    <div class="map-dot active" data-step="0">⏵</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="1">1</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="2">2</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="3">3</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="4">4</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="5">5</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="6">6</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="7">7</div>
+    <div class="map-connector"></div>
+    <div class="map-dot" data-step="8">8</div>
+    <div class="map-connector trust-boundary"></div>
+    <div class="map-dot server" data-step="tb">🔒</div>
+    <div class="map-connector trust-boundary"></div>
+    <div class="map-dot server" data-step="9">9</div>
+    <div class="map-connector"></div>
+    <div class="map-dot server" data-step="10">10</div>
+  </div>
+
+  <!-- Keyboard Hint -->
+  <div class="keyboard-hint">
+    <span class="kbd">←</span><span class="kbd">→</span> navigate
+  </div>
+
+<script>
+// ═══════════════════════════════════════════
+// PARTICLE BACKGROUND
+// ═══════════════════════════════════════════
+(function initParticles() {
+  const canvas = document.getElementById('bg-canvas');
+  const ctx = canvas.getContext('2d');
+  let particles = [];
+  const PARTICLE_COUNT = 50;
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  for (let i = 0; i < PARTICLE_COUNT; i++) {
+    particles.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vx: (Math.random() - 0.5) * 0.3,
+      vy: (Math.random() - 0.5) * 0.3,
+      r: Math.random() * 1.5 + 0.5,
+      alpha: Math.random() * 0.3 + 0.05
+    });
+  }
+
+  function animate() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const p of particles) {
+      p.x += p.vx;
+      p.y += p.vy;
+      if (p.x < 0) p.x = canvas.width;
+      if (p.x > canvas.width) p.x = 0;
+      if (p.y < 0) p.y = canvas.height;
+      if (p.y > canvas.height) p.y = 0;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(99, 102, 241, ${p.alpha})`;
+      ctx.fill();
+    }
+    // Draw faint connecting lines
+    for (let i = 0; i < particles.length; i++) {
+      for (let j = i + 1; j < particles.length; j++) {
+        const dx = particles[i].x - particles[j].x;
+        const dy = particles[i].y - particles[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 120) {
+          ctx.beginPath();
+          ctx.moveTo(particles[i].x, particles[i].y);
+          ctx.lineTo(particles[j].x, particles[j].y);
+          ctx.strokeStyle = `rgba(99, 102, 241, ${0.06 * (1 - dist / 120)})`;
+          ctx.lineWidth = 0.5;
+          ctx.stroke();
+        }
+      }
+    }
+    requestAnimationFrame(animate);
+  }
+  animate();
+})();
+
+// ═══════════════════════════════════════════
+// SLIDE NAVIGATION
+// ═══════════════════════════════════════════
+const SLIDE_ORDER = ['0','1','2','3','4','5','6','7','8','tb','9','10'];
+let currentIdx = 0;
+let isTransitioning = false;
+
+const btnPrev = document.getElementById('btnPrev');
+const btnNext = document.getElementById('btnNext');
+const progressFill = document.getElementById('progressFill');
+const stepCurrent = document.getElementById('stepCurrent');
+const mapDots = document.querySelectorAll('.map-dot');
+const mapConnectors = document.querySelectorAll('.map-connector');
+
+function getSlideEl(id) {
+  return document.getElementById(`slide-${id}`);
+}
+
+function updateUI() {
+  const id = SLIDE_ORDER[currentIdx];
+  const total = SLIDE_ORDER.length;
+
+  // Progress
+  progressFill.style.width = `${(currentIdx / (total - 1)) * 100}%`;
+
+  // Step counter
+  if (id === '0') stepCurrent.textContent = '0';
+  else if (id === 'tb') stepCurrent.textContent = '—';
+  else stepCurrent.textContent = id;
+
+  // Buttons
+  btnPrev.disabled = currentIdx === 0;
+  btnNext.disabled = currentIdx === total - 1;
+
+  // Map dots
+  mapDots.forEach((dot, i) => {
+    const dotStep = dot.getAttribute('data-step');
+    const dotIdx = SLIDE_ORDER.indexOf(dotStep);
+    dot.classList.remove('active', 'done');
+    if (dotIdx === currentIdx) dot.classList.add('active');
+    else if (dotIdx < currentIdx) dot.classList.add('done');
+  });
+
+  // Map connectors
+  const connectorArray = Array.from(mapConnectors);
+  connectorArray.forEach((c, i) => {
+    c.classList.toggle('done', i < currentIdx);
+  });
+}
+
+function goToSlide(newIdx) {
+  if (isTransitioning || newIdx < 0 || newIdx >= SLIDE_ORDER.length || newIdx === currentIdx) return;
+  isTransitioning = true;
+
+  const oldSlide = getSlideEl(SLIDE_ORDER[currentIdx]);
+  const newSlide = getSlideEl(SLIDE_ORDER[newIdx]);
+
+  // Direction
+  const direction = newIdx > currentIdx ? 1 : -1;
+
+  // Exit old
+  oldSlide.classList.remove('active');
+  oldSlide.style.transform = `translateX(${-80 * direction}px) scale(0.95)`;
+  oldSlide.style.opacity = '0';
+
+  // Enter new
+  newSlide.style.transform = `translateX(${80 * direction}px) scale(0.95)`;
+  newSlide.style.opacity = '0';
+
+  requestAnimationFrame(() => {
+    newSlide.classList.add('active');
+    newSlide.style.transform = '';
+    newSlide.style.opacity = '';
+  });
+
+  currentIdx = newIdx;
+  updateUI();
+
+  // Build demo content
+  const slideId = SLIDE_ORDER[currentIdx];
+  if (slideId !== '0' && slideId !== 'tb') {
+    setTimeout(() => buildDemo(slideId), 200);
+  }
+
+  setTimeout(() => { isTransitioning = false; }, 700);
+}
+
+btnNext.addEventListener('click', () => goToSlide(currentIdx + 1));
+btnPrev.addEventListener('click', () => goToSlide(currentIdx - 1));
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); goToSlide(currentIdx + 1); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); goToSlide(currentIdx - 1); }
+});
+
+// Click on map dots
+mapDots.forEach(dot => {
+  dot.addEventListener('click', () => {
+    const step = dot.getAttribute('data-step');
+    const idx = SLIDE_ORDER.indexOf(step);
+    if (idx >= 0) goToSlide(idx);
+  });
+});
+
+updateUI();
+
+// ═══════════════════════════════════════════
+// DEMO CONTENT BUILDERS
+// ═══════════════════════════════════════════
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function codeLine(html, delayMs) {
+  return `<div class="code-line" style="animation-delay:${delayMs}ms">${html}</div>`;
+}
+
+function buildDemo(slideId) {
+  const container = document.getElementById(`demo-${slideId}`);
+  if (!container) return;
+  container.innerHTML = '';
+
+  const demos = {
+    '1': buildCaptureDemo,
+    '2': buildSandboxDemo,
+    '3': buildDetectDemo,
+    '4': buildTextDemo,
+    '5': buildFuseDemo,
+    '6': buildRedactDemo,
+    '7': buildSanitizeDemo,
+    '8': buildAuditDemo,
+    '9': buildInterpretDemo,
+    '10': buildPlanDemo
+  };
+
+  if (demos[slideId]) demos[slideId](container);
+}
+
+function buildCaptureDemo(el) {
+  el.innerHTML = `
+    ${codeLine('<span class="comment">// 1. Capture visible tab screenshot</span>', 0)}
+    ${codeLine('<span class="keyword">const</span> <span class="func">screenshot</span> = <span class="keyword">await</span> chrome.tabs.<span class="func">captureVisibleTab</span>(', 100)}
+    ${codeLine('&nbsp;&nbsp;windowId, { <span class="string">format: "png"</span>, <span class="string">quality: 100</span> }', 200)}
+    ${codeLine(');', 250)}
+    ${codeLine('', 300)}
+    ${codeLine('<span class="comment">// 2. Walk the DOM tree for element metadata</span>', 350)}
+    ${codeLine('<span class="keyword">const</span> <span class="func">domData</span> = <span class="keyword">await</span> <span class="func">extractDOM</span>({', 450)}
+    ${codeLine('&nbsp;&nbsp;viewportInfo: { <span class="number">width: 1920</span>, <span class="number">height: 1080</span>, <span class="number">dpr: 2</span> },', 550)}
+    ${codeLine('&nbsp;&nbsp;elements: <span class="number">247</span>,&nbsp;&nbsp;<span class="comment">// DOM nodes with bboxes</span>', 650)}
+    ${codeLine('&nbsp;&nbsp;pixelRegions: <span class="number">12</span>&nbsp;<span class="comment">// img, canvas, video</span>', 750)}
+    ${codeLine('});', 800)}
+    <div class="arrow-flow" style="animation-delay:900ms">
+      <div class="arrow-segment"></div>
+      <span class="arrow-icon">→</span>
+      <span style="font-size:11px;color:var(--accent-emerald);">Data URL + DOM Tree captured</span>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px;opacity:0;animation:codeFadeIn 0.4s 1s forwards;">
+      <span class="status-badge pass">✓ 247 elements</span>
+      <span class="status-badge processing">📸 3840×2160 px</span>
+    </div>
+  `;
+}
+
+function buildSandboxDemo(el) {
+  el.innerHTML = `
+    ${codeLine('<span class="comment">// Create isolated offscreen document</span>', 0)}
+    ${codeLine('<span class="keyword">await</span> chrome.offscreen.<span class="func">createDocument</span>({', 100)}
+    ${codeLine('&nbsp;&nbsp;url: <span class="string">"offscreen/offscreen.html"</span>,', 200)}
+    ${codeLine('&nbsp;&nbsp;reasons: [<span class="string">"CANVAS"</span>, <span class="string">"WORKERS"</span>],', 300)}
+    ${codeLine('&nbsp;&nbsp;justification: <span class="string">"ML inference sandbox"</span>', 400)}
+    ${codeLine('});', 450)}
+    ${codeLine('', 500)}
+    ${codeLine('<span class="comment">// Forward screenshot via message passing</span>', 550)}
+    ${codeLine('chrome.runtime.<span class="func">sendMessage</span>({', 650)}
+    ${codeLine('&nbsp;&nbsp;target: <span class="string">"offscreen"</span>,', 700)}
+    ${codeLine('&nbsp;&nbsp;action: <span class="string">"runPipeline"</span>,', 750)}
+    ${codeLine('&nbsp;&nbsp;screenshot, domData', 800)}
+    ${codeLine('});', 850)}
+    <div style="margin-top:12px;padding:10px;border-radius:8px;background:rgba(34,211,238,0.05);border:1px solid rgba(34,211,238,0.1);opacity:0;animation:codeFadeIn 0.4s 950ms forwards;">
+      <div style="font-size:11px;color:var(--accent-cyan);font-weight:600;">🔒 SECURITY ISOLATION</div>
+      <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">Active tab stays smooth at 60 FPS. All Canvas, WASM, and WebGPU work happens in the headless offscreen page.</div>
+    </div>
+  `;
+}
+
+function buildDetectDemo(el) {
+  el.innerHTML = `
+    <div class="face-demo" style="opacity:0;animation:codeFadeIn 0.5s 0ms forwards;">
+      <div class="scan-line"></div>
+      <div class="face-placeholder">
+        <div class="face-box"><span class="face-label">FACE</span></div>
+        <span class="face-conf">0.97</span>
+      </div>
+      <div class="face-placeholder" style="width:50px;height:60px;">
+        <div class="face-box"><span class="face-label">FACE</span></div>
+        <span class="face-conf">0.91</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:4px;font-family:var(--font-mono);font-size:10px;">
+        <span style="color:var(--accent-orange);">UltraFace ONNX</span>
+        <span style="color:var(--text-muted);">2 faces detected</span>
+        <span style="color:var(--text-muted);">12ms inference</span>
+      </div>
+    </div>
+    ${codeLine('<span class="comment">// Parallel: OCR + Face Detection</span>', 200)}
+    ${codeLine('<span class="keyword">const</span> [ocr, faces] = <span class="keyword">await</span> <span class="func">Promise.all</span>([', 300)}
+    ${codeLine('&nbsp;&nbsp;Tesseract.<span class="func">recognize</span>(screenshot, <span class="string">"eng+hin"</span>),', 400)}
+    ${codeLine('&nbsp;&nbsp;UltraFace.<span class="func">detect</span>(screenshot)', 500)}
+    ${codeLine(']);', 550)}
+    ${codeLine('', 600)}
+    ${codeLine('<span class="comment">// OCR Output Sample:</span>', 650)}
+    ${codeLine('<span class="string">"Rahul Sharma | XXXX-XXXX-4523 | +91-98765..."</span>', 750)}
+    <div style="display:flex;gap:8px;margin-top:8px;opacity:0;animation:codeFadeIn 0.4s 850ms forwards;">
+      <span class="status-badge pass">✓ OCR: 34 words</span>
+      <span class="status-badge warn">🔍 Faces: 2</span>
+    </div>
+  `;
+}
+
+function buildTextDemo(el) {
+  el.innerHTML = `
+    <div class="demo-visual">
+      <div class="demo-row" style="animation-delay:0ms;">
+        <span class="demo-label">Aadhaar</span>
+        <div class="demo-value">
+          <span style="color:var(--accent-rose);">2345 6789 0123</span>
+          <span style="float:right;font-size:10px;color:var(--accent-emerald);">✓ Verhoeff</span>
+        </div>
+      </div>
+      <div class="demo-row" style="animation-delay:150ms;">
+        <span class="demo-label">Credit Card</span>
+        <div class="demo-value">
+          <span style="color:var(--accent-rose);">4111 1111 1111 1111</span>
+          <span style="float:right;font-size:10px;color:var(--accent-emerald);">✓ Luhn</span>
+        </div>
+      </div>
+      <div class="demo-row" style="animation-delay:300ms;">
+        <span class="demo-label">PAN</span>
+        <div class="demo-value">
+          <span style="color:var(--accent-rose);">ABCDE1234F</span>
+          <span style="float:right;font-size:10px;color:var(--accent-emerald);">✓ Regex</span>
+        </div>
+      </div>
+      <div class="demo-row" style="animation-delay:450ms;">
+        <span class="demo-label">Phone</span>
+        <div class="demo-value">
+          <span style="color:var(--accent-rose);">+91-98765-43210</span>
+          <span style="float:right;font-size:10px;color:var(--accent-emerald);">✓ Pattern</span>
+        </div>
+      </div>
+      <div class="demo-row" style="animation-delay:600ms;">
+        <span class="demo-label">NER</span>
+        <div class="demo-value">
+          <span class="type">[PER]</span> <span style="color:var(--accent-rose);">Rahul Sharma</span>
+          <span style="float:right;font-size:10px;color:var(--accent-cyan);">bert-base-NER</span>
+        </div>
+      </div>
+    </div>
+    ${codeLine('', 700)}
+    ${codeLine('<span class="comment">// Mathematical verification — no false positives</span>', 750)}
+    ${codeLine('<span class="func">verhoeff</span>(<span class="string">"234567890123"</span>) → <span class="highlight">true</span> → <span class="keyword">REDACT</span>', 850)}
+  `;
+}
+
+function buildFuseDemo(el) {
+  el.innerHTML = `
+    <div class="grid-visual" style="opacity:0;animation:codeFadeIn 0.5s 0ms forwards;">
+      ${Array.from({length: 30}, (_, i) => {
+        const pii = [4,5,10,11,16,17,22,23,27].includes(i);
+        const safe = !pii;
+        return `<div class="grid-cell ${pii ? 'pii' : 'safe'}" style="animation-delay:${i*40}ms"></div>`;
+      }).join('')}
+    </div>
+    <div style="display:flex;gap:16px;margin:12px 0;font-size:11px;opacity:0;animation:codeFadeIn 0.4s 400ms forwards;">
+      <span style="color:var(--accent-rose);">■ PII Detected</span>
+      <span style="color:var(--accent-emerald);">■ Safe Region</span>
+    </div>
+    ${codeLine('<span class="comment">// IoU merge: overlapping DOM + OCR + NER boxes</span>', 500)}
+    ${codeLine('<span class="keyword">for</span> (<span class="keyword">const</span> box <span class="keyword">of</span> candidates) {', 600)}
+    ${codeLine('&nbsp;&nbsp;<span class="keyword">if</span> (iou > <span class="number">0.30</span>) <span class="func">merge</span>(existing, box);', 700)}
+    ${codeLine('}', 750)}
+    ${codeLine('', 800)}
+    ${codeLine('<span class="comment">// Tier classification</span>', 850)}
+    ${codeLine('score ≥ <span class="number">0.80</span> → <span class="highlight">REDACT</span>&nbsp;&nbsp; | &nbsp;≥ <span class="number">0.50</span> → <span class="keyword">REVIEW</span>&nbsp;&nbsp; | &nbsp;else → <span class="func">KEEP</span>', 950)}
+    <div style="display:flex;gap:8px;margin-top:8px;opacity:0;animation:codeFadeIn 0.4s 1050ms forwards;">
+      <span class="status-badge warn">⚡ 9 regions merged</span>
+      <span class="status-badge pass">✓ 14 confirmed PII</span>
+    </div>
+  `;
+}
+
+function buildRedactDemo(el) {
+  el.innerHTML = `
+    <div style="position:relative;background:linear-gradient(135deg,rgba(99,102,241,0.03),rgba(34,211,238,0.03));border-radius:12px;border:1px solid rgba(99,102,241,0.08);padding:16px;margin-bottom:10px;font-family:var(--font-mono);font-size:12px;line-height:2;opacity:0;animation:codeFadeIn 0.5s 0ms forwards;">
+      <div style="color:var(--text-secondary);">
+        Name: <span class="redacted" style="width:100px;display:inline-block;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><br>
+        Aadhaar: <span class="redacted" style="width:130px;display:inline-block;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><br>
+        Phone: <span class="redacted" style="width:120px;display:inline-block;">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</span><br>
+        Email: user@company.com <span style="color:var(--accent-emerald);font-size:10px;">← safe</span><br>
+        <div style="display:inline-block;width:50px;height:50px;background:#000;border-radius:4px;vertical-align:middle;margin-top:4px;position:relative;">
+          <span style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);font-size:7px;color:rgba(244,63,94,0.6);font-weight:700;letter-spacing:1px;">FACE</span>
+        </div>
+        <span style="color:var(--accent-rose);font-size:10px;vertical-align:middle;margin-left:8px;">← #000 opaque fill</span>
+      </div>
+    </div>
+    ${codeLine('<span class="comment">// Solid black — NOT a reversible blur</span>', 400)}
+    ${codeLine('ctx.<span class="func">fillStyle</span> = <span class="string">"#000000"</span>;', 500)}
+    ${codeLine('ctx.<span class="func">fillRect</span>(box.x, box.y, box.w, box.h);', 600)}
+    <div style="display:flex;gap:8px;margin-top:10px;opacity:0;animation:codeFadeIn 0.4s 700ms forwards;">
+      <span class="status-badge pass">✓ 14 boxes redacted</span>
+      <span class="status-badge pass">🔒 Pixel overwrite</span>
+    </div>
+  `;
+}
+
+function buildSanitizeDemo(el) {
+  el.innerHTML = `
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;opacity:0;animation:codeFadeIn 0.3s 0ms forwards;">Before (Raw DOM)</div>
+      <div style="padding:12px;border-radius:8px;background:rgba(244,63,94,0.05);border:1px solid rgba(244,63,94,0.15);font-family:var(--font-mono);font-size:12px;color:var(--accent-rose);opacity:0;animation:codeFadeIn 0.4s 100ms forwards;">
+        &lt;span&gt;<strong>Rahul Sharma</strong>&lt;/span&gt;<br>
+        &lt;input value="<strong>2345 6789 0123</strong>"&gt;<br>
+        &lt;td&gt;<strong>+91-98765-43210</strong>&lt;/td&gt;
+      </div>
+
+      <div class="arrow-flow" style="opacity:0;animation:codeFadeIn 0.3s 350ms forwards;">
+        <div class="arrow-segment"></div>
+        <span class="arrow-icon">→</span>
+        <span style="font-size:11px;color:var(--accent-emerald);">DOM Tokenization</span>
+      </div>
+
+      <div style="font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;opacity:0;animation:codeFadeIn 0.3s 500ms forwards;">After (Sanitized DOM)</div>
+      <div style="padding:12px;border-radius:8px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.15);font-family:var(--font-mono);font-size:12px;color:var(--accent-emerald);opacity:0;animation:codeFadeIn 0.4s 600ms forwards;">
+        &lt;span&gt;<strong>[REDACTED]</strong>&lt;/span&gt;<br>
+        &lt;input value="<strong>[REDACTED]</strong>"&gt;<br>
+        &lt;td&gt;<strong>[REDACTED]</strong>&lt;/td&gt;
+      </div>
+    </div>
+    ${codeLine('', 750)}
+    ${codeLine('<span class="comment">// Token IDs preserved for action mapping</span>', 800)}
+    ${codeLine('<span class="string">"dom-tok-1"</span> → <span class="highlight">[REDACTED]</span>&nbsp;&nbsp;<span class="comment">// was: name</span>', 900)}
+    ${codeLine('<span class="string">"dom-tok-2"</span> → <span class="highlight">[REDACTED]</span>&nbsp;&nbsp;<span class="comment">// was: aadhaar</span>', 1000)}
+  `;
+}
+
+function buildAuditDemo(el) {
+  el.innerHTML = `
+    ${codeLine('<span class="comment">// Post-redaction pixel verification</span>', 0)}
+    ${codeLine('<span class="keyword">for</span> (<span class="keyword">const</span> box <span class="keyword">of</span> redactedBoxes) {', 100)}
+    ${codeLine('&nbsp;&nbsp;<span class="keyword">const</span> pixels = ctx.<span class="func">getImageData</span>(box);', 200)}
+    ${codeLine('&nbsp;&nbsp;<span class="keyword">const</span> allBlack = pixels.<span class="func">every</span>(', 300)}
+    ${codeLine('&nbsp;&nbsp;&nbsp;&nbsp;p => p.r === <span class="number">0</span> && p.g === <span class="number">0</span> && p.b === <span class="number">0</span>', 400)}
+    ${codeLine('&nbsp;&nbsp;);', 450)}
+    ${codeLine('', 500)}
+    ${codeLine('&nbsp;&nbsp;<span class="keyword">if</span> (!allBlack) {', 550)}
+    ${codeLine('&nbsp;&nbsp;&nbsp;&nbsp;box.<span class="func">expand</span>(<span class="number">1.25</span>); <span class="comment">// +25%</span>', 650)}
+    ${codeLine('&nbsp;&nbsp;&nbsp;&nbsp;ctx.<span class="func">fillRect</span>(box); <span class="comment">// re-redact</span>', 750)}
+    ${codeLine('&nbsp;&nbsp;}', 800)}
+    ${codeLine('}', 850)}
+    <div style="margin-top:12px;padding:10px;border-radius:8px;background:rgba(16,185,129,0.05);border:1px solid rgba(16,185,129,0.1);display:flex;flex-direction:column;gap:6px;opacity:0;animation:codeFadeIn 0.4s 950ms forwards;">
+      <div style="display:flex;justify-content:space-between;font-size:12px;">
+        <span style="color:var(--text-muted);">Boxes verified:</span>
+        <span style="color:var(--accent-emerald);font-weight:600;">14/14</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;">
+        <span style="color:var(--text-muted);">Re-redacted:</span>
+        <span style="color:var(--accent-orange);font-weight:600;">1 (edge blur)</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:12px;">
+        <span style="color:var(--text-muted);">Status:</span>
+        <span class="status-badge pass" style="font-size:10px;">✓ EYE-READY</span>
+      </div>
+    </div>
+  `;
+}
+
+function buildInterpretDemo(el) {
+  el.innerHTML = `
+    ${codeLine('<span class="comment">// VLM sees ONLY the redacted screenshot</span>', 0)}
+    ${codeLine('<span class="keyword">const</span> response = <span class="keyword">await</span> <span class="func">vlm.interpret</span>({', 100)}
+    ${codeLine('&nbsp;&nbsp;image: <span class="string">redactedScreenshot</span>,&nbsp;<span class="comment">// all PII blacked</span>', 200)}
+    ${codeLine('&nbsp;&nbsp;dom: <span class="string">sanitizedDOM</span>,&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="comment">// [REDACTED] tokens</span>', 300)}
+    ${codeLine('&nbsp;&nbsp;model: <span class="string">"Qwen3-VL-8B-Instruct"</span>', 400)}
+    ${codeLine('});', 450)}
+    ${codeLine('', 500)}
+    <div style="padding:12px;border-radius:8px;background:rgba(245,158,11,0.05);border:1px solid rgba(245,158,11,0.1);margin:4px 0;opacity:0;animation:codeFadeIn 0.4s 600ms forwards;">
+      <div style="font-size:10px;color:var(--accent-orange);font-weight:600;margin-bottom:6px;">🧠 VLM REASONING</div>
+      <div style="font-family:var(--font-mono);font-size:11px;color:var(--text-secondary);line-height:1.6;">
+        "I see a form with blacked-out fields. There is a<br>
+        <span style="color:var(--accent-emerald);">'Submit'</span> button at dom-tok-42. The user likely<br>
+        wants me to click it to proceed."
+      </div>
+    </div>
+    ${codeLine('<span class="comment">// The VLM never sees: names, numbers, faces</span>', 800)}
+    <div style="display:flex;gap:8px;margin-top:8px;opacity:0;animation:codeFadeIn 0.4s 900ms forwards;">
+      <span class="status-badge pass">🔒 Zero PII exposure</span>
+      <span class="status-badge warn">🧠 Action planned</span>
+    </div>
+  `;
+}
+
+function buildPlanDemo(el) {
+  el.innerHTML = `
+    ${codeLine('<span class="comment">// VLM returns structured action</span>', 0)}
+    ${codeLine('<span class="keyword">const</span> action = {', 100)}
+    ${codeLine('&nbsp;&nbsp;type: <span class="string">"click"</span>,', 200)}
+    ${codeLine('&nbsp;&nbsp;elementToken: <span class="string">"dom-tok-42"</span>,', 300)}
+    ${codeLine('&nbsp;&nbsp;description: <span class="string">"Click Submit button"</span>', 400)}
+    ${codeLine('};', 450)}
+    ${codeLine('', 500)}
+    ${codeLine('<span class="comment">// Browser validates token locally</span>', 550)}
+    ${codeLine('<span class="keyword">const</span> element = <span class="func">resolveToken</span>(<span class="string">"dom-tok-42"</span>);', 650)}
+    ${codeLine('<span class="keyword">if</span> (element) element.<span class="func">click</span>();', 750)}
+
+    <div class="loop-visual" style="margin-top:14px;opacity:0;animation:codeFadeIn 0.4s 850ms forwards;">
+      <span class="loop-arrow">🔄</span>
+      <div>
+        <div style="font-size:12px;font-weight:600;color:var(--accent-emerald);">Agentic Loop Complete</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:2px;">
+          Execute action → Re-capture screen → Run pipeline again
+        </div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:10px;opacity:0;animation:codeFadeIn 0.4s 1000ms forwards;">
+      <span class="status-badge pass">✓ Token validated</span>
+      <span class="status-badge pass">✓ Action executed</span>
+      <span class="status-badge processing">🔁 Re-capturing...</span>
+    </div>
+  `;
+}
+
+// Initialize first demo (intro has no demo)
+</script>
+</body>
+</html>
